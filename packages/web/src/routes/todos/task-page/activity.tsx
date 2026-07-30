@@ -23,6 +23,7 @@ import {
   type WorkItemEventWire,
 } from "@/lib/api"
 import { STATUS_LABEL, commentAuthorLabel, operatorSafeTodoError } from "@/lib/todos"
+import { formatMessage } from "@/components/chat/message-markdown"
 import { EmployeeAvatar } from "@/components/ui/employee-avatar"
 import { buildCommentThread, type CommentThreadNode } from "../comment-thread"
 import { displayNameOf, formatRelativeTime } from "../util"
@@ -35,12 +36,13 @@ import { formatBytes } from "./attachments"
  * "▸ N quiet updates" (comments NEVER collapse — the feed stays centered on
  * voices). Comments wear the delegation grammar: attribution row (22px emoji
  * avatar + name + age) + rail-quoted body, one reply level, tombstones keep
- * shape, attachments as chips aligned to the rail indent. The composer sits
- * in-flow at the feed's end and GROWS into a card when attachments are
+ * shape, attachments as chips aligned to the rail indent. The desktop composer
+ * sits in-flow before the feed and GROWS into a card when attachments are
  * pending (chips row above the input, floating ×). This IS the bounce/audit
  * history — expanding every fold reaches the full log. */
 
 const FOLD_THRESHOLD = 3
+const HTML_COMMENT_LINE = /^\s*<!--(?:(?!-->).)*-->\s*$/
 
 /** Comment voices render themselves; their audit shadows would double them. */
 const FEED_HIDDEN_KINDS = new Set(["comment_added", "comment_edited", "comment_deleted", "none"])
@@ -85,6 +87,17 @@ export function buildFeed(events: WorkItemEventWire[], comments: WorkItemComment
   }
   flushRun()
   return blocks
+}
+
+export function stripCommentMarkers(body: string): string {
+  let inCodeBlock = false
+  return body.split("\n").filter((line) => {
+    if (line.startsWith("```")) {
+      inCodeBlock = !inCodeBlock
+      return true
+    }
+    return inCodeBlock || !HTML_COMMENT_LINE.test(line)
+  }).join("\n")
 }
 
 function actorLabel(actor: string | null, byName: Map<string, Employee>): string {
@@ -284,11 +297,13 @@ function CommentBlock({
           </div>
         </div>
       ) : (
-        <div className="relative ml-[30px] mt-[7px] py-0.5 pl-3 text-[15px] leading-[1.55]">
+        <div className={`relative ml-[30px] mt-[7px] py-0.5 pl-3 text-[15px] leading-[1.55] ${
+          tombstoned ? "" : "break-words text-[var(--text-secondary)]"
+        }`}>
           <span aria-hidden className="absolute bottom-[3px] left-0 top-[3px] w-[2px] rounded-[1px] bg-[var(--fill-primary)]" />
-          <span className={tombstoned ? "italic text-[var(--text-quaternary)]" : "whitespace-pre-wrap break-words text-[var(--text-secondary)]"}>
-            {tombstoned ? "[deleted]" : comment.body}
-          </span>
+          {tombstoned
+            ? <span className="italic text-[var(--text-quaternary)]">[deleted]</span>
+            : formatMessage(stripCommentMarkers(comment.body))}
         </div>
       )}
       <AttachmentChips attachments={attachments} workItemId={workItemId} />
@@ -373,11 +388,11 @@ export function ActivitySection({
   }, [attachmentsQuery.data])
 
   const blocks = useMemo(
-    () => buildFeed(detail.events, commentsQuery.data?.comments ?? []),
+    () => buildFeed(detail.events, commentsQuery.data?.comments ?? []).reverse(),
     [detail.events, commentsQuery.data],
   )
 
-  const [openFolds, setOpenFolds] = useState<Set<number>>(new Set())
+  const [openFolds, setOpenFolds] = useState<Set<string>>(new Set())
   const [draft, setDraft] = useState("")
   const [replyTo, setReplyTo] = useState<WorkItemCommentWire | null>(null)
   const [pending, setPending] = useState<PendingFile[]>([])
@@ -590,8 +605,14 @@ export function ActivitySection({
       />
       <div className="mb-1.5 mt-8 text-[17px] font-bold tracking-[-0.24px] text-[var(--text-primary)]">Activity</div>
 
+      {!mobile && (
+        <div className="mb-4" data-testid="task-composer">
+          {composerCore}
+        </div>
+      )}
+
       <div>
-        {blocks.map((block, index) => {
+        {blocks.map((block) => {
           if (block.kind === "comment") {
             return (
               <div key={`comment-${block.node.comment.id}`}>
@@ -618,18 +639,19 @@ export function ActivitySection({
             )
           }
           if (block.kind === "event") return <WhisperLine key={`event-${block.event.id}`} event={block.event} byName={byName} />
-          const open = openFolds.has(index)
+          const foldId = block.events[0].id
+          const open = openFolds.has(foldId)
           return (
-            <div key={`fold-${index}`}>
+            <div key={`fold-${foldId}`}>
               <button
                 type="button"
-                data-testid={`activity-fold-${index}`}
+                data-testid={`activity-fold-${foldId}`}
                 aria-expanded={open}
                 onClick={() =>
                   setOpenFolds((current) => {
                     const next = new Set(current)
-                    if (next.has(index)) next.delete(index)
-                    else next.add(index)
+                    if (next.has(foldId)) next.delete(foldId)
+                    else next.add(foldId)
                     return next
                   })
                 }
@@ -643,7 +665,7 @@ export function ActivitySection({
                 />
                 {block.events.length} quiet updates
               </button>
-              {open && block.events.map((event) => <WhisperLine key={event.id} event={event} byName={byName} />)}
+              {open && block.events.slice().reverse().map((event) => <WhisperLine key={event.id} event={event} byName={byName} />)}
             </div>
           )
         })}
@@ -663,15 +685,8 @@ export function ActivitySection({
         }}
       />
 
-      {/* Desktop: in-flow at the feed's end. Mobile: the fixed bottom bar
-          (material blur, safe-area) is THE composer (§8). */}
-      {!mobile ? (
-        <div className="mt-4" data-testid="task-composer">
-          {composerCore}
-        </div>
-      ) : (
-        mobileBar
-      )}
+      {/* Mobile: the fixed bottom bar (material blur, safe-area) is THE composer (§8). */}
+      {mobile && mobileBar}
     </div>
   )
 }
