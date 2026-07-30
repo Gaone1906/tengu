@@ -781,7 +781,7 @@ function inlineFormat(text: string): React.ReactNode {
         </a>
       )
     } else if (match[4]) {
-      parts.push(<strong key={match.index} className="font-[var(--weight-bold)]">{match[5]}</strong>)
+      parts.push(<strong key={match.index} className="font-[var(--weight-bold)]">{inlineFormat(match[5])}</strong>)
     } else if (match[6]) {
       // Inline `code` — but if it's actually a file path, make it a viewer link.
       // Agents almost always wrap paths in backticks, so this is the common case.
@@ -793,7 +793,7 @@ function inlineFormat(text: string): React.ReactNode {
         parts.push(<InlineCode key={match.index}>{match[7]}</InlineCode>)
       }
     } else if (match[8]) {
-      parts.push(<em key={match.index} className="italic opacity-[0.85]">{match[8]}</em>)
+      parts.push(<em key={match.index} className="italic opacity-[0.85]">{inlineFormat(match[8])}</em>)
     } else if (match[9]) {
       // Bare (un-backticked) file path → viewer link
       parts.push(renderPathLink(match[9], match.index))
