@@ -953,7 +953,7 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
 
   /** Track the installed Claude CLI's observed monitor lifecycle. A top-level
    *  PostToolUse Bash returns backgroundTaskId when launch succeeds; TaskStop
-   *  returns the same id with task_type=local_bash when termination succeeds.
+   *  PostToolUse carries the stopped id in tool_input when termination succeeds.
    *  Background Bash calls made inside Task subagents carry agent_id and are
    *  not session monitors. */
   private handleBackgroundMonitorHook(jinnSessionId: string, hook: HookPayload): void {
@@ -977,10 +977,9 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
       add = true;
     } else if (
       hook.tool_name === "TaskStop"
-      && response?.task_type === "local_bash"
-      && typeof response.task_id === "string"
+      && typeof input?.task_id === "string"
     ) {
-      taskId = response.task_id;
+      taskId = input.task_id;
     }
     if (!taskId) return;
 

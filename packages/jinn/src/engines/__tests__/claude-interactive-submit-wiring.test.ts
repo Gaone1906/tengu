@@ -235,7 +235,11 @@ describe("InteractiveClaudeEngine — submit confirmation wiring", () => {
       hook_event_name: "PostToolUse",
       tool_name: "TaskStop",
       tool_input: { task_id: "task-1" },
-      tool_response: { task_id: "task-1", task_type: "local_bash" },
+      tool_response: JSON.stringify({
+        message: "Successfully stopped task: task-1",
+        task_id: "task-1",
+        task_type: "local_bash",
+      }),
     });
     hookCb!({ hook_event_name: "Stop", last_assistant_message: "stopped" });
     await stopTurn;
