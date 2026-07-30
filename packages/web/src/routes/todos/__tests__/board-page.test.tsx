@@ -365,6 +365,20 @@ describe("card anatomy", () => {
     expect(card.textContent).toContain("Approval")
   })
 
+  it("adds a markdown-free preview line from the Todo body", async () => {
+    rows.backlog = [compact({ id: "PLA-15", status: "backlog" })]
+    const tree = emptyTree("PLA-15")
+    tree.root.body = "## Plan\n\nShip the **quiet** card preview with `one renderer`."
+    getWorkItemTree.mockResolvedValue({ tree })
+    renderBoard("/todos/b/platform")
+
+    const card = await screen.findByTestId("board-card-PLA-15")
+    expect(card.textContent).toContain("Ship the quiet card preview with one renderer.")
+    expect(card.textContent).not.toContain("##")
+    expect(card.textContent).not.toContain("**")
+    expect(card.textContent).not.toContain("`")
+  })
+
   it("renders the roll-up pill from the tree and expands the in-place tray", async () => {
     rows.executing = [compact({ id: "PLA-6", status: "executing" })]
     const tree = emptyTree("PLA-6", "executing")

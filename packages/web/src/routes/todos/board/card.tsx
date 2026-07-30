@@ -7,17 +7,16 @@ import type {
   WorkItemTreeWire,
 } from "@/lib/api"
 import { publicWorkItemReference } from "@/lib/todos"
+import { stripMarkdown } from "@/lib/strip-markdown"
 import { EmployeeAvatar } from "@/components/ui/employee-avatar"
 import { StateCircle } from "../state-glyph"
 import { stateKeyOf } from "@/lib/todos"
 import { CardTree } from "./card-tree"
 
 /* Todos v2 slice 6 — the board card (design-doc §3, states mock specimen 3).
- * Everything the assignment names, nothing else: status is NEVER on the card —
- * the column says it. Card padding 12×13 (polish law 11), radius 14, ambient +
- * subtle + inset-shine, hover bg-tertiary. Mobile (<700px) collapses to the
- * flat Linear-iOS row (§8): leading priority bars + disc, one-line title,
- * trailing roll-up + avatar. */
+ * Status is NEVER on the card — the column says it. Variant A adds one quiet,
+ * markdown-free body preview so the board carries enough context to choose a
+ * conversation. Mobile keeps the same preview under its compact title row. */
 
 export interface CardEnrichment {
   tree?: WorkItemTreeWire
@@ -155,6 +154,7 @@ export const BoardCard = memo(function BoardCard({
   const approvalPending = item.approvalState === "pending"
   const sessionRefLabel = publicWorkItemReference(item.sessionRef?.ref ?? null)
   const addSubTask = useCallback((title: string) => onAddSubTask(item.id, title), [item.id, onAddSubTask])
+  const bodyPreview = stripMarkdown(tree?.root.body ?? "").replace(/\s*\n+\s*/g, " ")
 
   return (
     <article
@@ -217,6 +217,12 @@ export const BoardCard = memo(function BoardCard({
       <div className="mt-1 line-clamp-2 text-[15px] font-medium leading-[1.3] text-[var(--text-primary)] max-[700px]:m-0 max-[700px]:line-clamp-1 max-[700px]:min-w-0 max-[700px]:flex-1 max-[700px]:text-[16px]">
         {item.title}
       </div>
+
+      {bodyPreview && (
+        <div className="mt-1.5 line-clamp-1 min-w-0 text-[12.5px] leading-[1.35] text-[var(--text-tertiary)] max-[700px]:ml-[50px] max-[700px]:mt-[-4px] max-[700px]:basis-full max-[700px]:pr-2">
+          {bodyPreview}
+        </div>
+      )}
 
       {/* Labels: dot + name chips. */}
       {(item.labels?.length ?? 0) > 0 && (

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useLocation, useNavigate, useParams } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { ChevronDown } from "lucide-react"
 import {
   api,
   ApiError,
@@ -11,7 +12,7 @@ import {
   type WorkItemStatusWire,
   type WorkItemTreeNodeWire,
 } from "@/lib/api"
-import { STATUS_LABEL, operatorSafeTodoError, publicWorkItemReference } from "@/lib/todos"
+import { operatorSafeTodoError } from "@/lib/todos"
 import { isTodoId, todoPath } from "@/lib/todo-id"
 import { useDepartments } from "@/hooks/use-departments"
 import { PageLayout } from "@/components/page-layout"
@@ -31,21 +32,22 @@ import { PropsRail } from "./props-rail"
 import { ChipCluster } from "./chip-cluster"
 import { useTaskPickers } from "./use-task-pickers"
 import { BodyEditor } from "./body-editor"
-import { AcceptanceChecklist } from "./acceptance"
+import { AcceptanceChecklist, parseAcceptance } from "./acceptance"
 import { SubTasksSection } from "./subtasks"
 import { RelationsSection } from "./relations"
 import { AttachmentsSection } from "./attachments"
 import { ActivitySection } from "./activity"
-import { formatRelativeTime } from "../util"
 
-/* Todos v2 slice 6 stage B — the opened task as a full-page takeover of the
- * todos route (design-doc §7, mock task-detail.html = the visual truth).
- * Two columns on one 96px content spine: main (≤760px) — banner zone, title,
- * meta, body, sections, activity — and the 288px chrome-free properties rail,
- * 72px gutter. The URL is the todo; back/breadcrumb returns to the board with
- * its scroll preserved (POP → the board's own scroll cache). */
+/* Variant A keeps the Todo's live conversation on the page and folds its
+ * document sections behind one Details row. Core working properties stay in
+ * the header; the full editor and less-frequent properties remain one tap
+ * away. The URL is still the Todo, and back restores the board's scroll. */
 
 const MOBILE_QUERY = "(max-width: 700px)"
+
+function wordCount(text: string | null): number {
+  return text?.trim() ? text.trim().split(/\s+/).length : 0
+}
 function useIsTaskMobile(): boolean {
   const [mobile, setMobile] = useState(
     () => typeof window !== "undefined" && (window.matchMedia?.(MOBILE_QUERY).matches ?? false),
@@ -295,14 +297,21 @@ export default function TaskPage() {
   )
 
   const working = detail ? workingElapsed(detail) : null
-  // The delegation grammar shows the human-readable ref SUFFIX of a
-  // session/delegate sourceRef (the gateway's sessionRef() parse), never the
-  // transport prefix.
-  const sessionRefLabel = useMemo(() => {
-    const raw = item?.sourceRef ?? null
-    const parsed = raw ? /^(?:session|delegate):[^:]+:(.+)$/.exec(raw) : null
-    return publicWorkItemReference(parsed ? parsed[1] : raw)
-  }, [item?.sourceRef])
+  const [detailsOpen, setDetailsOpen] = useState(false)
+  const detailSummary = useMemo(() => {
+    if (!item) return ""
+    const acceptance = parseAcceptance(item.acceptance)
+    const checked = acceptance.filter((line) => line.checked).length
+    const subTasks = itemNode?.children?.length ?? 0
+    const attachments = (attachmentsQuery.data ?? []).filter((attachment) => attachment.commentId === null).length
+    const bodyWords = wordCount(item.body)
+    return [
+      acceptance.length > 0 ? `Acceptance ${checked}/${acceptance.length}` : null,
+      `${subTasks} sub-task${subTasks === 1 ? "" : "s"}`,
+      `${attachments} attachment${attachments === 1 ? "" : "s"}`,
+      `body ${bodyWords} word${bodyWords === 1 ? "" : "s"}`,
+    ].filter(Boolean).join(" · ")
+  }, [item, itemNode, attachmentsQuery.data])
 
   // ── Not found / loading ───────────────────────────────────────────────────
   if (!id) {
@@ -365,11 +374,9 @@ export default function TaskPage() {
             className={
               mobile
                 ? "flex flex-col px-4 pb-[calc(96px+var(--safe-bottom,0px))] pt-1.5"
-                : "grid max-w-[1360px] gap-x-[72px] pb-24 pl-[96px] pr-[64px] pt-6"
+                : "w-full max-w-[920px] px-10 pb-8 pt-2"
             }
-            style={mobile ? undefined : { gridTemplateColumns: "minmax(0, 760px) 288px" }}
           >
-            {/* ── Main column ── */}
             <div className="min-w-0">
               {detail && (
                 <TaskBanner
@@ -423,127 +430,124 @@ export default function TaskPage() {
                 </div>
               )}
 
-              {/* Title on the spine (text at 96px; the block bleeds -8px) —
-                  inline-edit on tap, borderless (Notes pattern). */}
               <TaskTitle
                 title={item?.title ?? null}
                 mobile={mobile}
                 onCommit={(title) => pickers.patchField({ title })}
               />
 
-              {!mobile && item && (
-                <div className="ml-px mt-2 flex items-center gap-2 text-[13px] text-[var(--text-tertiary)]" data-testid="task-meta-line">
-                  <span>{STATUS_LABEL[item.status]}</span>
-                  {item.status === "executing" && hasLiveSession && working && (
-                    <>
-                      <MetaDot />
-                      <span className="flex items-center gap-1.5 font-medium text-[var(--system-blue)]">
-                        <span
-                          className="size-1.5 rounded-full bg-[var(--system-blue)] motion-safe:animate-[jinn-pulse_1.4s_ease-in-out_infinite]"
-                          aria-hidden
-                        />
-                        Working · {working}
-                      </span>
-                    </>
-                  )}
-                  {item.status === "executing" && hasLiveSession && sessionRefLabel && (
-                    <>
-                      <MetaDot />
-                      <span className="text-[11px]" style={{ fontFamily: "var(--font-code)" }}>
-                        {sessionRefLabel}
-                      </span>
-                    </>
-                  )}
-                  {item.status !== "executing" && <><MetaDot /><span>updated {formatRelativeTime(item.updatedAt)}</span></>}
-                </div>
-              )}
-
-              {/* Mobile property chip cluster — directly under the title (§8);
-                  every chip opens its picker as a bottom sheet. */}
-              {mobile && detail && (
+              {detail && (
                 <ChipCluster
                   detail={detail}
                   byName={byName}
-                  departments={departments.data}
-                  onOpenPicker={pickers.setOpenPicker}
+                  mobile={mobile}
+                  working={hasLiveSession ? working : null}
+                  onOpenPicker={(key) => {
+                    if (!mobile) setDetailsOpen(true)
+                    pickers.setOpenPicker(key)
+                  }}
                 />
               )}
 
-              {/* Body — read-only markdown at rest; the §7.4 live editor loads
-                  on entry and keeps the stored body as plain markdown. Wash
-                  stays on the block container only (mock .body-text). */}
-              <div
-                className="-mx-2 mt-6 rounded-[10px] px-2 py-1.5 transition-colors hover:bg-[var(--fill-quaternary)] focus-within:bg-[var(--fill-quaternary)]"
-                data-testid="task-body"
+              <button
+                type="button"
+                data-testid="task-details-toggle"
+                aria-expanded={detailsOpen}
+                aria-controls="task-details-content"
+                onClick={() => setDetailsOpen((open) => !open)}
+                className="focus-ring mt-4 flex min-h-10 w-full items-center gap-2.5 rounded-[var(--radius-lg)] bg-[var(--fill-quaternary)] px-3.5 text-left text-[13px] text-[var(--text-secondary)] outline-none hover:bg-[var(--fill-tertiary)]"
               >
-                {item && (
-                  <BodyEditor
-                    body={item.body}
-                    editable
-                    isDark={isDark}
-                    onCommit={(markdown) => pickers.patchField({ body: markdown })}
-                  />
-                )}
-              </div>
+                <span className="font-semibold">Details</span>
+                <span className="min-w-0 flex-1 truncate text-[var(--text-tertiary)]">{detailSummary}</span>
+                <ChevronDown
+                  size={13}
+                  strokeWidth={2}
+                  aria-hidden
+                  className={`flex-none text-[var(--text-quaternary)] transition-transform duration-150 ${detailsOpen ? "rotate-180" : ""}`}
+                />
+              </button>
 
-              {/* Acceptance — first-class checklist; checks are audited edits. */}
-              {item && (
-                <section className="mt-2">
-                  <div
-                    className="mb-3 mt-8 text-[11px] font-semibold uppercase tracking-[.15em] text-[var(--text-secondary)]"
-                    style={{ fontFamily: "var(--font-code)" }}
-                  >
-                    Acceptance
-                  </div>
-                  <AcceptanceChecklist
-                    acceptance={item.acceptance}
-                    editable
-                    onCommit={(next) => pickers.patchField({ acceptance: next })}
-                  />
-                </section>
-              )}
-
-              {/* Sub-tasks · relations · attachments (§7.2.8–10). */}
-              {item && (
-                <>
-                  <SubTasksSection
-                    node={itemNode}
-                    parentDepth={item.depth ?? 0}
-                    employees={org.data?.employees ?? []}
-                    byName={byName}
-                    mobile={mobile}
-                    onOpenChild={openTodo}
-                    onChildStatus={(childId, status) => childStatus.mutate({ childId, status })}
-                    onChildAssign={(childId, assignee) => childAssign.mutate({ childId, assignee })}
-                    onAddSubTask={(title) => addSubTask.mutate(title)}
-                  />
-                  <RelationsSection
-                    id={item.id}
-                    relations={detail?.relations ?? []}
-                    onAdd={(srcId, kind, dstId) => addRelation.mutate({ srcId, kind, dstId })}
-                    onRemove={(relation) => removeRelation.mutate(relation)}
-                  />
-                  <AttachmentsSection
-                    attachments={attachmentsQuery.data ?? []}
-                    byName={byName}
-                    onUpload={(files) => uploadAttachments.mutate(files)}
-                    onRemove={(attachment) => removeAttachment.mutate(attachment)}
-                  />
-                </>
-              )}
-
-              {/* Activity — the ONE merged feed, composer at its end. */}
-              {detail && <ActivitySection detail={detail} byName={byName} mobile={mobile} announce={announce} />}
-            </div>
-
-            {/* ── Properties rail (desktop only; mobile uses the chip cluster). ── */}
-            {!mobile && (
-              <div className="row-span-2">
+              <div id="task-details-content" data-testid="task-details-content" hidden={!detailsOpen}>
                 {detail && (
-                  <PropsRail detail={detail} byName={byName} departments={departments.data} rowFor={pickers.rowFor} />
+                  <div className={`mt-6 ${mobile ? "" : "max-w-[320px]"}`}>
+                    <PropsRail
+                      detail={detail}
+                      byName={byName}
+                      departments={departments.data}
+                      rowFor={pickers.rowFor}
+                    />
+                  </div>
+                )}
+
+                <div
+                  className="-mx-2 mt-6 rounded-[10px] px-2 py-1.5 transition-colors hover:bg-[var(--fill-quaternary)] focus-within:bg-[var(--fill-quaternary)]"
+                  data-testid="task-body"
+                >
+                  {item && (
+                    <BodyEditor
+                      body={item.body}
+                      editable
+                      isDark={isDark}
+                      onCommit={(markdown) => pickers.patchField({ body: markdown })}
+                    />
+                  )}
+                </div>
+
+                {item && (
+                  <section className="mt-2">
+                    <div
+                      className="mb-3 mt-8 text-[11px] font-semibold uppercase tracking-[.15em] text-[var(--text-secondary)]"
+                      style={{ fontFamily: "var(--font-code)" }}
+                    >
+                      Acceptance
+                    </div>
+                    <AcceptanceChecklist
+                      acceptance={item.acceptance}
+                      editable
+                      onCommit={(next) => pickers.patchField({ acceptance: next })}
+                    />
+                  </section>
+                )}
+
+                {item && (
+                  <>
+                    <SubTasksSection
+                      node={itemNode}
+                      parentDepth={item.depth ?? 0}
+                      employees={org.data?.employees ?? []}
+                      byName={byName}
+                      mobile={mobile}
+                      onOpenChild={openTodo}
+                      onChildStatus={(childId, status) => childStatus.mutate({ childId, status })}
+                      onChildAssign={(childId, assignee) => childAssign.mutate({ childId, assignee })}
+                      onAddSubTask={(title) => addSubTask.mutate(title)}
+                    />
+                    <RelationsSection
+                      id={item.id}
+                      relations={detail?.relations ?? []}
+                      onAdd={(srcId, kind, dstId) => addRelation.mutate({ srcId, kind, dstId })}
+                      onRemove={(relation) => removeRelation.mutate(relation)}
+                    />
+                    <AttachmentsSection
+                      attachments={attachmentsQuery.data ?? []}
+                      byName={byName}
+                      onUpload={(files) => uploadAttachments.mutate(files)}
+                      onRemove={(attachment) => removeAttachment.mutate(attachment)}
+                    />
+                  </>
                 )}
               </div>
-            )}
+
+              {detail && (
+                <ActivitySection
+                  detail={detail}
+                  byName={byName}
+                  mobile={mobile}
+                  isDark={isDark}
+                  announce={announce}
+                />
+              )}
+            </div>
           </div>
         </div>
       </div>
@@ -561,10 +565,6 @@ export default function TaskPage() {
       )}
     </PageLayout>
   )
-}
-
-function MetaDot() {
-  return <span aria-hidden className="size-[2.5px] rounded-full bg-[var(--text-quaternary)]" />
 }
 
 /** Inline title edit — borderless, Notes pattern: tap to edit, Enter commits,

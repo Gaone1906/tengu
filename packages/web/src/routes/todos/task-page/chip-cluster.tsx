@@ -1,29 +1,27 @@
-import { Calendar } from "lucide-react"
-import type { DepartmentSummaryWire, Employee, WorkItemDetailWire } from "@/lib/api"
-import { STATUS_LABEL, effectiveMaxRounds, effectiveVerifyMode, priorityLabel } from "@/lib/todos"
+import type { Employee, WorkItemDetailWire } from "@/lib/api"
+import { STATUS_LABEL, priorityLabel } from "@/lib/todos"
 import { EmployeeAvatar } from "@/components/ui/employee-avatar"
 import { StatusCircle } from "../state-glyph"
 import { displayNameOf } from "../util"
-import { RailPriorityBars, VerifyPill, formatDueLong } from "./props-rail"
+import { RailPriorityBars } from "./props-rail"
 import type { PickerKey } from "./use-task-pickers"
 
-/* Todos v2 slice 6 — the mobile property chip cluster (design-doc §8, mock
- * task-detail.html): a --fill-quaternary rounded-XL group of wrapping 34px
- * chips directly under the title. Every chip opens the same picker as its rail
- * row, as a bottom sheet (§7.3). */
+/* Variant A — the task's working identity lives directly under its title.
+ * Desktop uses the approved 28px chips; mobile keeps every interactive target
+ * at 34px. Less-frequent properties remain in the folded Details document. */
 
 function Chip({
   onOpen,
   children,
   testId,
   label,
-  ghost,
+  mobile,
 }: {
   onOpen: () => void
   children: React.ReactNode
   testId?: string
   label: string
-  ghost?: boolean
+  mobile: boolean
 }) {
   return (
     <button
@@ -31,10 +29,10 @@ function Chip({
       data-testid={testId}
       aria-label={label}
       onClick={onOpen}
-      className={`focus-ring flex h-[34px] items-center gap-[7px] rounded-[17px] px-3 text-[13.5px] font-medium outline-none ${
-        ghost
-          ? "text-[var(--text-quaternary)]"
-          : "bg-[var(--bg-secondary)] text-[var(--text-primary)] shadow-[var(--shadow-ambient),var(--shadow-subtle)]"
+      className={`focus-ring flex items-center gap-[7px] bg-[var(--fill-tertiary)] font-medium text-[var(--text-secondary)] outline-none hover:bg-[var(--fill-secondary)] ${
+        mobile
+          ? "h-[34px] rounded-[17px] px-3 text-[13.5px]"
+          : "h-7 rounded-[14px] px-[11px] text-[12.5px]"
       }`}
     >
       {children}
@@ -45,42 +43,55 @@ function Chip({
 export function ChipCluster({
   detail,
   byName,
-  departments,
   onOpenPicker,
+  mobile,
+  working,
 }: {
   detail: WorkItemDetailWire
   byName: Map<string, Employee>
-  departments: DepartmentSummaryWire[] | undefined
   onOpenPicker: (key: PickerKey) => void
+  mobile: boolean
+  working?: string | null
 }) {
   const item = detail.workItem
   const labels = detail.labels ?? []
-  const dept = item.department ? departments?.find((d) => d.slug === item.department) : undefined
+  const readChip = mobile
+    ? "flex h-[34px] items-center gap-[7px] rounded-[17px] bg-[var(--fill-tertiary)] px-3 text-[13.5px] font-medium"
+    : "flex h-7 items-center gap-[7px] rounded-[14px] bg-[var(--fill-tertiary)] px-[11px] text-[12.5px] font-medium"
   return (
     <div
       data-testid="task-chip-cluster"
-      className="mt-4 flex flex-wrap gap-2 rounded-[var(--radius-xl)] bg-[var(--fill-quaternary)] p-3"
+      className="mt-3 flex flex-wrap gap-2"
     >
-      <Chip label="Status" testId="chip-status" onOpen={() => onOpenPicker("status")}>
-        <StatusCircle status={item.status} size={18} />
+      <Chip mobile={mobile} label="Status" testId="chip-status" onOpen={() => onOpenPicker("status")}>
+        <StatusCircle status={item.status} size={16} />
         {STATUS_LABEL[item.status]}
       </Chip>
-      <Chip label="Priority" testId="chip-priority" onOpen={() => onOpenPicker("priority")}>
-        <RailPriorityBars priority={item.priority} />
-        {priorityLabel(item.priority)}
-      </Chip>
-      <Chip label="Assignee" testId="chip-assignee" onOpen={() => onOpenPicker("assignee")}>
+      {working && (
+        <span className={`${readChip} text-[var(--system-blue)]`} data-testid="chip-working">
+          <span
+            className="size-1.5 rounded-full bg-[var(--system-blue)] motion-safe:animate-[jinn-pulse_1.4s_ease-in-out_infinite]"
+            aria-hidden
+          />
+          Working · {working}
+        </span>
+      )}
+      <Chip mobile={mobile} label="Assignee" testId="chip-assignee" onOpen={() => onOpenPicker("assignee")}>
         {item.assignee ? (
           <>
-            <EmployeeAvatar name={item.assignee} size={18} fontSize={10} className="bg-[var(--fill-secondary)]" />
+            <EmployeeAvatar name={item.assignee} size={20} fontSize={11} className="bg-[var(--fill-secondary)]" />
             {displayNameOf(item.assignee, byName)}
           </>
         ) : (
           <span className="text-[var(--text-tertiary)]">Unassigned</span>
         )}
       </Chip>
+      <Chip mobile={mobile} label="Priority" testId="chip-priority" onOpen={() => onOpenPicker("priority")}>
+        <RailPriorityBars priority={item.priority} />
+        {priorityLabel(item.priority)}
+      </Chip>
       {labels.length > 0 && (
-        <Chip label="Labels" testId="chip-labels" onOpen={() => onOpenPicker("labels")}>
+        <Chip mobile={mobile} label="Labels" testId="chip-labels" onOpen={() => onOpenPicker("labels")}>
           {labels.map((label) => (
             <span key={label.id} className="flex items-center gap-1">
               <span className="size-[5px] rounded-full" style={{ background: label.color ?? "var(--text-quaternary)" }} />
@@ -89,35 +100,6 @@ export function ChipCluster({
           ))}
         </Chip>
       )}
-      <Chip label="Department" testId="chip-department" onOpen={() => onOpenPicker("department")}>
-        <span className="text-[11px] text-[var(--text-quaternary)]" style={{ fontFamily: "var(--font-code)", letterSpacing: ".04em" }}>
-          {dept?.prefix ?? "—"}
-        </span>
-        {item.department ? item.department.charAt(0).toUpperCase() + item.department.slice(1) : "No department"}
-      </Chip>
-      <Chip label="Due date" testId="chip-due" onOpen={() => onOpenPicker("due")}>
-        <Calendar size={13} strokeWidth={2} aria-hidden className="text-[var(--text-quaternary)]" />
-        {item.dueAt ? formatDueLong(item.dueAt) : "Due"}
-      </Chip>
-      <Chip label="Review policy" testId="chip-verify" onOpen={() => onOpenPicker("verify")}>
-        <VerifyPill mode={effectiveVerifyMode(item)} />
-        <span className="text-[11px] text-[var(--text-quaternary)]">
-          {item.rounds}/{effectiveMaxRounds(item)}
-        </span>
-      </Chip>
-      {(detail.spendUsd > 0 || (item.budgetUsd ?? 0) > 0) && (
-        <span className="flex h-[34px] items-center rounded-[17px] bg-[var(--bg-secondary)] px-3 shadow-[var(--shadow-ambient),var(--shadow-subtle)]">
-          <span className="text-[11px] text-[var(--text-quaternary)]" style={{ fontFamily: "var(--font-code)" }}>
-            ${detail.spendUsd.toFixed(2)}
-            {item.budgetUsd != null && item.budgetUsd > 0 ? ` / $${item.budgetUsd % 1 === 0 ? item.budgetUsd.toFixed(0) : item.budgetUsd.toFixed(2)}` : ""}
-          </span>
-        </span>
-      )}
-      {/* The ghost + is part of the approved cluster anatomy — always present
-          (stage-B review F4), labels or not. */}
-      <Chip label="Add labels" testId="chip-add" ghost onOpen={() => onOpenPicker("labels")}>
-        +
-      </Chip>
     </div>
   )
 }

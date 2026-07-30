@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import {
   ArrowUp,
@@ -23,25 +23,21 @@ import {
   type WorkItemEventWire,
 } from "@/lib/api"
 import { STATUS_LABEL, commentAuthorLabel, operatorSafeTodoError } from "@/lib/todos"
-import { formatMessage } from "@/components/chat/message-markdown"
+import { stripMarkdown } from "@/lib/strip-markdown"
+import { MarkdownView } from "@/components/markdown-view"
 import { EmployeeAvatar } from "@/components/ui/employee-avatar"
 import { buildCommentThread, type CommentThreadNode } from "../comment-thread"
 import { displayNameOf, formatRelativeTime } from "../util"
 import { AttachmentTile, useAttachmentPreview } from "./attachment-preview"
 import { formatBytes } from "./attachments"
 
-/* Todos v2 slice 6 — Activity: ONE merged feed (design-doc §7.2.11, mock
- * task-detail.html). Machine events are one-line whispers (12px glyph + actor
- * + verb + age); runs of ≥3 consecutive audit events collapse into
- * "▸ N quiet updates" (comments NEVER collapse — the feed stays centered on
- * voices). Comments wear the delegation grammar: attribution row (22px emoji
- * avatar + name + age) + rail-quoted body, one reply level, tombstones keep
- * shape, attachments as chips aligned to the rail indent. The desktop composer
- * sits in-flow before the feed and GROWS into a card when attachments are
- * pending (chips row above the input, floating ×). This IS the bounce/audit
- * history — expanding every fold reaches the full log. */
+/* The merged activity feed keeps audit events quiet and comment voices
+ * prominent. Long comments collapse independently to syntax-free previews;
+ * full bodies share MarkdownView with the rest of Jinn. The same multiline
+ * composer docks at the thread edge on desktop and mobile. */
 
 const FOLD_THRESHOLD = 3
+export const COMMENT_COLLAPSE_THRESHOLD = 320
 const HTML_COMMENT_LINE = /^\s*<!--(?:(?!-->).)*-->\s*$/
 
 /** Comment voices render themselves; their audit shadows would double them. */
@@ -190,6 +186,10 @@ function commentAuthor(comment: WorkItemCommentWire, byName: Map<string, Employe
   return commentAuthorLabel(comment.author, comment.authorKind)
 }
 
+function commentPreview(body: string): string {
+  return stripMarkdown(stripCommentMarkers(body)).replace(/\s*\n+\s*/g, " ")
+}
+
 function AttachmentChips({ attachments, workItemId }: { attachments: WorkItemAttachmentWire[]; workItemId: string }) {
   const preview = useAttachmentPreview()
   if (attachments.length === 0) return null
@@ -229,6 +229,7 @@ function AttachmentChips({ attachments, workItemId }: { attachments: WorkItemAtt
 function CommentBlock({
   comment,
   byName,
+  isDark,
   attachments,
   workItemId,
   reply,
@@ -239,6 +240,7 @@ function CommentBlock({
 }: {
   comment: WorkItemCommentWire
   byName: Map<string, Employee>
+  isDark: boolean
   attachments: WorkItemAttachmentWire[]
   workItemId: string
   reply?: boolean
@@ -250,6 +252,8 @@ function CommentBlock({
   busy?: boolean
 }) {
   const tombstoned = comment.deletedAt !== null
+  const collapsible = !tombstoned && comment.body.length > COMMENT_COLLAPSE_THRESHOLD
+  const [expanded, setExpanded] = useState(false)
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState("")
   return (
@@ -297,13 +301,40 @@ function CommentBlock({
           </div>
         </div>
       ) : (
-        <div className={`relative ml-[30px] mt-[7px] py-0.5 pl-3 text-[15px] leading-[1.55] ${
-          tombstoned ? "" : "break-words text-[var(--text-secondary)]"
-        }`}>
-          <span aria-hidden className="absolute bottom-[3px] left-0 top-[3px] w-[2px] rounded-[1px] bg-[var(--fill-primary)]" />
-          {tombstoned
-            ? <span className="italic text-[var(--text-quaternary)]">[deleted]</span>
-            : formatMessage(stripCommentMarkers(comment.body))}
+        <div className="relative ml-[30px] mt-[7px] py-0.5 pl-3 text-[15px] leading-[1.55]">
+          <span
+            aria-hidden
+            className={`absolute bottom-[3px] left-0 top-[3px] w-[2px] rounded-[1px] ${
+              comment.authorKind === "operator"
+                ? "bg-[color-mix(in_srgb,var(--accent)_42%,transparent)]"
+                : "bg-[var(--fill-primary)]"
+            }`}
+          />
+          {tombstoned ? (
+            <span className="italic text-[var(--text-quaternary)]">[deleted]</span>
+          ) : collapsible && !expanded ? (
+            <p className="line-clamp-3 break-words text-[var(--text-tertiary)]">
+              {commentPreview(comment.body)}
+            </p>
+          ) : (
+            <MarkdownView content={stripCommentMarkers(comment.body)} isDark={isDark} density="compact" />
+          )}
+          {collapsible && (
+            <button
+              type="button"
+              aria-expanded={expanded}
+              onClick={() => setExpanded((open) => !open)}
+              className="focus-ring mt-1 flex min-h-[34px] items-center gap-1.5 rounded-full px-2 text-[12px] font-semibold text-[var(--text-tertiary)] outline-none hover:bg-[var(--fill-quaternary)] hover:text-[var(--text-secondary)]"
+            >
+              {expanded ? "Show less" : "Show more"}
+              <ChevronRight
+                size={11}
+                strokeWidth={2.2}
+                aria-hidden
+                className={`transition-transform duration-150 ${expanded ? "-rotate-90" : "rotate-90"}`}
+              />
+            </button>
+          )}
         </div>
       )}
       <AttachmentChips attachments={attachments} workItemId={workItemId} />
@@ -355,11 +386,13 @@ export function ActivitySection({
   detail,
   byName,
   mobile,
+  isDark = true,
   announce,
 }: {
   detail: WorkItemDetailWire
   byName: Map<string, Employee>
   mobile: boolean
+  isDark?: boolean
   announce: (message: string) => void
 }) {
   const qc = useQueryClient()
@@ -397,6 +430,7 @@ export function ActivitySection({
   const [replyTo, setReplyTo] = useState<WorkItemCommentWire | null>(null)
   const [pending, setPending] = useState<PendingFile[]>([])
   const fileRef = useRef<HTMLInputElement>(null)
+  const composerRef = useRef<HTMLTextAreaElement>(null)
 
   const invalidate = () => {
     void qc.invalidateQueries({ queryKey: ["work-item-comments", id] })
@@ -451,6 +485,12 @@ export function ActivitySection({
     if (!body || send.isPending) return
     send.mutate({ body, parentCommentId: replyTo?.id, files: pending.map((p) => p.file) })
   }
+  useEffect(() => {
+    const textarea = composerRef.current
+    if (!textarea) return
+    textarea.style.height = "auto"
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 144)}px`
+  }, [draft])
   const stageFiles = (files: File[]) => {
     setPending((current) => [
       ...current,
@@ -497,14 +537,14 @@ export function ActivitySection({
 
   const inputProps = {
     value: draft,
-    onChange: (e: React.ChangeEvent<HTMLInputElement>) => setDraft(e.target.value),
-    onKeyDown: (e: React.KeyboardEvent<HTMLInputElement>) => {
+    onChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => setDraft(e.target.value),
+    onKeyDown: (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault()
         submit()
       }
     },
-    onPaste: (e: React.ClipboardEvent<HTMLInputElement>) => {
+    onPaste: (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
       const files = [...e.clipboardData.files]
       if (files.length > 0) {
         e.preventDefault()
@@ -516,26 +556,29 @@ export function ActivitySection({
   }
 
   const composerCore = (
-    <div className={pending.length > 0 ? "rounded-[18px] bg-[var(--fill-tertiary)] p-[10px_12px]" : ""}>
+    <div className="rounded-[22px] bg-[var(--bg-secondary)] p-3 shadow-[var(--shadow-card)]">
       {pendingChips && <div className="mb-[9px]">{pendingChips}</div>}
       {replyRow}
-      <div className="flex items-center gap-2">
-        <input
-          {...inputProps}
-          placeholder={replyTo ? "Reply…" : "Add a comment…"}
-          className={`min-w-0 flex-1 text-[14.5px] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-quaternary)] ${
-            pending.length > 0 ? "bg-transparent px-1.5 py-1.5" : "rounded-[18px] bg-[var(--fill-tertiary)] px-4 py-2.5"
-          }`}
-        />
+      <textarea
+        {...inputProps}
+        ref={composerRef}
+        rows={2}
+        placeholder={replyTo ? "Reply…" : mobile ? "Comment" : "Comment…  ⇧↩ for a new line"}
+        className="max-h-36 min-h-12 w-full resize-none overflow-y-auto bg-transparent px-1 text-[15px] leading-[1.5] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-quaternary)]"
+      />
+      <div className="mt-1 flex min-h-[34px] items-center gap-2">
         <button
           type="button"
           aria-label="Attach"
           data-testid="composer-attach"
           onClick={() => fileRef.current?.click()}
-          className="focus-ring grid size-8 flex-none place-items-center rounded-[10px] text-[var(--text-tertiary)] outline-none hover:bg-[var(--fill-secondary)]"
+          className="focus-ring grid size-[34px] flex-none place-items-center rounded-[10px] text-[var(--text-tertiary)] outline-none hover:bg-[var(--fill-secondary)]"
         >
           <Paperclip size={15} strokeWidth={2} aria-hidden />
         </button>
+        <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--text-quaternary)] max-[700px]:hidden">
+          ↩ to send · ⇧↩ new line · markdown
+        </span>
         <button
           type="button"
           aria-label="Send"
@@ -551,66 +594,22 @@ export function ActivitySection({
     </div>
   )
 
-  /* The §8 fixed bottom bar IS the mobile composer (mock task-detail.html
-   * .m-composer): paperclip · "+ Comment" capsule · accent send, material
-   * blur, safe-area padded. It owns the bottom edge — the tab bar yields on
-   * the pushed task page. Pending chips stack above the input row. */
+  /* The mobile composer uses the same card anatomy as desktop, fixed above
+   * the safe area while the task-page takeover hides the tab bar. */
   const mobileBar = (
     <div
       data-testid="task-composer-mobile"
-      className="fixed inset-x-0 bottom-0 z-20 px-4 pb-[max(12px,env(safe-area-inset-bottom))] pt-2.5 backdrop-blur-[20px]"
-      style={{ background: "var(--material-thick)" }}
+      className="fixed inset-x-0 bottom-0 z-20 px-3 pb-[max(12px,env(safe-area-inset-bottom))] pt-2.5"
+      style={{
+        background: "linear-gradient(to bottom, transparent, var(--bg) 18%)",
+      }}
     >
-      {pendingChips && <div className="mb-2.5">{pendingChips}</div>}
-      {replyRow}
-      <div className="flex items-center gap-2.5">
-        <button
-          type="button"
-          aria-label="Attach"
-          data-testid="composer-attach"
-          onClick={() => fileRef.current?.click()}
-          className="focus-ring grid size-[38px] flex-none place-items-center rounded-[12px] text-[var(--text-tertiary)] outline-none hover:bg-[var(--fill-secondary)]"
-        >
-          <Paperclip size={16} strokeWidth={2} aria-hidden />
-        </button>
-        <label className="flex min-h-[42px] min-w-0 flex-1 items-center gap-2 rounded-[21px] bg-[var(--fill-tertiary)] px-4">
-          <Plus size={13} strokeWidth={2.2} className="flex-none text-[var(--text-quaternary)]" aria-hidden />
-          <input
-            {...inputProps}
-            placeholder={replyTo ? "Reply…" : "Comment"}
-            className="min-w-0 flex-1 bg-transparent text-[14.5px] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-quaternary)]"
-          />
-        </label>
-        <button
-          type="button"
-          aria-label="Send"
-          data-testid="composer-send"
-          disabled={send.isPending || !draft.trim()}
-          onClick={submit}
-          className="focus-ring grid size-[38px] flex-none place-items-center rounded-[19px] outline-none disabled:opacity-40"
-          style={{ background: "var(--accent-fill)", color: "var(--accent)", boxShadow: "var(--inset-shine)" }}
-        >
-          <ArrowUp size={15} strokeWidth={2.2} aria-hidden />
-        </button>
-      </div>
+      {composerCore}
     </div>
   )
 
   return (
-    <div data-testid="task-activity">
-      <div
-        aria-hidden
-        className="mt-10 h-px opacity-60"
-        style={{ background: "linear-gradient(90deg, var(--separator), transparent)" }}
-      />
-      <div className="mb-1.5 mt-8 text-[17px] font-bold tracking-[-0.24px] text-[var(--text-primary)]">Activity</div>
-
-      {!mobile && (
-        <div className="mb-4" data-testid="task-composer">
-          {composerCore}
-        </div>
-      )}
-
+    <div className="pt-3" data-testid="task-activity">
       <div>
         {blocks.map((block) => {
           if (block.kind === "comment") {
@@ -619,6 +618,7 @@ export function ActivitySection({
                 <CommentBlock
                   comment={block.node.comment}
                   byName={byName}
+                  isDark={isDark}
                   attachments={attachmentsByComment.get(block.node.comment.id) ?? []}
                   workItemId={id}
                   onReply={() => setReplyTo(block.node.comment)}
@@ -629,6 +629,7 @@ export function ActivitySection({
                     key={replyComment.id}
                     comment={replyComment}
                     byName={byName}
+                    isDark={isDark}
                     attachments={attachmentsByComment.get(replyComment.id) ?? []}
                     workItemId={id}
                     reply
@@ -685,8 +686,19 @@ export function ActivitySection({
         }}
       />
 
-      {/* Mobile: the fixed bottom bar (material blur, safe-area) is THE composer (§8). */}
-      {mobile && mobileBar}
+      {/* Desktop sticks to the inner scroll edge; mobile owns the viewport
+          bottom above the safe area. */}
+      {!mobile ? (
+        <div
+          className="sticky bottom-0 z-10 -mx-2 mt-6 px-2 pb-5 pt-5"
+          data-testid="task-composer"
+          style={{ background: "linear-gradient(to bottom, transparent, var(--bg) 18%)" }}
+        >
+          {composerCore}
+        </div>
+      ) : (
+        mobileBar
+      )}
     </div>
   )
 }

@@ -52,8 +52,8 @@ export function CrumbBar({
       data-testid="task-crumb-bar"
       className={
         mobile
-          ? "flex items-center gap-2 px-2 pb-2 pt-[calc(10px+var(--safe-top,0px))]"
-          : "flex items-center gap-2 py-[16px] pb-3 pl-[96px] pr-[64px]"
+          ? "flex items-center gap-2 px-3.5 pb-2 pt-[calc(10px+var(--safe-top,0px))]"
+          : "flex items-center gap-2 px-10 pb-2 pt-3.5"
       }
     >
       {mobile ? (
@@ -62,7 +62,7 @@ export function CrumbBar({
           aria-label="Back"
           data-testid="task-crumb-back"
           onClick={onBack}
-          className="focus-ring grid size-8 flex-none place-items-center rounded-[10px] text-[var(--text-tertiary)] outline-none hover:bg-[var(--fill-tertiary)] hover:text-[var(--text-secondary)]"
+          className="focus-ring grid size-[34px] flex-none place-items-center rounded-[10px] text-[var(--text-tertiary)] outline-none hover:bg-[var(--fill-tertiary)] hover:text-[var(--text-secondary)]"
         >
           <ChevronLeft size={17} strokeWidth={2.2} aria-hidden />
         </button>
@@ -109,7 +109,7 @@ export function CrumbBar({
           aria-label={`Copy link to ${id}`}
           data-testid="task-copy-link"
           onClick={() => copy(`${window.location.origin}${todoPath(id)}`)}
-          className="focus-ring grid size-8 place-items-center rounded-[10px] text-[var(--text-tertiary)] outline-none hover:bg-[var(--fill-tertiary)] hover:text-[var(--text-secondary)]"
+          className="focus-ring grid size-[34px] place-items-center rounded-[10px] text-[var(--text-tertiary)] outline-none hover:bg-[var(--fill-tertiary)] hover:text-[var(--text-secondary)]"
         >
           <LinkIcon size={14} strokeWidth={2} aria-hidden />
         </button>
@@ -119,7 +119,7 @@ export function CrumbBar({
               type="button"
               aria-label="More"
               data-testid="task-crumb-more"
-              className="focus-ring grid size-8 place-items-center rounded-[10px] text-[var(--text-tertiary)] outline-none hover:bg-[var(--fill-tertiary)] hover:text-[var(--text-secondary)]"
+              className="focus-ring grid size-[34px] place-items-center rounded-[10px] text-[var(--text-tertiary)] outline-none hover:bg-[var(--fill-tertiary)] hover:text-[var(--text-secondary)]"
             >
               <MoreHorizontal size={16} aria-hidden />
             </button>

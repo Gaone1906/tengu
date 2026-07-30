@@ -24,6 +24,8 @@ const getWorkItem = vi.fn()
 const getWorkItemTree = vi.fn()
 const setWorkItemStatus = vi.fn()
 const decideWorkItemApproval = vi.fn()
+const listWorkItemAttachments = vi.fn()
+const listWorkItemComments = vi.fn()
 
 vi.mock("@/lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api")>()
@@ -34,6 +36,10 @@ vi.mock("@/lib/api", async (importOriginal) => {
       getWorkItemTree: (...args: unknown[]) => getWorkItemTree(...args),
       setWorkItemStatus: (...args: unknown[]) => setWorkItemStatus(...args),
       decideWorkItemApproval: (...args: unknown[]) => decideWorkItemApproval(...args),
+      listWorkItemAttachments: (...args: unknown[]) => listWorkItemAttachments(...args),
+      listWorkItemComments: (...args: unknown[]) => listWorkItemComments(...args),
+      workItemAttachmentUrl: (id: string, attachmentId: string) =>
+        `/api/work-items/${id}/attachments/${attachmentId}`,
       listWorkItemSessions: vi.fn().mockResolvedValue([]),
       getDepartments: vi.fn().mockResolvedValue({
         departments: [{ slug: "platform", prefix: "PLA", createdAt: "2026-07-01T00:00:00.000Z", todoCount: 4 }],
@@ -122,6 +128,8 @@ beforeEach(() => {
   getWorkItemTree.mockImplementation((id: string) =>
     Promise.resolve({ tree: { root: treeNode(full(id)), totals: {}, spendUsd: 0 } }),
   )
+  listWorkItemAttachments.mockResolvedValue({ attachments: [] })
+  listWorkItemComments.mockResolvedValue({ comments: [], total: 0 })
 })
 
 afterEach(() => {
@@ -170,19 +178,59 @@ describe("the task page", () => {
     expect(getWorkItemTree).toHaveBeenCalledWith("PLA-12")
   })
 
-  it("renders the rail's read rows: status, priority, assignee, verify, spend", async () => {
-    const item = full("PLA-12", { assignee: "mason", priority: 3, budgetUsd: 10 })
-    getWorkItem.mockResolvedValue({ ...detailOf(item), spendUsd: 4.35 })
+  it("moves the key properties into header chips and folds the document behind Details", async () => {
+    const item = full("PLA-12", {
+      assignee: "mason",
+      priority: 3,
+      budgetUsd: 10,
+      body: "A short **markdown** body",
+      acceptance: "- [x] Works\n- [ ] Ships",
+    })
+    getWorkItemTree.mockResolvedValue({
+      tree: {
+        root: treeNode(item, [treeNode(full("PLA-13", { parentId: "PLA-12", depth: 1 }))]),
+        totals: {},
+        spendUsd: 0,
+      },
+    })
+    listWorkItemAttachments.mockResolvedValue({
+      attachments: [{
+        id: "wia_1",
+        workItemId: "PLA-12",
+        commentId: null,
+        filename: "proof.png",
+        mime: "image/png",
+        bytes: 10,
+        sha256: "abc",
+        storagePath: "/tmp/proof.png",
+        uploadedBy: "operator",
+        createdAt: "2026-07-20T09:00:00.000Z",
+      }],
+    })
+    getWorkItem.mockResolvedValue({
+      ...detailOf(item),
+      spendUsd: 4.35,
+      labels: [{ id: "lbl_1", name: "build", color: null, department: null, createdAt: "2026-07-01T00:00:00.000Z" }],
+    })
     renderTask()
 
-    const rail = await screen.findByTestId("task-props-rail")
-    expect(rail).toBeTruthy()
-    expect((screen.getByTestId("rail-status")).textContent).toContain("Executing")
-    expect((screen.getByTestId("rail-priority")).textContent).toContain("High")
-    expect((screen.getByTestId("rail-assignee")).textContent).toContain("mason")
-    expect((screen.getByTestId("rail-verify")).textContent).toContain("Round 1 of")
-    expect((screen.getByTestId("rail-spend")).textContent).toContain("$4.35")
-    expect((screen.getByTestId("rail-spend")).textContent).toContain("$10")
+    const chips = await screen.findByTestId("task-chip-cluster")
+    expect(chips.textContent).toContain("Executing")
+    expect(chips.textContent).toContain("High")
+    expect(chips.textContent).toContain("mason")
+    expect(chips.textContent).toContain("build")
+
+    const toggle = screen.getByTestId("task-details-toggle")
+    const content = screen.getByTestId("task-details-content") as HTMLDivElement
+    await waitFor(() =>
+      expect(toggle.textContent).toContain("Acceptance 1/2 · 1 sub-task · 1 attachment · body 4 words"),
+    )
+    expect(toggle.getAttribute("aria-expanded")).toBe("false")
+    expect(content.hidden).toBe(true)
+    expect(screen.getByTestId("task-props-rail")).toBeTruthy()
+    fireEvent.click(toggle)
+    expect(toggle.getAttribute("aria-expanded")).toBe("true")
+    expect(content.hidden).toBe(false)
   })
 
   it("banner precedence: escalated wins over a pending approval", async () => {
@@ -351,7 +399,7 @@ describe("the task page", () => {
   it("desktop keeps the tab bar; the in-flow composer is the one composer", async () => {
     getWorkItem.mockResolvedValue(detailOf(full("PLA-12")))
     renderTask()
-    await screen.findByTestId("task-props-rail")
+    await screen.findByTestId("task-chip-cluster")
     expect(screen.getByTestId("page-layout").dataset.hideMobileTabBar).toBe("false")
     expect(screen.getByTestId("task-composer")).toBeTruthy()
     expect(screen.queryByTestId("task-composer-mobile")).toBeNull()
@@ -366,10 +414,9 @@ describe("the task page", () => {
     const bar = screen.getByTestId("task-composer-mobile")
     expect(bar).toBeTruthy()
     // Mock anatomy: paperclip · "+ Comment" capsule · send, in that order.
-    const controls = bar.querySelectorAll("button, input")
-    expect((controls[0] as HTMLElement).getAttribute("aria-label")).toBe("Attach")
-    expect((controls[1] as HTMLInputElement).placeholder).toBe("Comment")
-    expect((controls[2] as HTMLElement).getAttribute("aria-label")).toBe("Send")
+    expect((screen.getByTestId("composer-input") as HTMLTextAreaElement).placeholder).toBe("Comment")
+    expect(screen.getByTestId("composer-attach").getAttribute("aria-label")).toBe("Attach")
+    expect(screen.getByTestId("composer-send").getAttribute("aria-label")).toBe("Send")
     expect(screen.queryByTestId("task-composer")).toBeNull()
   })
 })

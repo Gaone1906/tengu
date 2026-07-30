@@ -58,19 +58,32 @@ export { SyntaxHighlighter, oneDark, oneLight };
 export function MarkdownView({
   content,
   isDark,
+  density = "comfortable",
 }: {
   content: string;
   isDark: boolean;
+  density?: "comfortable" | "compact";
 }) {
   const codeTheme = isDark ? oneDark : oneLight;
+  const compact = density === "compact";
   return (
-    <div className="jinn-markdown min-w-0 max-w-full break-words [overflow-wrap:anywhere] text-[length:var(--text-body)] leading-[1.7] text-[var(--text-secondary)]">
+    <div
+      className={
+        compact
+          ? "jinn-markdown min-w-0 max-w-full break-words [overflow-wrap:anywhere] text-[15px] leading-[1.55] text-[var(--text-secondary)]"
+          : "jinn-markdown min-w-0 max-w-full break-words [overflow-wrap:anywhere] text-[length:var(--text-body)] leading-[1.7] text-[var(--text-secondary)]"
+      }
+    >
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
           h1: ({ children }) => (
             <h1
-              className="text-[length:var(--text-title1)] font-[var(--weight-bold)] mt-[var(--space-6)] mb-[var(--space-3)]"
+              className={
+                compact
+                  ? "mb-[var(--space-2)] mt-[var(--space-3)] text-[length:var(--text-title3)] font-[var(--weight-bold)]"
+                  : "text-[length:var(--text-title1)] font-[var(--weight-bold)] mt-[var(--space-6)] mb-[var(--space-3)]"
+              }
               style={{ color: "var(--text-primary)" }}
             >
               {children}
@@ -78,18 +91,30 @@ export function MarkdownView({
           ),
           h2: ({ children }) => (
             <h2
-              className="text-[length:var(--text-title2)] font-[var(--weight-semibold)] mt-[var(--space-6)] mb-[var(--space-2)] pb-[var(--space-1)]"
-              style={{
-                color: "var(--text-primary)",
-                borderBottom: "1px solid var(--separator)",
-              }}
+              className={
+                compact
+                  ? "mb-[var(--space-2)] mt-[var(--space-3)] text-[length:var(--text-headline)] font-[var(--weight-semibold)]"
+                  : "text-[length:var(--text-title2)] font-[var(--weight-semibold)] mt-[var(--space-6)] mb-[var(--space-2)] pb-[var(--space-1)]"
+              }
+              style={
+                compact
+                  ? { color: "var(--text-primary)" }
+                  : {
+                      color: "var(--text-primary)",
+                      borderBottom: "1px solid var(--separator)",
+                    }
+              }
             >
               {children}
             </h2>
           ),
           h3: ({ children }) => (
             <h3
-              className="text-[length:var(--text-title3)] font-[var(--weight-semibold)] mt-[var(--space-5)] mb-[var(--space-2)]"
+              className={
+                compact
+                  ? "mb-[var(--space-1)] mt-[var(--space-3)] text-[length:var(--text-subheadline)] font-[var(--weight-semibold)]"
+                  : "text-[length:var(--text-title3)] font-[var(--weight-semibold)] mt-[var(--space-5)] mb-[var(--space-2)]"
+              }
               style={{ color: "var(--text-primary)" }}
             >
               {children}
@@ -97,14 +122,18 @@ export function MarkdownView({
           ),
           h4: ({ children }) => (
             <h4
-              className="text-[length:var(--text-subheadline)] font-[var(--weight-semibold)] mt-[var(--space-4)] mb-[var(--space-1)]"
+              className={
+                compact
+                  ? "mb-[var(--space-1)] mt-[var(--space-2)] text-[length:var(--text-footnote)] font-[var(--weight-semibold)]"
+                  : "text-[length:var(--text-subheadline)] font-[var(--weight-semibold)] mt-[var(--space-4)] mb-[var(--space-1)]"
+              }
               style={{ color: "var(--text-primary)" }}
             >
               {children}
             </h4>
           ),
           p: ({ children }) => (
-            <p className="mb-[var(--space-4)]">{children}</p>
+            <p className={compact ? "mb-[var(--space-2)] last:mb-0" : "mb-[var(--space-4)]"}>{children}</p>
           ),
           a: ({ children, href }) => (
             <a
@@ -118,18 +147,30 @@ export function MarkdownView({
             </a>
           ),
           ul: ({ children }) => (
-            <ul className="list-disc ml-[var(--space-6)] mb-[var(--space-4)] space-y-[var(--space-1)]">
+            <ul
+              className={
+                compact
+                  ? "mb-[var(--space-2)] ml-[var(--space-5)] list-disc space-y-[var(--space-1)] last:mb-0"
+                  : "list-disc ml-[var(--space-6)] mb-[var(--space-4)] space-y-[var(--space-1)]"
+              }
+            >
               {children}
             </ul>
           ),
           ol: ({ children }) => (
-            <ol className="list-decimal ml-[var(--space-6)] mb-[var(--space-4)] space-y-[var(--space-1)]">
+            <ol
+              className={
+                compact
+                  ? "mb-[var(--space-2)] ml-[var(--space-5)] list-decimal space-y-[var(--space-1)] last:mb-0"
+                  : "list-decimal ml-[var(--space-6)] mb-[var(--space-4)] space-y-[var(--space-1)]"
+              }
+            >
               {children}
             </ol>
           ),
           blockquote: ({ children }) => (
             <blockquote
-              className="pl-[var(--space-4)] my-[var(--space-4)]"
+              className={compact ? "my-[var(--space-2)] pl-[var(--space-3)]" : "pl-[var(--space-4)] my-[var(--space-4)]"}
               style={{
                 borderLeft: "3px solid var(--separator)",
                 color: "var(--text-tertiary)",
@@ -147,7 +188,7 @@ export function MarkdownView({
             </strong>
           ),
           table: ({ children }) => (
-            <div className="overflow-x-auto mb-[var(--space-4)]">
+            <div className={compact ? "mb-[var(--space-2)] overflow-x-auto" : "overflow-x-auto mb-[var(--space-4)]"}>
               <table
                 className="border-collapse w-full text-[length:var(--text-subheadline)]"
                 style={{ border: "1px solid var(--separator)" }}
@@ -178,7 +219,7 @@ export function MarkdownView({
           ),
           hr: () => (
             <hr
-              className="my-[var(--space-6)]"
+              className={compact ? "my-[var(--space-3)]" : "my-[var(--space-6)]"}
               style={{ border: 0, borderTop: "1px solid var(--separator)" }}
             />
           ),
@@ -216,7 +257,7 @@ export function MarkdownView({
               <CodeBlockChrome
                 code={text}
                 language={match ? match[1] : "text"}
-                className="mb-[var(--space-4)]"
+                className={compact ? "mb-[var(--space-2)]" : "mb-[var(--space-4)]"}
               >
                 <SyntaxHighlighter
                   language={match ? match[1] : "text"}
