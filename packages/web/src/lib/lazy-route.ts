@@ -1,4 +1,4 @@
-import { lazy, type ComponentType } from 'react'
+import { lazy, type ComponentType, type LazyExoticComponent } from 'react'
 
 const RECOVERABLE_IMPORT_PATTERNS = [
   /failed to fetch dynamically imported module/i,
@@ -34,9 +34,18 @@ export function lazyRoute<T extends ComponentType<any>>(
   load: () => Promise<{ default: T }>,
   routeName: string,
 ) {
-  return lazy(async () => {
+  let importPromise: Promise<{ default: T }> | undefined
+  const importOnce = () => {
+    importPromise ??= load().catch((error) => {
+      importPromise = undefined
+      throw error
+    })
+    return importPromise
+  }
+
+  const Route = lazy(async () => {
     try {
-      const mod = await load()
+      const mod = await importOnce()
       if (typeof window !== 'undefined') {
         try { window.sessionStorage.removeItem(retryKey(routeName)) } catch { /* ignore */ }
       }
@@ -52,5 +61,15 @@ export function lazyRoute<T extends ComponentType<any>>(
       }
       throw error
     }
-  })
+  }) as LazyExoticComponent<T> & { prefetch: () => Promise<void> }
+
+  Route.prefetch = async () => {
+    try {
+      await importOnce()
+    } catch {
+      // Prefetch is speculative. A real render retries after a rejected import.
+    }
+  }
+
+  return Route
 }

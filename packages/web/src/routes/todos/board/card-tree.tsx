@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { memo, useState } from "react"
 import { Plus } from "lucide-react"
 import type { WorkItemTreeNodeWire, WorkItemTreeWire } from "@/lib/api"
 import { EmployeeAvatar } from "@/components/ui/employee-avatar"
@@ -27,7 +27,7 @@ function flatten(nodes: WorkItemTreeNodeWire[], level: number, out: FlatRow[]): 
   return out
 }
 
-export function CardTree({
+export const CardTree = memo(function CardTree({
   tree,
   cardDepth,
   onOpenChild,
@@ -133,4 +133,4 @@ export function CardTree({
       )}
     </div>
   )
-}
+})

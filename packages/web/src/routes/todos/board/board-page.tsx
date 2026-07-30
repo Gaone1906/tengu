@@ -61,6 +61,7 @@ import { rollupOf } from "./card"
  * The task-page takeover is stage B; mobile polish + cutover are stage C. */
 
 type MobileSegment = "active" | "attention" | "closed"
+const NOOP = () => {}
 
 /** ONE container per breakpoint (never both mounted with CSS hiding one —
  *  duplicate controls break a11y queries and double state). */
@@ -183,14 +184,17 @@ export default function TodoBoardPage() {
   }, [data.columns, moves])
 
   // ── Enrichment (trees carry priority/roll-up/spend; details carry reasons) ─
-  const detailIds = useMemo(() => boardDetailIds(data.columns), [data.columns])
+  const detailIds = useMemo(
+    () => data.isLoading ? [] : boardDetailIds(data.columns),
+    [data.columns, data.isLoading],
+  )
   const trees = useBoardTrees(detailIds)
   const reasonIds = useMemo(
     () =>
-      (["executing", "blocked", "escalated"] as const).flatMap((status) =>
+      (data.isLoading ? [] : (["executing", "blocked", "escalated"] as const).flatMap((status) =>
         (data.columns[status]?.items ?? []).map((item) => item.id),
-      ),
-    [data.columns],
+      )).slice(0, 60),
+    [data.columns, data.isLoading],
   )
   const details = useOpenDetails(reasonIds)
   const detailById = useMemo(() => {
@@ -198,10 +202,23 @@ export default function TodoBoardPage() {
     for (const d of details.data ?? []) map.set(d.workItem.id, d)
     return map
   }, [details.data])
-  const enrichmentOf = useCallback(
-    (id: string): CardEnrichment => ({ tree: trees.data?.get(id), detail: detailById.get(id) }),
-    [trees.data, detailById],
-  )
+  const enrichmentCache = useRef<Map<string, CardEnrichment>>(new Map())
+  const enrichmentById = useMemo(() => {
+    const next = new Map<string, CardEnrichment>()
+    for (const id of new Set([...detailIds, ...reasonIds])) {
+      const tree = trees.data?.get(id)
+      const detail = detailById.get(id)
+      const previous = enrichmentCache.current.get(id)
+      next.set(
+        id,
+        previous && previous.tree === tree && previous.detail === detail
+          ? previous
+          : { tree, detail },
+      )
+    }
+    enrichmentCache.current = next
+    return next
+  }, [detailIds, reasonIds, trees.data, detailById])
 
   // ── Tree expansion (session-persisted, per item) ────────────────────────────
   const [expandedTrees, setExpandedTrees] = useState<Set<string>>(loadExpandedTrees)
@@ -219,6 +236,16 @@ export default function TodoBoardPage() {
   const transition = useBoardTransition()
   const rankEdit = useBoardRank()
   const createSubTask = useCreateSubTask()
+  const createSubTaskMutate = createSubTask.mutate
+  const addSubTask = useCallback(
+    (parentId: string, title: string) => {
+      createSubTaskMutate(
+        { parentId, title },
+        { onError: (error) => announce(operatorSafeTodoError(error, "Failed to add the sub-task")) },
+      )
+    },
+    [createSubTaskMutate, announce],
+  )
 
   const commitTransition = useCallback(
     (item: WorkItemCompactWire, to: WorkItemStatusWire, index: number) => {
@@ -464,18 +491,14 @@ export default function TodoBoardPage() {
         <div key={item.id} onKeyDown={(e) => onCardKeyDown(e, item)}>
           <BoardCard
             item={item}
-            enrichment={enrichmentOf(item.id)}
+            enrichment={enrichmentById.get(item.id)}
             byName={byName}
             expanded={expandedTrees.has(item.id)}
             onToggleTree={toggleTree}
             onOpen={onOpen}
             onOpenChild={onOpen}
-            onAddSubTask={(parentId, subTitle) =>
-              createSubTask.mutate({ parentId, title: subTitle }, {
-                onError: (error) => announce(operatorSafeTodoError(error, "Failed to add the sub-task")),
-              })
-            }
-            onLiftPointerDown={(event) => liftPointerDown(event, item)}
+            onAddSubTask={addSubTask}
+            onLiftPointerDown={liftPointerDown}
           />
         </div>,
       )
@@ -723,13 +746,13 @@ export default function TodoBoardPage() {
                       <BoardCard
                         key={item.id}
                         item={item}
-                        enrichment={enrichmentOf(item.id)}
+                        enrichment={enrichmentById.get(item.id)}
                         byName={byName}
                         expanded={false}
                         onToggleTree={toggleTree}
                         onOpen={onOpen}
                         onOpenChild={onOpen}
-                        onAddSubTask={() => {}}
+                        onAddSubTask={NOOP}
                       />
                     ))
                   )}
@@ -753,13 +776,13 @@ export default function TodoBoardPage() {
                             <BoardCard
                               key={item.id}
                               item={item}
-                              enrichment={enrichmentOf(item.id)}
+                              enrichment={enrichmentById.get(item.id)}
                               byName={byName}
                               expanded={false}
                               onToggleTree={toggleTree}
                               onOpen={onOpen}
                               onOpenChild={onOpen}
-                              onAddSubTask={() => {}}
+                              onAddSubTask={NOOP}
                             />
                           ))}
                         </div>
@@ -802,13 +825,13 @@ export default function TodoBoardPage() {
         >
           <BoardCard
             item={drag.item}
-            enrichment={enrichmentOf(drag.id)}
+            enrichment={enrichmentById.get(drag.id)}
             byName={byName}
             expanded={false}
-            onToggleTree={() => {}}
-            onOpen={() => {}}
-            onOpenChild={() => {}}
-            onAddSubTask={() => {}}
+            onToggleTree={NOOP}
+            onOpen={NOOP}
+            onOpenChild={NOOP}
+            onAddSubTask={NOOP}
             ghost
           />
         </div>

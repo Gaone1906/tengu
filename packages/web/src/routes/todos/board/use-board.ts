@@ -188,10 +188,9 @@ export function useBoardMenuCounts(departments: DepartmentSummaryWire[] | undefi
 }
 
 // ── Tree enrichment ─────────────────────────────────────────────────────────
-// One tree fetch per visible card (the ledger's open-details precedent): the
-// tree's FULL root row carries priority, its totals carry the roll-up counts,
-// and its spendUsd is the derived subtree spend — three card needs, one call.
-// Expansion then renders instantly from the same cache.
+// One batch tree fetch for all visible cards: the tree's FULL root row carries
+// priority, its totals carry the roll-up counts, and its spendUsd is the
+// derived subtree spend. Expansion then renders instantly from the same cache.
 
 export function useBoardTrees(ids: string[]) {
   const key = [...ids].sort().join(",")
@@ -201,12 +200,8 @@ export function useBoardTrees(ids: string[]) {
     staleTime: 10_000,
     placeholderData: keepPreviousData,
     queryFn: async (): Promise<Map<string, WorkItemTreeWire>> => {
-      const settled = await Promise.allSettled(ids.map((id) => api.getWorkItemTree(id)))
-      const map = new Map<string, WorkItemTreeWire>()
-      settled.forEach((s, i) => {
-        if (s.status === "fulfilled") map.set(ids[i], s.value.tree)
-      })
-      return map
+      const { trees } = await api.getWorkItemTrees(ids)
+      return new Map(Object.entries(trees))
     },
   })
 }

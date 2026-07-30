@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { Navigate, Outlet, RouterProvider, createBrowserRouter } from 'react-router-dom'
 import { ClientProviders } from './routes/client-providers'
 import { lazyRoute } from './lib/lazy-route'
+import { registerRoutePrefetch } from './lib/route-prefetch'
 import { TodosIndexRedirect } from './routes/todos/board/todos-index-redirect'
 import { useFeatures } from './hooks/use-features'
 import './routes/globals.css'
@@ -25,6 +26,26 @@ const RedesignPage = lazyRoute(() => import('./routes/redesign/page'), 'redesign
 const WorkflowListPage = lazyRoute(() => import('./routes/workflow/list'), 'workflow-list')
 const WorkflowPage = lazyRoute(() => import('./routes/workflow/page'), 'workflow')
 const WorkflowRunPage = lazyRoute(() => import('./routes/workflow/run'), 'workflow-run')
+
+registerRoutePrefetch('/', ChatPage.prefetch)
+registerRoutePrefetch('/cron', CronPage.prefetch)
+registerRoutePrefetch('/todos', TodoBoardPage.prefetch)
+registerRoutePrefetch('/notes', NotesPage.prefetch)
+registerRoutePrefetch('/logs', LogsPage.prefetch)
+registerRoutePrefetch('/limits', LimitsPage.prefetch)
+registerRoutePrefetch('/org', OrgPage.prefetch)
+registerRoutePrefetch('/settings', SettingsPage.prefetch)
+registerRoutePrefetch('/skills', SkillsPage.prefetch)
+registerRoutePrefetch('/more', MorePage.prefetch)
+registerRoutePrefetch('/workflow', WorkflowListPage.prefetch)
+
+if (typeof window !== 'undefined') {
+  const scheduleIdle = window.requestIdleCallback
+    ? (callback: () => void) => window.requestIdleCallback(callback)
+    : (callback: () => void) => window.setTimeout(callback, 0)
+  scheduleIdle(() => void ChatPage.prefetch())
+  scheduleIdle(() => void TodoBoardPage.prefetch())
+}
 
 function RouteLoading() {
   return (

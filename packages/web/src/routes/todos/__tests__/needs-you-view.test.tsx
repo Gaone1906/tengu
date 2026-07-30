@@ -17,6 +17,8 @@ vi.mock("@/routes/settings-provider", () => ({
 
 const getWorkItem = vi.fn()
 const getWorkItemTree = vi.fn()
+const getWorkItems = vi.fn()
+const getWorkItemTrees = vi.fn()
 const setWorkItemStatus = vi.fn()
 
 vi.mock("@/lib/api", async (importOriginal) => {
@@ -27,6 +29,8 @@ vi.mock("@/lib/api", async (importOriginal) => {
       ...actual.api,
       getWorkItem: (...a: unknown[]) => getWorkItem(...a),
       getWorkItemTree: (...a: unknown[]) => getWorkItemTree(...a),
+      getWorkItems: (...a: unknown[]) => getWorkItems(...a),
+      getWorkItemTrees: (...a: unknown[]) => getWorkItemTrees(...a),
       setWorkItemStatus: (...a: unknown[]) => setWorkItemStatus(...a),
     },
   }
@@ -75,6 +79,8 @@ beforeEach(() => {
   vi.clearAllMocks()
   getWorkItem.mockRejectedValue(Object.assign(new Error("nf"), { status: 404 }))
   getWorkItemTree.mockRejectedValue(Object.assign(new Error("nf"), { status: 404 }))
+  getWorkItems.mockResolvedValue({ workItems: [] })
+  getWorkItemTrees.mockResolvedValue({ trees: {} })
 })
 
 describe("NeedsYouView", () => {
@@ -182,17 +188,18 @@ describe("NeedsYouView", () => {
   })
 
   it("the voice quotes the blocked reason note from detail enrichment", async () => {
-    getWorkItem.mockImplementation((id: string) =>
+    getWorkItems.mockImplementation((ids: string[]) =>
       Promise.resolve({
-        workItem: { id, version: 3, rounds: 0, source: "cron", verifyPolicy: null },
-        spendUsd: 0,
-        events: [
-          {
-            id: "e1", workItemId: id, kind: "status_change", fromStatus: "executing",
-            toStatus: "blocked", actor: "mason", detail: { note: "Waiting on vendor sandbox keys" },
-            createdAt: "2026-07-04T09:00:00.000Z",
-          },
-        ],
+        workItems: ids.map((id) => ({
+          workItem: { id, version: 3, rounds: 0, source: "cron", verifyPolicy: null },
+          events: [
+            {
+              id: "e1", workItemId: id, kind: "status_change", fromStatus: "executing",
+              toStatus: "blocked", actor: "mason", detail: { note: "Waiting on vendor sandbox keys" },
+              createdAt: "2026-07-04T09:00:00.000Z",
+            },
+          ],
+        })),
       }),
     )
     renderView([item("wi_private_blocked", "blocked", null)])

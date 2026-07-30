@@ -1,18 +1,27 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { WorkItemCompactWire, WorkItemListWire, WorkItemStatusWire, WorkItemTreeWire } from "@/lib/api"
 import TodoBoardPage from "../board/board-page"
-import { boardScopeParams } from "../board/use-board"
+import { boardColumnQueryKey, boardScopeParams } from "../board/use-board"
 import { clearBoardScrollCache } from "../board/board-route"
 
 vi.mock("@/components/page-layout", () => ({ PageLayout: ({ children }: { children: React.ReactNode }) => <>{children}</> }))
 vi.mock("@/routes/settings-provider", () => ({ useSettings: () => ({ settings: { employeeOverrides: {} } }) }))
+const avatarRender = vi.hoisted(() => vi.fn())
+vi.mock("@/components/ui/employee-avatar", () => ({
+  EmployeeAvatar: ({ name }: { name: string }) => {
+    avatarRender(name)
+    return <span data-testid={`avatar-${name}`} />
+  },
+}))
 
 const listWorkItems = vi.fn()
 const getWorkItemTree = vi.fn()
+const getWorkItemTrees = vi.fn()
 const getWorkItem = vi.fn()
+const getWorkItems = vi.fn()
 const getDepartments = vi.fn()
 const getOrg = vi.fn()
 const setWorkItemStatus = vi.fn()
@@ -27,7 +36,9 @@ vi.mock("@/lib/api", async (importOriginal) => {
     api: {
       listWorkItems: (...args: unknown[]) => listWorkItems(...args),
       getWorkItemTree: (...args: unknown[]) => getWorkItemTree(...args),
+      getWorkItemTrees: (...args: unknown[]) => getWorkItemTrees(...args),
       getWorkItem: (...args: unknown[]) => getWorkItem(...args),
+      getWorkItems: (...args: unknown[]) => getWorkItems(...args),
       getDepartments: (...args: unknown[]) => getDepartments(...args),
       getOrg: (...args: unknown[]) => getOrg(...args),
       setWorkItemStatus: (...args: unknown[]) => setWorkItemStatus(...args),
@@ -123,7 +134,7 @@ function LocationProbe() {
 
 function renderBoard(path: string) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
-  return render(
+  const view = render(
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={[path]}>
         <Routes>
@@ -133,6 +144,7 @@ function renderBoard(path: string) {
       </MemoryRouter>
     </QueryClientProvider>,
   )
+  return { ...view, client }
 }
 
 beforeEach(() => {
@@ -143,7 +155,11 @@ beforeEach(() => {
   totals = {}
   listWorkItems.mockImplementation((params: { status?: WorkItemStatusWire }) => Promise.resolve(listResponse(params)))
   getWorkItemTree.mockImplementation((id: string) => Promise.resolve({ tree: emptyTree(id) }))
+  getWorkItemTrees.mockImplementation((ids: string[]) =>
+    Promise.resolve({ trees: Object.fromEntries(ids.map((id) => [id, emptyTree(id)])) }),
+  )
   getWorkItem.mockRejectedValue(Object.assign(new Error("not found"), { status: 404 }))
+  getWorkItems.mockResolvedValue({ workItems: [] })
   getDepartments.mockResolvedValue({ departments: [{ slug: "platform", prefix: "PLA", createdAt: "2026-07-01", todoCount: 3 }] })
   getOrg.mockResolvedValue({ departments: ["platform"], employees: [{ name: "scout", displayName: "Scout", department: "platform", rank: "senior" }] })
 })
@@ -161,6 +177,34 @@ describe("boardScopeParams — the board data wiring", () => {
 })
 
 describe("the board surface", () => {
+  it("loads enrichment for 60 cards in at most two batch requests", async () => {
+    rows.executing = Array.from({ length: 20 }, (_, index) =>
+      compact({ id: `PLA-${index + 1}`, status: "executing" }),
+    )
+    rows.blocked = Array.from({ length: 20 }, (_, index) =>
+      compact({ id: `PLA-${index + 21}`, status: "blocked" }),
+    )
+    rows.escalated = Array.from({ length: 20 }, (_, index) =>
+      compact({ id: `PLA-${index + 41}`, status: "escalated" }),
+    )
+
+    renderBoard("/todos/b/platform")
+
+    await waitFor(() => expect(screen.getByTestId("board-card-PLA-60")).toBeTruthy())
+    await waitFor(() => {
+      const enrichmentRequests =
+        getWorkItemTrees.mock.calls.length
+        + getWorkItems.mock.calls.length
+        + getWorkItemTree.mock.calls.length
+        + getWorkItem.mock.calls.length
+      expect(enrichmentRequests).toBeLessThanOrEqual(2)
+    })
+    expect(getWorkItemTrees).toHaveBeenCalledTimes(1)
+    expect(getWorkItems).toHaveBeenCalledTimes(1)
+    expect(getWorkItemTree).not.toHaveBeenCalled()
+    expect(getWorkItem).not.toHaveBeenCalled()
+  })
+
   it("renders the four pipeline columns always, exception columns only when non-empty", async () => {
     rows.backlog = [compact({ id: "PLA-1", status: "backlog" })]
     renderBoard("/todos/b/platform")
@@ -247,6 +291,46 @@ describe("the board surface", () => {
     fireEvent.click(card)
     await waitFor(() => expect(screen.getByTestId("location").textContent).toBe("/todos/PLA-1"))
   })
+
+  it("re-renders only the card whose board row changed", async () => {
+    rows.backlog = [
+      compact({ id: "PLA-1", status: "backlog", assignee: "scout" }),
+      compact({ id: "PLA-2", status: "backlog", assignee: "scout" }),
+    ]
+    const { client } = renderBoard("/todos/b/platform")
+    await screen.findByTestId("board-card-PLA-2")
+    await waitFor(() => expect(getWorkItemTrees).toHaveBeenCalledTimes(1))
+    avatarRender.mockClear()
+
+    const key = boardColumnQueryKey(
+      { kind: "department", slug: "platform" },
+      "backlog",
+      { status: "open" },
+    )
+    act(() => {
+      client.setQueryData(key, (previous: {
+        pages: Array<{ workItems: WorkItemCompactWire[] }>
+        pageParams: number[]
+      } | undefined) => {
+        if (!previous) throw new Error("missing backlog query fixture")
+        return {
+          ...previous,
+          pages: previous.pages.map((page, pageIndex) => pageIndex === 0
+            ? {
+                ...page,
+                workItems: page.workItems.map((item) =>
+                  item.id === "PLA-1" ? { ...item, title: "Changed title" } : item,
+                ),
+              }
+            : page),
+        }
+      })
+    })
+
+    await waitFor(() => expect(screen.getByTestId("board-card-PLA-1").textContent).toContain("Changed title"))
+    expect(avatarRender).toHaveBeenCalledTimes(1)
+    expect(avatarRender).toHaveBeenCalledWith("scout")
+  })
 })
 
 describe("card anatomy", () => {
@@ -270,6 +354,8 @@ describe("card anatomy", () => {
     const card = await screen.findByTestId("board-card-PLA-4")
     expect(card.textContent).toContain("infra")
     expect(card.textContent).toContain("Jul 1")
+    expect((card as HTMLElement).style.contentVisibility).toBe("auto")
+    expect((card as HTMLElement).style.containIntrinsicSize).toBe("auto 160px")
   })
 
   it("shows the approval bell in accent when an approval is pending", async () => {
@@ -290,8 +376,10 @@ describe("card anatomy", () => {
       },
     ]
     tree.totals = { executing: 2, done: 1, backlog: 1 }
-    getWorkItemTree.mockImplementation((id: string) =>
-      Promise.resolve({ tree: id === "PLA-6" ? tree : emptyTree(id) }),
+    getWorkItemTrees.mockImplementation((ids: string[]) =>
+      Promise.resolve({
+        trees: Object.fromEntries(ids.map((id) => [id, id === "PLA-6" ? tree : emptyTree(id)])),
+      }),
     )
     renderBoard("/todos/b/platform")
     const pill = await screen.findByTestId("board-rollup-PLA-6")
@@ -309,8 +397,10 @@ describe("card anatomy", () => {
     const tree = emptyTree("PLA-6", "executing")
     tree.root.children = [{ ...emptyTree("PLA-7", "backlog").root, children: [] }]
     tree.totals = { executing: 1, backlog: 1 }
-    getWorkItemTree.mockImplementation((id: string) =>
-      Promise.resolve({ tree: id === "PLA-6" ? tree : emptyTree(id) }),
+    getWorkItemTrees.mockImplementation((ids: string[]) =>
+      Promise.resolve({
+        trees: Object.fromEntries(ids.map((id) => [id, id === "PLA-6" ? tree : emptyTree(id)])),
+      }),
     )
     createWorkItem.mockResolvedValue({ workItem: emptyTree("PLA-11").root })
     renderBoard("/todos/b/platform")
@@ -326,22 +416,23 @@ describe("card anatomy", () => {
 
   it("shows the blocked reason from the latest transition note", async () => {
     rows.blocked = [compact({ id: "PLA-9", status: "blocked" })]
-    getWorkItem.mockImplementation((id: string) =>
+    getWorkItems.mockImplementation((ids: string[]) =>
       Promise.resolve({
-        workItem: { ...emptyTree(id, "blocked").root },
-        spendUsd: 0,
-        events: [
-          {
-            id: "wie_1",
-            workItemId: id,
-            kind: "status_change",
-            fromStatus: "executing",
-            toStatus: "blocked",
-            actor: "operator",
-            detail: { note: "Waiting on vendor keys" },
-            createdAt: "2026-07-23T09:00:00.000Z",
-          },
-        ],
+        workItems: ids.map((id) => ({
+          workItem: { ...emptyTree(id, "blocked").root },
+          events: [
+            {
+              id: "wie_1",
+              workItemId: id,
+              kind: "status_change",
+              fromStatus: "executing",
+              toStatus: "blocked",
+              actor: "operator",
+              detail: { note: "Waiting on vendor keys" },
+              createdAt: "2026-07-23T09:00:00.000Z",
+            },
+          ],
+        })),
       }),
     )
     renderBoard("/todos/b/platform")

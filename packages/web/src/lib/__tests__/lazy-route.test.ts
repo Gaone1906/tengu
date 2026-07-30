@@ -1,7 +1,10 @@
-import { describe, expect, it } from 'vitest'
+import { createElement, Suspense } from 'react'
+import { render, screen } from '@testing-library/react'
+import { describe, expect, it, vi } from 'vitest'
 import {
   consumeChunkReloadRetry,
   isRecoverableDynamicImportError,
+  lazyRoute,
 } from '../lazy-route'
 
 describe('isRecoverableDynamicImportError', () => {
@@ -36,5 +39,30 @@ describe('consumeChunkReloadRetry', () => {
 
     expect(consumeChunkReloadRetry(adapter, 'jinn:chunk-retry:/limits')).toBe(true)
     expect(consumeChunkReloadRetry(adapter, 'jinn:chunk-retry:/limits')).toBe(false)
+  })
+})
+
+describe('lazyRoute prefetch', () => {
+  it('starts one prefetch and retries the real render after a rejected prefetch', async () => {
+    const load = vi.fn()
+      .mockRejectedValueOnce(new Error('prefetch failed'))
+      .mockResolvedValueOnce({ default: () => createElement('div', null, 'Loaded route') })
+    const Route = lazyRoute(load, 'prefetch-probe') as ReturnType<typeof lazyRoute> & {
+      prefetch: () => Promise<void>
+    }
+
+    await Promise.all([Route.prefetch(), Route.prefetch()])
+    expect(load).toHaveBeenCalledTimes(1)
+
+    render(
+      createElement(
+        Suspense,
+        { fallback: createElement('div', null, 'Loading') },
+        createElement(Route),
+      ),
+    )
+
+    expect(await screen.findByText('Loaded route')).toBeTruthy()
+    expect(load).toHaveBeenCalledTimes(2)
   })
 })
