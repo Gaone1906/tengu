@@ -52,6 +52,7 @@ export function InstanceMigrationGate({
   const [copied, setCopied] = useState(false)
   const [dismissedKey, setDismissedKey] = useState<string | null>(() => readDismissedKey())
   const presentedKey = useRef<string | null>(null)
+  const acknowledged = useRef(false)
   const launching = useRef(false)
   const titleRef = useRef<HTMLHeadingElement>(null)
   const query = useQuery({
@@ -67,10 +68,12 @@ export function InstanceMigrationGate({
       setOpen(false)
       setDismissedKey(null)
       presentedKey.current = null
+      acknowledged.current = false
       return
     }
     if (presentedKey.current !== migration.migrationKey) {
       presentedKey.current = migration.migrationKey
+      acknowledged.current = false
       const wasDismissed = readDismissedKey() === migration.migrationKey
       setDismissedKey(wasDismissed ? migration.migrationKey : null)
       setOpen(!wasDismissed)
@@ -79,6 +82,7 @@ export function InstanceMigrationGate({
 
   const rememberAcknowledged = (migrationKey: string) => {
     writeDismissedKey(migrationKey)
+    acknowledged.current = true
   }
 
   const dismiss = (migrationKey: string) => {
@@ -91,6 +95,7 @@ export function InstanceMigrationGate({
     mutationFn: () => service.open(migration!.migrationKey!),
     onSuccess: ({ sessionId }) => {
       rememberAcknowledged(migration!.migrationKey!)
+      setDismissedKey(migration!.migrationKey!)
       navigate(`/?session=${encodeURIComponent(sessionId)}`)
     },
     onError: () => { launching.current = false },
@@ -131,7 +136,15 @@ export function InstanceMigrationGate({
         </div>
       </div>
 
-      <Dialog open={open} onOpenChange={setOpen}>
+      <Dialog
+        open={open}
+        onOpenChange={(nextOpen) => {
+          setOpen(nextOpen)
+          if (!nextOpen && acknowledged.current) {
+            setDismissedKey(migration.migrationKey!)
+          }
+        }}
+      >
         <DialogContent
           className="max-h-[calc(100dvh-2rem)] max-w-[calc(100%-1.5rem)] rounded-[var(--radius-2xl)] border-0 bg-transparent p-0 shadow-[var(--shadow-overlay)] motion-reduce:duration-0 sm:max-w-md"
           onOpenAutoFocus={(event) => {
