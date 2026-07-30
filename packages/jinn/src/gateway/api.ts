@@ -148,7 +148,7 @@ import { resolveMessageAudiences, speechContextApplies } from "./speech-context.
 import { isJsonMediaType } from "./media-type.js";
 import { readJsonlTail } from "./jsonl-tail.js";
 import { completedStreamedBlockIds } from "./streamed-blocks.js";
-import { deliverClaimedSessionDelivery, notifyParentSession, notifyRateLimited, notifyRateLimitResumed, notifyDiscordChannel, notifyAttachedTalkSessions, recoverPendingSessionDeliveries } from "../sessions/callbacks.js";
+import { deliverClaimedSessionDelivery, notifyParentSession, notifyRateLimited, notifyRateLimitResumed, notifyOperatorChannel, notifyAttachedTalkSessions, recoverPendingSessionDeliveries } from "../sessions/callbacks.js";
 import { clearDelegationCompletionContract, DELEGATION_COMPLETION_TRACKED_META_KEY } from "../sessions/delegation-completion-contract.js";
 import { clipSessionMessage, sessionCommGuards, prepareLateralSend, isDescendantOf, resolveCallerIdentity, type CallerIdentity } from "./session-comm-guards.js";
 import {
@@ -7178,7 +7178,7 @@ async function runWebSession(
               `⚠️ Claude usage limit reached${resumeText ? `. Resets ${resumeText}` : ""}. Switching to GPT for now.`;
             insertMessage(currentSession.id, "notification", notificationText);
 
-            notifyDiscordChannel(
+            notifyOperatorChannel(
               `⚠️ Claude usage limit reached. Session ${currentSession.id}${currentSession.employee ? ` (${currentSession.employee})` : ""} switching to GPT.`,
             );
 
@@ -7240,7 +7240,7 @@ async function runWebSession(
               : null;
 
             // Send hardcoded Discord notification — does not depend on the LLM
-            notifyDiscordChannel(
+            notifyOperatorChannel(
               `⚠️ ${engineLabel} usage limit reached. Session ${currentSession.id}${currentSession.employee ? ` (${currentSession.employee})` : ""} paused${resumeText ? ` until ${resumeText}` : ""}.`,
             );
 
@@ -7291,7 +7291,7 @@ async function runWebSession(
 
             if (completedAfterRetry) {
               notifyRateLimitResumed(completedAfterRetry);
-              notifyDiscordChannel(
+              notifyOperatorChannel(
                 `✅ ${engineLabel} usage limit cleared. Session ${currentSession.id}${currentSession.employee ? ` (${currentSession.employee})` : ""} resumed.`,
               );
               notifyParentSession(completedAfterRetry, { result: retryResult.result, error: retryResult.error ?? null, cost: retryResult.cost, durationMs: retryResult.durationMs }, { alwaysNotify: employee?.alwaysNotify });
@@ -7315,7 +7315,7 @@ async function runWebSession(
           onTimeout: () => {
             const engineLabel = rateLimitEngineLabel(currentSession.engine);
             const timeoutError = `${engineLabel} usage limit did not clear in time`;
-            notifyDiscordChannel(
+            notifyOperatorChannel(
               `❌ ${timeoutError}. Session ${currentSession.id}${currentSession.employee ? ` (${currentSession.employee})` : ""} has been stopped.`,
             );
             const erroredSession = updateSessionForAttempt(currentSession.id, attemptToken, {

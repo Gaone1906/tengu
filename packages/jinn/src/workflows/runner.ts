@@ -18,6 +18,7 @@ import { parseWorkflowOutput, validateSubmittedFields, WorkflowOutputError } fro
 import { WorkflowRepositoryError, type WorkflowRepository } from "./repository.js";
 import type { ResolvedEmployeeConfig, WorkflowError, WorkflowNodeRunRecord, WorkflowRunDetail } from "./runtime.js";
 import type { WorkflowSessionExecutor } from "./session-executor.js";
+import { todoApprovalRef } from "./todo-approval-ref.js";
 import { topologicalOrder, validateExecutableWorkflow } from "./validation.js";
 
 export interface WorkflowRunnerOptions {
@@ -38,6 +39,11 @@ export interface WorkflowRunnerOptions {
 
 export interface WorkflowTodoApprovalMirror {
   request(input: { todoId: string; request: string; ref: string; options?: string[]; approver?: string }): void;
+  /** Tell the routed approver that a run has parked on their decision. Called
+   *  once, on the transition into parked. */
+  notifyParked(input: {
+    todoId: string; workflowId: string; runId: string; nodeId: string; request: string; ref: string;
+  }): void;
 }
 
 export interface WorkflowTodoSessionLink {
@@ -202,15 +208,6 @@ function mergeOutput(run: WorkflowRunDetail, nodeId: string): WorkflowNodeOutput
 function approvalRef(run: WorkflowRunDetail, node: ApprovalNode): string | undefined {
   return node.config.approver ? resolveString(node.config.approver, bindingContext(run), "Workflow approver") : undefined;
 }
-/** Stable correlation key tying a Todo approval back to the node that parked. */
-export function todoApprovalRef(run: Pick<WorkflowRunDetail, "workflowId" | "id">, nodeId: string): string {
-  return `workflow:${run.workflowId}:${run.id}:${nodeId}`;
-}
-export function parseTodoApprovalRef(ref: string | null): { workflowId: string; runId: string; nodeId: string } | null {
-  const parts = ref?.split(":") ?? [];
-  if (parts.length !== 4 || parts[0] !== "workflow") return null;
-  return { workflowId: parts[1]!, runId: parts[2]!, nodeId: parts[3]! };
-}
 function waitResumeAt(run: WorkflowRunDetail, node: WaitNode, now: string): string {
   if (node.config.mode === "duration") return new Date(Date.parse(now) + node.config.minutes * 60_000).toISOString();
   const value = resolveBinding(node.config.timestamp, bindingContext(run));
@@ -314,15 +311,28 @@ export class WorkflowRunner {
   }
 
   /** Mirror a parked gate onto the run's bound Todo (Gap 2: the operator picks
-   *  and approves from Todos). Best-effort — a mirror failure must not fail a
-   *  run whose gate is already parked and decidable through the workflow API. */
+   *  and approves from Todos), then tell the routed approver it is waiting — a
+   *  gate nobody is told about is the same as no gate, and one sat idle for
+   *  eleven hours. Best-effort — neither a mirror nor a notification failure may
+   *  fail a run whose gate is already parked and decidable through the workflow
+   *  API. Reached only from the transition INTO parked, so the notification
+   *  fires once per gate rather than on every recovery sweep. */
   private mirrorApproval(run: WorkflowRunDetail, node: ApprovalNode, approver: string | undefined): void {
-    if (!run.trigger.todoId || !this.options.todoApprovals) return;
+    const todoId = run.trigger.todoId;
+    if (!todoId || !this.options.todoApprovals) return;
+    const ref = todoApprovalRef(run, node.id);
     try {
-      this.options.todoApprovals.request({ todoId: run.trigger.todoId, request: node.config.description,
-        ref: todoApprovalRef(run, node.id), ...(node.config.options ? { options: node.config.options } : {}),
+      this.options.todoApprovals.request({ todoId, request: node.config.description, ref,
+        ...(node.config.options ? { options: node.config.options } : {}),
         ...(approver ? { approver } : {}) });
     } catch { /* the workflow-side gate stands on its own */ }
+    try {
+      this.options.todoApprovals.notifyParked({ todoId, workflowId: run.workflowId, runId: run.id,
+        nodeId: node.id, request: node.config.description, ref });
+    } catch (error) {
+      logger.warn(`Workflow run ${run.id} could not notify the approver of parked gate ${node.id}: `
+        + `${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   /** Attribute a phase session to the run's bound Todo, so the Todo's derived

@@ -1,4 +1,4 @@
-import { parseTodoApprovalRef } from '../workflows/runner.js';
+import { parseTodoApprovalRef } from '../workflows/todo-approval-ref.js';
 import type { WorkflowService } from '../workflows/service.js';
 import type { WorkItem } from '../work-items/store.js';
 

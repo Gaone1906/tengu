@@ -32,7 +32,7 @@ import {
   listChildSessions,
   updateSessionForAttempt,
 } from "./registry.js";
-import { notifyParentSession, notifyRateLimited, notifyRateLimitResumed, notifyDiscordChannel } from "./callbacks.js";
+import { notifyParentSession, notifyRateLimited, notifyRateLimitResumed, notifyOperatorChannel } from "./callbacks.js";
 import { buildContext, buildPlatformContextSnapshot, type BuildContextOptions } from "./context.js";
 import { SessionQueue } from "./queue.js";
 import { JINN_HOME } from "../shared/paths.js";
@@ -704,7 +704,7 @@ export class SessionManager {
                 ? resumeAt.toLocaleString("en-GB", { weekday: "short", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
                 : null;
 
-              notifyDiscordChannel(
+              notifyOperatorChannel(
                 `⚠️ Claude usage limit reached. Session ${session.id}${session.employee ? ` (${session.employee})` : ""} switching to GPT.`,
               );
 
@@ -767,7 +767,7 @@ export class SessionManager {
                 : null;
 
               // Send hardcoded Discord notification — does not depend on LLM
-              notifyDiscordChannel(
+              notifyOperatorChannel(
                 `⚠️ ${engineLabel} usage limit reached. Session ${session.id}${session.employee ? ` (${session.employee})` : ""} paused${resumeText ? ` until ${resumeText}` : ""}.`,
               );
 
@@ -856,7 +856,7 @@ export class SessionManager {
               });
               if (retryUpdated) {
                 notifyRateLimitResumed(retryUpdated);
-                notifyDiscordChannel(
+                notifyOperatorChannel(
                   `✅ ${engineLabel} usage limit cleared. Session ${session.id}${session.employee ? ` (${session.employee})` : ""} resumed.`,
                 );
                 notifyParentSession(retryUpdated, { result: retryResult.result, error: retryResult.error ?? null, cost: retryResult.cost, durationMs: retryResult.durationMs }, { alwaysNotify: employee?.alwaysNotify });
@@ -865,7 +865,7 @@ export class SessionManager {
             onTimeout: async () => {
               const engineLabel = rateLimitEngineLabel(session.engine);
               const timeoutError = `${engineLabel} usage limit did not clear in time`;
-              notifyDiscordChannel(
+              notifyOperatorChannel(
                 `❌ ${timeoutError}. Session ${session.id}${session.employee ? ` (${session.employee})` : ""} has been stopped.`,
               );
               await connector.replyMessage(target, "Usage limit didn't reset in time. Please try again later.").catch(() => {});

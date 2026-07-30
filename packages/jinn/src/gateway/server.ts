@@ -41,7 +41,8 @@ import { setTodoLiveEmitter } from "../work-items/live-events.js";
 import { setTodoStatusChangeListener } from "../work-items/transitions.js";
 import { requestApproval, setTodoApprovalDecisionListener } from "../work-items/approvals.js";
 import { linkSession } from "../work-items/store.js";
-import { parseTodoApprovalRef } from "../workflows/runner.js";
+import { parseTodoApprovalRef } from "../workflows/todo-approval-ref.js";
+import { workflowTodoApprovals } from "./workflow-todo-surface.js";
 import { seedTrust, cleanupSessionSettings } from "../shared/claude-settings.js";
 import { GATEWAY_INFO_FILE, HOOK_RELAY_SCRIPT, JINN_HOME, CLAUDE_SETTINGS_DIR } from "../shared/paths.js";
 import { enforceOwnerOnlyDirectory, pathIsOwnerOnly } from "../shared/owner-only.js";
@@ -976,10 +977,11 @@ export async function startGateway(
     executor: new WorkflowSessionExecutor(sessionManager, (id) => { const session = getSession(id); if (!session) return null;
       const finalText = [...getMessages(id)].reverse().find((message) => message.role === "assistant")?.content; return { session, ...(finalText ? { finalText } : {}) }; }),
     employees: () => employeeRegistry, models: () => getModelRegistry(currentConfig),
-    // A parked gate on a Todo-bound run is decided from Todos, not Workflows.
-    todoApprovals: { request: ({ todoId, request, ref, options, approver }) => {
+    // A parked gate on a Todo-bound run is decided from Todos, not Workflows —
+    // and its approver is told, so a gate cannot sit unnoticed.
+    todoApprovals: workflowTodoApprovals(({ todoId, request, ref, options, approver }) => {
       requestApproval(todoId, { request, ref, ...(options ? { options } : {}), ...(approver ? { target: approver } : {}), actor: "workflow" });
-    } },
+    }),
     // A Todo-bound run's phases are execution attempts on that Todo, so its
     // derived spend covers the whole pipeline.
     todoSessions: { link: ({ todoId, sessionId }) => linkSession(todoId, sessionId) },

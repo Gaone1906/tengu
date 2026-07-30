@@ -9,7 +9,8 @@ import { openWorkflowDatabase } from "../repository-migrations.js";
 import { WorkflowRepository } from "../repository.js";
 import type { WorkflowSessionExecutor } from "../session-executor.js";
 import { WorkflowService } from "../service.js";
-import { parseTodoApprovalRef, type WorkflowTodoApprovalMirror } from "../runner.js";
+import { type WorkflowTodoApprovalMirror } from "../runner.js";
+import { parseTodoApprovalRef } from "../todo-approval-ref.js";
 
 /* Gap 2 (choice approvals decided ON the Todo) + Gap 4 (the run ↔ Todo binding
  * that gives a mirrored gate somewhere to land). */
@@ -39,7 +40,9 @@ function idleExecutor(): WorkflowSessionExecutor {
 
 class RecordingMirror implements WorkflowTodoApprovalMirror {
   readonly requests: Array<Parameters<WorkflowTodoApprovalMirror["request"]>[0]> = [];
+  readonly parked: Array<Parameters<WorkflowTodoApprovalMirror["notifyParked"]>[0]> = [];
   request(input: Parameters<WorkflowTodoApprovalMirror["request"]>[0]): void { this.requests.push(input); }
+  notifyParked(input: Parameters<WorkflowTodoApprovalMirror["notifyParked"]>[0]): void { this.parked.push(input); }
 }
 
 let root: string;
@@ -150,7 +153,7 @@ describe("mirroring a parked gate onto the bound Todo", () => {
     service = new WorkflowService({
       repository, executor: idleExecutor(),
       employees: () => new Map([[employee.name, employee]]), models: () => models, now: () => now.toISOString(),
-      todoApprovals: { request: () => { throw new Error("Todo is gone"); } },
+      todoApprovals: { request: () => { throw new Error("Todo is gone"); }, notifyParked: () => {} },
     });
     const run = await service.startManual({ workflowId: definition.id, input: {}, todoId: "OPS-5" });
     expect(run.status).toBe("waiting");

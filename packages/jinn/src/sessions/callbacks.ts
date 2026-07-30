@@ -535,17 +535,19 @@ function _clean(text: string, max: number): string {
 }
 
 /**
- * Send a hardcoded notification to the configured Discord channel.
- * Used for rate-limit alerts that must not depend on the LLM.
+ * Send a fixed notification to the operator's configured channel
+ * (`notifications.connector` + `notifications.channel`; Discord by default).
+ * Used for alerts that must reach a human without depending on an LLM — rate
+ * limits, and a workflow parked on a decision with no employee session to wake.
  * Fire-and-forget — errors are logged but never rethrown.
  */
-export function notifyDiscordChannel(message: string): void {
-  _sendDiscordNotification(message).catch((err) => {
-    logger.warn(`[callbacks] Failed to send Discord notification: ${err instanceof Error ? err.message : String(err)}`);
+export function notifyOperatorChannel(message: string): void {
+  _sendOperatorNotification(message).catch((err) => {
+    logger.warn(`[callbacks] Failed to send operator notification: ${err instanceof Error ? err.message : String(err)}`);
   });
 }
 
-async function _sendDiscordNotification(message: string): Promise<void> {
+async function _sendOperatorNotification(message: string): Promise<void> {
   let connector = "discord";
   let channel: string | undefined;
   const gateway = internalGatewayConnection();
@@ -559,7 +561,7 @@ async function _sendDiscordNotification(message: string): Promise<void> {
   }
 
   if (!channel) {
-    logger.debug("[callbacks] No notifications.channel configured — skipping Discord notification");
+    logger.debug("[callbacks] No notifications.channel configured — skipping operator notification");
     return;
   }
 
