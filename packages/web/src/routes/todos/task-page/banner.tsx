@@ -9,7 +9,15 @@ import { displayNameOf, formatRelativeTime } from "../util"
  * --bg-secondary card, tinted header word + glyph, rail-quoted reason in the
  * author's voice — status colour as accent, never a painted panel. The reason
  * is asked for HERE, never demanded by a modal: an exception item without a
- * note grows an inline reason field (board drops focus it — review F6). */
+ * note grows an inline reason field (board drops focus it — review F6).
+ *
+ * Nothing in this banner commits without a deliberate submit. A reason and a
+ * decision are both the operator's word, and a blur is not a word — switching
+ * browser tabs mid-sentence used to save an unfinished note. And a rejection
+ * carries its feedback in the SAME action that decides, because the note is
+ * what picks the outcome: with one the work goes round again, without one it
+ * stops. Deciding first and writing after took the "stop" path and orphaned
+ * the feedback. */
 
 export type BannerKind = "escalated" | "approval" | "blocked"
 
@@ -51,7 +59,12 @@ function BannerGlyph({ kind }: { kind: BannerKind }) {
 }
 
 const QUIET_BTN =
-  "focus-ring min-h-8 rounded-full px-3 text-[12.5px] font-semibold text-[var(--text-tertiary)] outline-none transition-colors hover:bg-[var(--fill-tertiary)] hover:text-[var(--text-secondary)] disabled:opacity-40"
+  "focus-ring min-h-11 rounded-full px-3 text-[12.5px] font-semibold text-[var(--text-tertiary)] outline-none transition-colors hover:bg-[var(--fill-tertiary)] hover:text-[var(--text-secondary)] disabled:opacity-40 sm:min-h-8"
+
+/** The one line that makes a rejection's consequence legible where it is made. */
+export function rejectConsequence(note: string): string {
+  return note.trim() ? "Sends it back for another round, with your note." : "Ends the work. Nothing goes back."
+}
 
 export function TaskBanner({
   detail,
@@ -60,7 +73,6 @@ export function TaskBanner({
   busy,
   onCommitReason,
   onApprove,
-  onSendBack,
   onReject,
   actions,
 }: {
@@ -72,8 +84,8 @@ export function TaskBanner({
   onCommitReason: (note: string) => void
   /** Carries the picked option when the pending gate offers a choice. */
   onApprove: (choice?: string) => void
-  onSendBack: (note: string) => void
-  onReject: () => void
+  /** One rejection, note included — an empty note IS the "stop here" decision. */
+  onReject: (note: string) => void
   /** Kind-contextual route actions (the status/assignee pickers own them). */
   actions?: React.ReactNode
 }) {
@@ -83,7 +95,7 @@ export function TaskBanner({
   const needsReason = kind !== null && kind !== "approval" && !note
   const [reason, setReason] = useState("")
   const [composing, setComposing] = useState(false)
-  const [sendBackNote, setSendBackNote] = useState("")
+  const [rejectNote, setRejectNote] = useState("")
   const [choice, setChoice] = useState<string | null>(null)
   const reasonRef = useRef<HTMLInputElement>(null)
   useEffect(() => {
@@ -115,7 +127,8 @@ export function TaskBanner({
   const body =
     kind === "approval" ? item.approvalRequest : note
 
-  const commitReason = () => {
+  const commitReason = (event: React.FormEvent) => {
+    event.preventDefault()
     const trimmed = reason.trim()
     if (!trimmed) return
     onCommitReason(trimmed)
@@ -143,7 +156,9 @@ export function TaskBanner({
           {body}
         </div>
       ) : needsReason ? (
-        <div className="relative ml-[25px] mt-2 py-0.5 pl-3">
+        // Submit-only: Enter or Save. A blur is not a decision — leaving the
+        // tab must never freeze a half-written sentence onto the record.
+        <form onSubmit={commitReason} className="relative ml-[25px] mt-2 flex items-center gap-2 py-0.5 pl-3">
           <span
             aria-hidden
             className="absolute bottom-[3px] left-0 top-[3px] w-[2px] rounded-[1px]"
@@ -155,48 +170,60 @@ export function TaskBanner({
             value={reason}
             disabled={busy}
             onChange={(e) => setReason(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") commitReason()
-            }}
-            onBlur={commitReason}
             placeholder={kind === "escalated" ? "Why is this escalated?" : "What is this waiting on?"}
             aria-label="Reason"
-            className="w-full min-w-0 rounded-[9px] bg-[var(--fill-quaternary)] px-2.5 py-1.5 text-[14px] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-quaternary)]"
+            className="min-w-0 flex-1 rounded-[9px] bg-[var(--fill-quaternary)] px-2.5 py-1.5 text-[14px] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-quaternary)]"
           />
-        </div>
+          <button
+            type="submit"
+            data-testid="task-banner-reason-save"
+            disabled={busy || !reason.trim()}
+            className={`${QUIET_BTN} flex-none`}
+          >
+            Save
+          </button>
+        </form>
       ) : null}
 
       {kind === "approval" && (
         composing ? (
-          <div className="ml-[30px] mt-3 flex flex-col gap-2">
+          <form
+            className="ml-[30px] mt-3 flex flex-col gap-2"
+            onSubmit={(e) => {
+              e.preventDefault()
+              onReject(rejectNote.trim())
+              setComposing(false)
+              setRejectNote("")
+            }}
+          >
             <textarea
               autoFocus
-              data-testid="task-banner-sendback-note"
-              value={sendBackNote}
-              onChange={(e) => setSendBackNote(e.target.value)}
+              data-testid="task-banner-reject-note"
+              value={rejectNote}
+              onChange={(e) => setRejectNote(e.target.value)}
               rows={2}
-              placeholder="Add a note for the send-back (optional)…"
+              placeholder="What needs to change?"
+              aria-label="Rejection feedback"
               className="w-full min-w-0 resize-none rounded-[10px] bg-[var(--fill-quaternary)] p-2.5 text-[13.5px] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-quaternary)]"
             />
+            <p data-testid="task-banner-reject-consequence" className="text-[12px] leading-[1.45] text-[var(--text-tertiary)]">
+              {rejectConsequence(rejectNote)}
+            </p>
             <div className="flex items-center gap-2">
               <button
-                type="button"
-                data-testid="task-banner-sendback-confirm"
+                type="submit"
+                data-testid="task-banner-reject-confirm"
                 disabled={busy}
-                onClick={() => {
-                  onSendBack(sendBackNote.trim())
-                  setComposing(false)
-                  setSendBackNote("")
-                }}
                 className={QUIET_BTN}
+                style={rejectNote.trim() ? undefined : { color: "var(--system-red)" }}
               >
-                Send back
+                {rejectNote.trim() ? "Send back" : "Reject"}
               </button>
               <button type="button" onClick={() => setComposing(false)} className={QUIET_BTN}>
                 Cancel
               </button>
             </div>
-          </div>
+          </form>
         ) : (
           <div className="ml-[30px] mt-3 flex flex-col gap-2.5 sm:ml-[30px]">
             {options && (
@@ -244,18 +271,15 @@ export function TaskBanner({
               <Check size={13} strokeWidth={2.6} aria-hidden />
               {choice ? `Approve · ${choice}` : "Approve"}
             </button>
-            <button type="button" data-testid="task-banner-sendback" disabled={busy} onClick={() => setComposing(true)} className={QUIET_BTN}>
-              Send back
-            </button>
             <button
               type="button"
               data-testid="task-banner-reject"
               disabled={busy}
-              onClick={onReject}
+              onClick={() => setComposing(true)}
               className={`${QUIET_BTN} hover:!text-[var(--system-red)]`}
               style={{ color: "var(--system-red)" }}
             >
-              Reject
+              Reject…
             </button>
             </div>
           </div>

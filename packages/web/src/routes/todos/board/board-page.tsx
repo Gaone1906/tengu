@@ -381,8 +381,10 @@ export default function TodoBoardPage() {
   const onOpen = useCallback((id: string) => navigate(todoPath(id), { state: { fromBoard: key } }), [navigate, key])
 
   // ── Attention board actions (reuses the shipped decision surface). The
-  // states mock's approval cluster is Approve · Send back · Reject; approval
-  // escalation stays an agent/MCP affordance, not an inbox button. ──────────
+  // approval cluster is Approve · Reject…, and a rejection carries its own
+  // note — that note is what decides between another round and a stop, so it
+  // cannot be a separate action. Approval escalation stays an agent/MCP
+  // affordance, not an inbox button. ────────────────────────────────────────
   const decide = useDecideApproval()
   const [resolving, setResolving] = useState<Set<string>>(new Set())
   const runDecision = useCallback(
@@ -652,8 +654,7 @@ export default function TodoBoardPage() {
                   byName={byName}
                   resolvingIds={resolving}
                   onApprove={(id) => runDecision(id, "approve")}
-                  onSendBack={(id, note) => runDecision(id, "reject", note || undefined)}
-                  onReject={(id) => runDecision(id, "reject")}
+                  onReject={(id, note) => runDecision(id, "reject", note || undefined)}
                   onOpen={onOpen}
                 />
               )}

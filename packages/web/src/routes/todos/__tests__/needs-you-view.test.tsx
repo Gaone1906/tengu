@@ -58,18 +58,17 @@ function item(
 
 function renderView(items: WorkItemCompactWire[], resolvingIds = new Set<string>()) {
   const onApprove = vi.fn<(id: string) => void>()
-  const onSendBack = vi.fn<(id: string, note: string) => void>()
-  const onReject = vi.fn<(id: string) => void>()
+  const onReject = vi.fn<(id: string, note: string) => void>()
   const onOpen = vi.fn<(id: string) => void>()
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
   const view = render(
     <QueryClientProvider client={client}>
       <MemoryRouter>
-        <NeedsYouView items={items} byName={new Map()} resolvingIds={resolvingIds} onApprove={onApprove} onSendBack={onSendBack} onReject={onReject} onOpen={onOpen} />
+        <NeedsYouView items={items} byName={new Map()} resolvingIds={resolvingIds} onApprove={onApprove} onReject={onReject} onOpen={onOpen} />
       </MemoryRouter>
     </QueryClientProvider>,
   )
-  return { onApprove, onSendBack, onReject, onOpen, container: view.container }
+  return { onApprove, onReject, onOpen, container: view.container }
 }
 
 beforeEach(() => {
@@ -118,18 +117,41 @@ describe("NeedsYouView", () => {
     expect(screen.queryByTestId("needs-operator-only")).toBeNull()
   })
 
-  it("opens a send-back composer and posts the note", () => {
-    const { onSendBack } = renderView([item("wi_private_approval", "in_review", "pending")])
-    fireEvent.click(screen.getByTestId("needs-sendback"))
-    fireEvent.change(screen.getByTestId("needs-sendback-note"), { target: { value: "needs a citation" } })
-    fireEvent.click(screen.getByTestId("needs-sendback-confirm"))
-    expect(onSendBack).toHaveBeenCalledWith("wi_private_approval", "needs a citation")
-  })
-
-  it("wires Reject to onReject (the mock's red quiet action)", () => {
+  it("Reject… opens the composer and decides NOTHING until the operator submits", () => {
     const { onReject } = renderView([item("wi_private_approval", "in_review", "pending")])
     fireEvent.click(screen.getByTestId("needs-reject"))
-    expect(onReject).toHaveBeenCalledWith("wi_private_approval")
+    expect(onReject).not.toHaveBeenCalled()
+    // Typing feedback and wandering off is not a decision either.
+    const note = screen.getByTestId("needs-reject-note")
+    fireEvent.change(note, { target: { value: "half a thou" } })
+    fireEvent.blur(note)
+    expect(onReject).not.toHaveBeenCalled()
+  })
+
+  it("carries the feedback in the SAME rejection that decides", () => {
+    const { onReject } = renderView([item("wi_private_approval", "in_review", "pending")])
+    fireEvent.click(screen.getByTestId("needs-reject"))
+    fireEvent.change(screen.getByTestId("needs-reject-note"), { target: { value: "needs a citation" } })
+    fireEvent.click(screen.getByTestId("needs-reject-confirm"))
+    expect(onReject).toHaveBeenCalledTimes(1)
+    expect(onReject).toHaveBeenCalledWith("wi_private_approval", "needs a citation")
+  })
+
+  it("names the consequence of the note it is about to send", () => {
+    renderView([item("wi_private_approval", "in_review", "pending")])
+    fireEvent.click(screen.getByTestId("needs-reject"))
+    expect(screen.getByTestId("needs-reject-consequence").textContent).toContain("Ends the work")
+    expect(screen.getByTestId("needs-reject-confirm").textContent).toContain("Reject")
+    fireEvent.change(screen.getByTestId("needs-reject-note"), { target: { value: "needs a citation" } })
+    expect(screen.getByTestId("needs-reject-consequence").textContent).toContain("another round")
+    expect(screen.getByTestId("needs-reject-confirm").textContent).toContain("Send back")
+  })
+
+  it("an empty rejection still decides — it is the stop, submitted deliberately", () => {
+    const { onReject } = renderView([item("wi_private_approval", "in_review", "pending")])
+    fireEvent.click(screen.getByTestId("needs-reject"))
+    fireEvent.click(screen.getByTestId("needs-reject-confirm"))
+    expect(onReject).toHaveBeenCalledWith("wi_private_approval", "")
   })
 
   it("Unblock… lists the legal exits from legalTargets() and commits the chosen transition", async () => {

@@ -379,8 +379,7 @@ export default function TaskPage() {
                   busy={setStatus.isPending || decide.isPending}
                   onCommitReason={commitBannerReason}
                   onApprove={(choice) => runDecision("approve", undefined, choice)}
-                  onSendBack={(note) => runDecision("reject", note || undefined)}
-                  onReject={() => runDecision("reject")}
+                  onReject={(note) => runDecision("reject", note || undefined)}
                   actions={
                     detail.workItem.status === "blocked" ? (
                       <button

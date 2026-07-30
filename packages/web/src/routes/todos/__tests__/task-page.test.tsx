@@ -218,6 +218,43 @@ describe("the task page", () => {
     await waitFor(() => expect(decideWorkItemApproval).toHaveBeenCalledWith("PLA-12", "approve", undefined, undefined))
   })
 
+  it("Reject… decides nothing on its own — the note and the decision submit together", async () => {
+    const item = full("PLA-12", { status: "in_review", approvalState: "pending", approvalRequest: "OK to go live?" })
+    getWorkItem.mockResolvedValue(detailOf(item))
+    decideWorkItemApproval.mockResolvedValue({ workItem: item, escalated: false })
+    renderTask()
+
+    await screen.findByTestId("task-banner-approval")
+    fireEvent.click(screen.getByTestId("task-banner-reject"))
+    expect(decideWorkItemApproval).not.toHaveBeenCalled()
+
+    const note = screen.getByTestId("task-banner-reject-note")
+    fireEvent.change(note, { target: { value: "Cite the source first" } })
+    // Leaving the field is not a decision, and it must not lose the words.
+    fireEvent.blur(note)
+    expect(decideWorkItemApproval).not.toHaveBeenCalled()
+    expect(screen.getByTestId("task-banner-reject-consequence").textContent).toContain("another round")
+
+    fireEvent.click(screen.getByTestId("task-banner-reject-confirm"))
+    await waitFor(() =>
+      expect(decideWorkItemApproval).toHaveBeenCalledWith("PLA-12", "reject", "Cite the source first", undefined),
+    )
+    expect(decideWorkItemApproval).toHaveBeenCalledTimes(1)
+  })
+
+  it("an empty rejection is submitted as the stop it is, and says so first", async () => {
+    const item = full("PLA-12", { status: "in_review", approvalState: "pending", approvalRequest: "OK to go live?" })
+    getWorkItem.mockResolvedValue(detailOf(item))
+    decideWorkItemApproval.mockResolvedValue({ workItem: item, escalated: false })
+    renderTask()
+
+    await screen.findByTestId("task-banner-approval")
+    fireEvent.click(screen.getByTestId("task-banner-reject"))
+    expect(screen.getByTestId("task-banner-reject-consequence").textContent).toContain("Ends the work")
+    fireEvent.click(screen.getByTestId("task-banner-reject-confirm"))
+    await waitFor(() => expect(decideWorkItemApproval).toHaveBeenCalledWith("PLA-12", "reject", undefined, undefined))
+  })
+
   it("a choice gate holds Approve until an option is picked, then sends the pick", async () => {
     const item = full("PLA-12", { status: "in_review", approvalState: "pending", approvalRequest: "Which variant ships?" })
     getWorkItem.mockResolvedValue(detailOf(item, {
@@ -239,7 +276,7 @@ describe("the task page", () => {
     await waitFor(() => expect(decideWorkItemApproval).toHaveBeenCalledWith("PLA-12", "approve", undefined, "variant-b"))
   })
 
-  it("a reason-less blocked item grows the banner reason field; committing PUTs the same status with the note (F6)", async () => {
+  it("a reason-less blocked item grows the banner reason field; Save PUTs the same status with the note (F6)", async () => {
     const item = full("PLA-12", { status: "blocked" })
     getWorkItem.mockResolvedValue(detailOf(item))
     setWorkItemStatus.mockResolvedValue({ workItem: item, escalated: false })
@@ -248,8 +285,22 @@ describe("the task page", () => {
     const input = await screen.findByTestId("task-banner-reason")
     await waitFor(() => expect(document.activeElement).toBe(input))
     fireEvent.change(input, { target: { value: "Waiting on vendor keys" } })
-    fireEvent.keyDown(input, { key: "Enter" })
+    fireEvent.click(screen.getByTestId("task-banner-reason-save"))
     await waitFor(() => expect(setWorkItemStatus).toHaveBeenCalledWith("PLA-12", "blocked", "Waiting on vendor keys"))
+  })
+
+  it("an unfinished reason survives losing focus — only a submit commits it", async () => {
+    const item = full("PLA-12", { status: "blocked" })
+    getWorkItem.mockResolvedValue(detailOf(item))
+    setWorkItemStatus.mockResolvedValue({ workItem: item, escalated: false })
+    renderTask("/todos/PLA-12", { focusBannerReason: true })
+
+    const input = await screen.findByTestId("task-banner-reason")
+    fireEvent.change(input, { target: { value: "Waiting on ven" } })
+    // Switching browser tabs blurs the focused field. That is not a decision.
+    fireEvent.blur(input)
+    expect(setWorkItemStatus).not.toHaveBeenCalled()
+    expect((screen.getByTestId("task-banner-reason") as HTMLInputElement).value).toBe("Waiting on ven")
   })
 
   it("a blocked item WITH a reason renders it rail-quoted instead of the input", async () => {

@@ -11,6 +11,7 @@ import { EmployeeChip } from "@/components/ui/employee-chip"
 import { STATUS_LABEL, effectiveMaxRounds, operatorSafeTodoError, provenanceLabel, publicWorkItemReference } from "@/lib/todos"
 import { legalTargets } from "@/lib/legal-targets"
 import { ProvenanceIcon, StateCircle, StatusCircle, type StateGlyphKey } from "./state-glyph"
+import { rejectConsequence } from "./task-page/banner"
 import { reasonOf, rollupOf } from "./board/card"
 import { useBoardTrees } from "./board/use-board"
 import { useOpenDetails, useSetWorkItemStatus } from "./use-todos"
@@ -22,10 +23,11 @@ import { displayNameOf, formatRelativeTime } from "./util"
  * oldest-first within a group (the longest-waiting ask wins). Every entry is
  * the same object: neutral card, 34px state disc, title + mono ID line, then
  * the VOICE (attribution row + 2px-rail quote in the delegation language).
- * Actions per kind: approvals decide in place (Approve · Send back · Reject);
- * escalated routes through a legal-exit menu (human-only edges); blocked
- * unblocks through its legal manual exits. The menus consume the same
- * legalTargets() module as drag and the pickers — one legality truth. */
+ * Actions per kind: approvals decide in place (Approve · Reject…, the note
+ * carried by the rejection itself — see banner.tsx); escalated routes through
+ * a legal-exit menu (human-only edges); blocked unblocks through its legal
+ * manual exits. The menus consume the same legalTargets() module as drag and
+ * the pickers — one legality truth. */
 
 type AttentionKind = "approval" | "escalated" | "blocked"
 
@@ -177,7 +179,6 @@ function NeedsYouCard({
   byName,
   resolving,
   onApprove,
-  onSendBack,
   onReject,
   onTransition,
   onOpen,
@@ -188,8 +189,7 @@ function NeedsYouCard({
   byName: Map<string, Employee>
   resolving: boolean
   onApprove: (id: string) => void
-  onSendBack: (id: string, note: string) => void
-  onReject: (id: string) => void
+  onReject: (id: string, note: string) => void
   onTransition: (id: string, status: WorkItemStatusWire) => void
   onOpen: (id: string) => void
 }) {
@@ -266,31 +266,41 @@ function NeedsYouCard({
 
       {/* Actions per kind (states mock §1). */}
       {pending && composing ? (
-        <div className="ml-[58px] mt-3.5 flex flex-col gap-2.5">
+        <form
+          className="ml-[58px] mt-3.5 flex flex-col gap-2.5"
+          onSubmit={(e) => {
+            e.preventDefault()
+            onReject(item.id, note.trim())
+          }}
+        >
           <textarea
             autoFocus
-            data-testid="needs-sendback-note"
+            data-testid="needs-reject-note"
             value={note}
             onChange={(e) => setNote(e.target.value)}
-            placeholder="Add a note for the send-back (optional)…"
+            placeholder="What needs to change?"
+            aria-label="Rejection feedback"
             rows={2}
             className="apple-input w-full resize-none text-[length:var(--text-subheadline)]"
           />
+          <p data-testid="needs-reject-consequence" className="text-[12px] leading-[1.45] text-[var(--text-tertiary)]">
+            {rejectConsequence(note)}
+          </p>
           <div className="flex items-center gap-2.5">
             <button
-              type="button"
-              data-testid="needs-sendback-confirm"
+              type="submit"
+              data-testid="needs-reject-confirm"
               disabled={resolving}
-              onClick={() => onSendBack(item.id, note.trim())}
               className={BTN_FILLED}
+              style={note.trim() ? undefined : { color: "var(--system-red)" }}
             >
-              Send back
+              {note.trim() ? "Send back" : "Reject"}
             </button>
             <button type="button" onClick={() => setComposing(false)} className={BTN_QUIET}>
               Cancel
             </button>
           </div>
-        </div>
+        </form>
       ) : (
         <div className="ml-[58px] mt-3.5 flex flex-wrap items-center gap-2.5">
           {pending ? (
@@ -324,18 +334,15 @@ function NeedsYouCard({
                 Approve
               </button>
               )}
-              <button type="button" data-testid="needs-sendback" disabled={resolving} onClick={() => setComposing(true)} className={BTN_QUIET}>
-                Send back
-              </button>
               <button
                 type="button"
                 data-testid="needs-reject"
                 disabled={resolving}
-                onClick={() => onReject(item.id)}
+                onClick={() => setComposing(true)}
                 className={BTN_QUIET}
                 style={{ color: "var(--system-red)" }}
               >
-                Reject
+                Reject…
               </button>
             </>
           ) : kind === "escalated" ? (
@@ -409,7 +416,6 @@ export function NeedsYouView({
   byName,
   resolvingIds,
   onApprove,
-  onSendBack,
   onReject,
   onOpen,
 }: {
@@ -417,8 +423,7 @@ export function NeedsYouView({
   byName: Map<string, Employee>
   resolvingIds: Set<string>
   onApprove: (id: string) => void
-  onSendBack: (id: string, note: string) => void
-  onReject: (id: string) => void
+  onReject: (id: string, note: string) => void
   onOpen: (id: string) => void
 }) {
   const visible = items.filter((item) => !resolvingIds.has(item.id))
@@ -491,7 +496,6 @@ export function NeedsYouView({
               byName={byName}
               resolving={resolvingIds.has(item.id) || setStatus.isPending}
               onApprove={onApprove}
-              onSendBack={onSendBack}
               onReject={onReject}
               onTransition={onTransition}
               onOpen={onOpen}
