@@ -6,14 +6,13 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-wf-parked-"));
 process.env.JINN_HOME = tmp;
 
-const operatorMessages: string[] = [];
 const delivered: string[] = [];
 
 // The delivery lane is exercised for real down to the durable `callback_deliveries`
 // row; only the two outbound edges (an HTTP post to the gateway, a connector send)
 // are stubbed, because those leave the process.
 vi.mock("../../sessions/callbacks.js", () => ({
-  notifyOperatorChannel: (message: string) => { operatorMessages.push(message); },
+  notifyOperatorChannel: () => { throw new Error("unexpected operator notification"); },
   deliverClaimedSessionDelivery: async (id: string) => { delivered.push(id); return "accepted" as const; },
 }));
 
@@ -30,9 +29,10 @@ let db: import("better-sqlite3").Database;
 
 const GATE = "Verification passed. Approving merges this branch into main.";
 
-function parkedTodo(title: string, target: string | null): string {
+function parkedTodo(title: string, target?: string | null, operatorOnly = false): string {
   const id = store.createWorkItem({ title, source: "human", status: "assigned" }).id;
-  approvals.requestApproval(id, { request: GATE, ref: `workflow:jinn-build:run_abc:land-approval`, target, actor: "workflow" });
+  approvals.requestApproval(id, { request: GATE, ref: "workflow:jinn-build:run_abc:land-approval",
+    target, operatorOnly, actor: "workflow" });
   return id;
 }
 
@@ -56,13 +56,12 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
-  operatorMessages.length = 0;
   delivered.length = 0;
   db.prepare("DELETE FROM callback_deliveries").run();
   db.prepare("DELETE FROM sessions").run();
 });
 
-describe("a parked gate has to reach a person", () => {
+describe("parked-gate session notifications", () => {
   it("wakes the routed employee's session, naming the Todo, the run, and the decision", () => {
     db.prepare(
       `INSERT INTO sessions (id, engine, source, source_ref, status, employee, created_at, last_activity)
@@ -72,7 +71,6 @@ describe("a parked gate has to reach a person", () => {
 
     notifyParked(id);
 
-    expect(operatorMessages).toEqual([]);
     const queued = pendingDeliveries();
     expect(queued).toHaveLength(1);
     expect(queued[0]).toMatchObject({
@@ -101,19 +99,32 @@ describe("a parked gate has to reach a person", () => {
     expect(pendingDeliveries()).toHaveLength(1);
   });
 
-  it("wakes the operator's own COO chat for a gate routed to the virtual root", () => {
-    // The common case: no explicit approver, so the gate routes to a root that
-    // belongs to no employee. The portal agent session IS that root.
+  it("does not wake any top-level chat for a gate routed to the virtual root", () => {
     db.prepare(
       `INSERT INTO sessions (id, engine, source, source_ref, status, created_at, last_activity)
-       VALUES ('sess-portal', 'claude', 'web', 'web:portal', 'idle', '2026-07-30T09:00:00.000Z', '2026-07-30T09:00:00.000Z')`,
+       VALUES
+         ('sess-old', 'claude', 'web', 'web:old', 'idle', '2026-07-30T08:00:00.000Z', '2026-07-30T08:00:00.000Z'),
+         ('sess-middle', 'codex', 'web', 'web:middle', 'idle', '2026-07-30T09:00:00.000Z', '2026-07-30T09:00:00.000Z'),
+         ('sess-recent', 'claude', 'web', 'web:recent', 'running', '2026-07-30T10:00:00.000Z', '2026-07-30T10:00:00.000Z')`,
     ).run();
-    const id = parkedTodo("gate routed to the virtual COO root", null);
+    const id = parkedTodo("gate routed to the virtual COO root");
 
     notifyParked(id);
 
-    expect(operatorMessages).toEqual([]);
-    expect(pendingDeliveries()).toMatchObject([{ targetSessionId: "sess-portal" }]);
+    expect(approvals.currentApproval(id)).toMatchObject({ targetKind: "virtual" });
+    expect(pendingDeliveries()).toEqual([]);
+  });
+
+  it("does not wake an employee session for an operator-only gate", () => {
+    db.prepare(
+      `INSERT INTO sessions (id, engine, source, source_ref, status, employee, created_at, last_activity)
+       VALUES ('sess-employee', 'claude', 'web', 'web:employee', 'idle', 'a-lead', '2026-07-30T09:00:00.000Z', '2026-07-30T09:00:00.000Z')`,
+    ).run();
+    const id = parkedTodo("operator decides the merge gate", "a-lead", true);
+
+    notifyParked(id);
+
+    expect(pendingDeliveries()).toEqual([]);
   });
 
   it("does not mistake an employee's plain child session for the operator's chat", () => {
@@ -121,18 +132,14 @@ describe("a parked gate has to reach a person", () => {
       `INSERT INTO sessions (id, engine, source, source_ref, status, parent_session_id, created_at, last_activity)
        VALUES ('sess-child', 'claude', 'web', 'web:child', 'idle', 'sess-parent', '2026-07-30T09:00:00.000Z', '2026-07-30T09:00:00.000Z')`,
     ).run();
-    const id = parkedTodo("only an employee-less CHILD session exists", null);
+    const id = parkedTodo("only an employee-less CHILD session exists");
 
     notifyParked(id);
 
     expect(pendingDeliveries()).toEqual([]);
-    expect(operatorMessages).toHaveLength(1);
-    expect(operatorMessages[0]).toContain(id);
-    expect(operatorMessages[0]).toContain("run_abc");
-    expect(operatorMessages[0]).toContain(GATE);
   });
 
-  it("falls back to the operator when the routed employee has only an errored session", () => {
+  it("stays silent when the routed employee has only an errored session", () => {
     db.prepare(
       `INSERT INTO sessions (id, engine, source, source_ref, status, employee, created_at, last_activity)
        VALUES ('sess-dead', 'claude', 'web', 'web:dead', 'error', 'a-lead', '2026-07-30T09:00:00.000Z', '2026-07-30T09:00:00.000Z')`,
@@ -142,6 +149,5 @@ describe("a parked gate has to reach a person", () => {
     notifyParked(id);
 
     expect(pendingDeliveries()).toEqual([]);
-    expect(operatorMessages).toHaveLength(1);
   });
 });
