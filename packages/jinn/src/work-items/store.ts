@@ -453,33 +453,49 @@ export function isReviewBounceDeclared(workItemId: string): boolean {
   return latestStatusTransition(workItemId, 'executing')?.fromStatus === 'in_review';
 }
 
+function rowToWorkItemEvent(row: Record<string, unknown>): WorkItemEvent {
+  let detail: Record<string, unknown> | null = null;
+  if (typeof row.detail === 'string' && row.detail) {
+    try {
+      detail = JSON.parse(row.detail) as Record<string, unknown>;
+    } catch {
+      detail = null;
+    }
+  }
+  return {
+    id: row.id as string,
+    workItemId: row.work_item_id as string,
+    kind: row.kind as WorkItemEventKind,
+    fromStatus: (row.from_status as WorkItemStatus) ?? null,
+    toStatus: (row.to_status as WorkItemStatus) ?? null,
+    actor: (row.actor as string) ?? null,
+    detail,
+    createdAt: row.created_at as string,
+  };
+}
+
+/** List audit trails for several items with one query, oldest-first within
+ * each item. Unknown ids receive an empty entry. */
+export function listWorkItemEventsForItems(workItemIds: readonly string[]): Map<string, WorkItemEvent[]> {
+  const ids = [...new Set(workItemIds.map((id) => parseTodoId(id)))];
+  const eventsById = new Map(ids.map((id) => [id, [] as WorkItemEvent[]]));
+  if (ids.length === 0) return eventsById;
+  const db = initDb();
+  const placeholders = ids.map(() => '?').join(', ');
+  const rows = db
+    .prepare(`SELECT * FROM work_item_events WHERE work_item_id IN (${placeholders}) ORDER BY created_at, rowid`)
+    .all(...ids) as Record<string, unknown>[];
+  for (const row of rows) {
+    const event = rowToWorkItemEvent(row);
+    eventsById.get(event.workItemId)?.push(event);
+  }
+  return eventsById;
+}
+
 /** List an item's audit trail, oldest-first (the story reads top-down). */
 export function listWorkItemEvents(workItemId: string): WorkItemEvent[] {
-  const db = initDb();
   const id = parseTodoId(workItemId);
-  const rows = db
-    .prepare('SELECT * FROM work_item_events WHERE work_item_id = ? ORDER BY created_at, rowid')
-    .all(id) as Record<string, unknown>[];
-  return rows.map((row) => {
-    let detail: Record<string, unknown> | null = null;
-    if (typeof row.detail === 'string' && row.detail) {
-      try {
-        detail = JSON.parse(row.detail) as Record<string, unknown>;
-      } catch {
-        detail = null;
-      }
-    }
-    return {
-      id: row.id as string,
-      workItemId: row.work_item_id as string,
-      kind: row.kind as WorkItemEventKind,
-      fromStatus: (row.from_status as WorkItemStatus) ?? null,
-      toStatus: (row.to_status as WorkItemStatus) ?? null,
-      actor: (row.actor as string) ?? null,
-      detail,
-      createdAt: row.created_at as string,
-    };
-  });
+  return listWorkItemEventsForItems([id]).get(id) ?? [];
 }
 
 /* ── Create / read ──────────────────────────────────────────────────────────── */
@@ -620,6 +636,23 @@ export function getWorkItem(id: string): WorkItem | undefined {
   const todoId = parseTodoId(id);
   const row = db.prepare('SELECT * FROM work_items WHERE id = ?').get(todoId) as Record<string, unknown> | undefined;
   return row ? overlayApproval(rowToWorkItem(row), currentApproval(todoId)) : undefined;
+}
+
+/** Read a bounded set of Todos in caller order with one row query and one
+ * approval hydration pass. Unknown ids are omitted. */
+export function getWorkItems(ids: readonly string[]): WorkItem[] {
+  const requestedIds = [...new Set(ids.map((id) => parseTodoId(id)))];
+  if (requestedIds.length === 0) return [];
+  const db = initDb();
+  const placeholders = requestedIds.map(() => '?').join(', ');
+  const rows = db
+    .prepare(`SELECT * FROM work_items WHERE id IN (${placeholders})`)
+    .all(...requestedIds) as Record<string, unknown>[];
+  const byId = new Map(hydrateApprovals(rows.map(rowToWorkItem)).map((item) => [item.id, item]));
+  return requestedIds.flatMap((id) => {
+    const item = byId.get(id);
+    return item ? [item] : [];
+  });
 }
 
 /** Look up a machine-minted item by its stable key — how the workflow bridge
@@ -778,16 +811,24 @@ export interface WorkItemTree {
   spendUsd: number;
 }
 
-/** Read a work item's subtree. One indexed query fetches the whole family via
- *  root_id; the requested node's subtree is then assembled in memory (trees are
- *  depth-capped at 3, so families stay small). */
-export function getWorkItemTree(id: string): WorkItemTree | undefined {
+/** Read multiple work-item subtrees without query fan-out. One indexed query
+ *  fetches every requested family via root_id, then one grouped session query
+ *  fetches spend for those families; each requested subtree is assembled and
+ *  totalled in memory. Unknown IDs are omitted from the returned record. */
+export function getWorkItemTrees(ids: readonly string[]): Record<string, WorkItemTree> {
+  const requestedIds = [...new Set(ids.map((id) => parseTodoId(id)))];
+  if (requestedIds.length === 0) return {};
   const db = initDb();
-  const item = getWorkItem(id);
-  if (!item) return undefined;
+  const placeholders = requestedIds.map(() => '?').join(', ');
+  const requestedRoots = `SELECT root_id FROM work_items WHERE id IN (${placeholders})`;
   const family = hydrateApprovals(
-    (db.prepare('SELECT * FROM work_items WHERE root_id = ?').all(item.rootId) as Record<string, unknown>[]).map(rowToWorkItem),
+    (db
+      .prepare(`SELECT * FROM work_items WHERE root_id IN (${requestedRoots})`)
+      .all(...requestedIds) as Record<string, unknown>[])
+      .map(rowToWorkItem),
   );
+  if (family.length === 0) return {};
+  const itemsById = new Map(family.map((item) => [item.id, item]));
   const childrenByParent = new Map<string, WorkItem[]>();
   for (const member of family) {
     if (!member.parentId) continue;
@@ -795,29 +836,47 @@ export function getWorkItemTree(id: string): WorkItemTree | undefined {
     siblings.push(member);
     childrenByParent.set(member.parentId, siblings);
   }
+  for (const siblings of childrenByParent.values()) {
+    siblings.sort((a, b) => (a.rank ?? Infinity) - (b.rank ?? Infinity) || a.id.localeCompare(b.id));
+  }
   const build = (node: WorkItem): WorkItemTreeNode => ({
     ...node,
-    children: (childrenByParent.get(node.id) ?? [])
-      .sort((a, b) => (a.rank ?? Infinity) - (b.rank ?? Infinity) || a.id.localeCompare(b.id))
-      .map(build),
+    children: (childrenByParent.get(node.id) ?? []).map(build),
   });
-  const root = build(item);
-  const subtreeIds: string[] = [];
-  const walk = (node: WorkItemTreeNode): void => {
-    subtreeIds.push(node.id);
-    node.children.forEach(walk);
-  };
-  walk(root);
-  const totals = Object.fromEntries(WORK_ITEM_STATUS_VALUES.map((status) => [status, 0])) as WorkItemTotals;
-  for (const memberId of subtreeIds) {
-    const member = memberId === root.id ? root : family.find((f) => f.id === memberId)!;
-    totals[member.status] += 1;
+
+  const spendRows = db
+    .prepare(
+      `SELECT sessions.work_item_id AS work_item_id, COALESCE(SUM(sessions.total_cost), 0) AS spend
+       FROM sessions
+       JOIN work_items ON work_items.id = sessions.work_item_id
+       WHERE work_items.root_id IN (${requestedRoots})
+       GROUP BY sessions.work_item_id`,
+    )
+    .all(...requestedIds) as Array<{ work_item_id: string; spend: number }>;
+  const spendByItem = new Map(spendRows.map((row) => [row.work_item_id, row.spend]));
+
+  const trees: Record<string, WorkItemTree> = {};
+  for (const id of requestedIds) {
+    const item = itemsById.get(id);
+    if (!item) continue;
+    const root = build(item);
+    const totals = Object.fromEntries(WORK_ITEM_STATUS_VALUES.map((status) => [status, 0])) as WorkItemTotals;
+    let spendUsd = 0;
+    const walk = (node: WorkItemTreeNode): void => {
+      totals[node.status] += 1;
+      spendUsd += spendByItem.get(node.id) ?? 0;
+      node.children.forEach(walk);
+    };
+    walk(root);
+    trees[id] = { root, totals, spendUsd };
   }
-  const placeholders = subtreeIds.map(() => '?').join(', ');
-  const spend = db
-    .prepare(`SELECT COALESCE(SUM(total_cost), 0) AS spend FROM sessions WHERE work_item_id IN (${placeholders})`)
-    .get(...subtreeIds) as { spend: number };
-  return { root, totals, spendUsd: spend.spend };
+  return trees;
+}
+
+/** Read one work item's subtree. The batch implementation is the source of
+ *  truth so the additive batch route stays byte-for-byte shape-compatible. */
+export function getWorkItemTree(id: string): WorkItemTree | undefined {
+  return getWorkItemTrees([id])[id];
 }
 
 export interface UpdateWorkItemInput {

@@ -172,10 +172,13 @@ import {
   createWorkItem,
   getWorkItem,
   getWorkItemBySourceRef,
+  getWorkItems,
   getWorkItemSpend,
   getWorkItemTree,
+  getWorkItemTrees,
   linkSession,
   listWorkItemEvents,
+  listWorkItemEventsForItems,
   listWorkItems,
   queryWorkItems,
   STICKY_STATUSES,
@@ -1091,6 +1094,16 @@ function fullWorkItemPayload(item: WorkItem): Record<string, unknown> {
     // Slice 4 (additive): the full approval history, oldest request first. The
     // legacy approval* fields on `workItem` remain the current row's values.
     approvals: listApprovals(item.id),
+  };
+}
+
+/** The board/attention enrichment contract: only the two projections those
+ * surfaces read. Heavy comments, relations, labels and approval history stay
+ * behind the single-item detail route. */
+function openWorkItemPayload(item: WorkItem, events = listWorkItemEvents(item.id)): Record<string, unknown> {
+  return {
+    workItem: item,
+    events,
   };
 }
 
@@ -3456,6 +3469,20 @@ export async function handleApiRequest(
 
     // GET /api/work-items — compact Todo list for MCP/web surfaces.
     if (method === "GET" && pathname === "/api/work-items") {
+      const rawIds = url.searchParams.get("ids");
+      if (rawIds !== null) {
+        if (!rawIds.trim()) return badRequest(res, "ids is required as a comma-separated list of Todo IDs");
+        const ids = rawIds.split(",").map((id) => id.trim());
+        if (ids.length > 100) return badRequest(res, "ids must contain at most 100 Todo IDs");
+        if (ids.some((id) => !isTodoId(id))) {
+          return badRequest(res, "ids must be a comma-separated list of Todo IDs in <AAA>-N format");
+        }
+        const workItems = getWorkItems(ids);
+        const eventsById = listWorkItemEventsForItems(workItems.map((item) => item.id));
+        return json(res, {
+          workItems: workItems.map((item) => openWorkItemPayload(item, eventsById.get(item.id) ?? [])),
+        });
+      }
       const parsedQuery = readWorkItemQueryParams(url);
       if (!parsedQuery.ok) return badRequest(res, parsedQuery.error);
       const { filter, limit, offset } = parsedQuery.value;
@@ -3554,6 +3581,20 @@ export async function handleApiRequest(
       } catch (err) {
         return badRequest(res, err instanceof Error ? err.message : String(err));
       }
+    }
+
+    // GET /api/work-items/trees?ids=a,b,c — batched subtrees for board
+    // enrichment. Values have the same shape as the single-tree route's
+    // `tree`; unknown IDs are omitted.
+    if (method === "GET" && pathname === "/api/work-items/trees") {
+      const rawIds = url.searchParams.get("ids");
+      if (!rawIds?.trim()) return badRequest(res, "ids is required as a comma-separated list of Todo IDs");
+      const ids = rawIds.split(",").map((id) => id.trim());
+      if (ids.length > 100) return badRequest(res, "ids must contain at most 100 Todo IDs");
+      if (ids.some((id) => !isTodoId(id))) {
+        return badRequest(res, "ids must be a comma-separated list of Todo IDs in <AAA>-N format");
+      }
+      return json(res, { trees: getWorkItemTrees(ids) });
     }
 
     // GET /api/work-items/:id — full Todo detail.

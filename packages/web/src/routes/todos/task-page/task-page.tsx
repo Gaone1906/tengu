@@ -469,9 +469,9 @@ export default function TaskPage() {
                 />
               )}
 
-              {/* Body — the §7.4 live-markdown editor: rendered in place as you
-                  type, stored body stays plain markdown. Wash on the block
-                  container only (mock .body-text). */}
+              {/* Body — read-only markdown at rest; the §7.4 live editor loads
+                  on entry and keeps the stored body as plain markdown. Wash
+                  stays on the block container only (mock .body-text). */}
               <div
                 className="-mx-2 mt-6 rounded-[10px] px-2 py-1.5 transition-colors hover:bg-[var(--fill-quaternary)] focus-within:bg-[var(--fill-quaternary)]"
                 data-testid="task-body"

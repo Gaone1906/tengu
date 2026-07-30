@@ -142,7 +142,7 @@ describe("inline title + body editor on the page", () => {
     expect(updateWorkItem).not.toHaveBeenCalled()
   })
 
-  it("the live editor mounts with the stored markdown rendered (heading + list, no raw syntax)", async () => {
+  it("the body first renders stored markdown read-only (heading + list, no raw syntax)", async () => {
     getWorkItem.mockResolvedValue(detailOf(full("PLA-12", { body: "## Scope\n\n- E-mail-only identity\n\nShips `PLA-22` separately." })))
     renderTask()
 
@@ -165,18 +165,17 @@ describe("inline title + body editor on the page", () => {
     const { BodyEditor } = await import("../task-page/body-editor")
     const onCommit = vi.fn()
     render(<BodyEditor body={storedBody} editable isDark onCommit={onCommit} />)
+    fireEvent.click(screen.getByTestId("task-body-read"))
     // Non-round-trippable grammars route to the raw fallback (stage-C lossy
     // story); canonical grammar keeps the live editor. Either way, focus
     // arriving and leaving with no edit commits NOTHING.
     const surface = await waitFor(() => {
-      const el = document.querySelector<HTMLElement>("[data-testid=task-body-raw], .ProseMirror, [contenteditable=true]")
+      const el = document.querySelector<HTMLElement>("[data-testid=task-body-raw-edit], .ProseMirror, [contenteditable=true]")
       if (!el) throw new Error("no edit surface mounted")
       return el
     })
-    if (surface.dataset.testid === "task-body-raw") {
-      fireEvent.click(surface)
-      const textarea = screen.getByTestId("task-body-raw-edit")
-      fireEvent.blur(textarea)
+    if (surface.dataset.testid === "task-body-raw-edit") {
+      fireEvent.blur(surface)
     } else {
       fireEvent.focus(surface)
       fireEvent.blur(surface)
@@ -189,15 +188,10 @@ describe("inline title + body editor on the page", () => {
     const { BodyEditor } = await import("../task-page/body-editor")
     const onCommit = vi.fn()
     const { rerender } = render(<BodyEditor body="First." editable isDark onCommit={onCommit} />)
-    await waitFor(() => {
-      if (!document.querySelector(".ProseMirror, [contenteditable=true]")) throw new Error("not mounted")
-    })
-    // A poll delivers a non-canonical body while the caret is elsewhere — the
-    // editor re-judges faithfulness and routes to the raw fallback.
+    // A poll delivers a non-canonical body while the read view is at rest.
     rerender(<BodyEditor body={"- [x] agent-authored line"} editable isDark onCommit={onCommit} />)
-    const raw = await screen.findByTestId("task-body-raw")
-    fireEvent.click(raw)
-    fireEvent.blur(screen.getByTestId("task-body-raw-edit"))
+    fireEvent.click(screen.getByTestId("task-body-read"))
+    fireEvent.blur(await screen.findByTestId("task-body-raw-edit"))
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(onCommit).not.toHaveBeenCalled()
   })
@@ -205,6 +199,7 @@ describe("inline title + body editor on the page", () => {
   it("a canonical body keeps the LIVE editor — no raw fallback in the normal path (§7.4)", async () => {
     const { BodyEditor } = await import("../task-page/body-editor")
     render(<BodyEditor body={"## Scope\n\n- item"} editable isDark onCommit={vi.fn()} />)
+    fireEvent.click(screen.getByTestId("task-body-read"))
     await waitFor(() => {
       if (!document.querySelector(".ProseMirror, [contenteditable=true]")) throw new Error("not mounted")
     })
@@ -216,12 +211,11 @@ describe("inline title + body editor on the page", () => {
     const onCommit = vi.fn()
     const table = "| a | b |\n| --- | --- |\n| 1 | 2 |"
     render(<BodyEditor body={table} editable isDark onCommit={onCommit} />)
-    const raw = await screen.findByTestId("task-body-raw")
-    // The fallback read view renders the table the live editor would destroy.
-    await waitFor(() => expect(raw.querySelector("table")).toBeTruthy())
+    // The lightweight read view renders the table the live editor would destroy.
+    expect(screen.getByTestId("task-body-read").querySelector("table")).toBeTruthy()
     // A genuine edit commits the FULL body unnormalized — the table survives.
-    fireEvent.click(raw)
-    const textarea = screen.getByTestId("task-body-raw-edit") as HTMLTextAreaElement
+    fireEvent.click(screen.getByTestId("task-body-read"))
+    const textarea = await screen.findByTestId("task-body-raw-edit") as HTMLTextAreaElement
     expect(textarea.value).toBe(table)
     fireEvent.change(textarea, { target: { value: `${table}\n\nA new closing line.` } })
     fireEvent.blur(textarea)
@@ -235,13 +229,13 @@ describe("inline title + body editor on the page", () => {
     const { BodyEditor } = await import("../task-page/body-editor")
     const onCommit = vi.fn()
     render(<BodyEditor body={'<img src="x.png" alt="pic">'} editable isDark onCommit={onCommit} />)
-    fireEvent.click(await screen.findByTestId("task-body-raw"))
-    const textarea = screen.getByTestId("task-body-raw-edit")
+    fireEvent.click(screen.getByTestId("task-body-read"))
+    const textarea = await screen.findByTestId("task-body-raw-edit")
     fireEvent.change(textarea, { target: { value: "replaced entirely" } })
     fireEvent.keyDown(textarea, { key: "Escape" })
     expect(screen.queryByTestId("task-body-raw-edit")).toBeNull()
     expect(onCommit).not.toHaveBeenCalled()
-    expect(screen.getByTestId("task-body-raw")).toBeTruthy()
+    expect(screen.getByTestId("task-body-read")).toBeTruthy()
   })
 
   it("blurring the editor after an edit commits plain markdown (heading grammar round-trips)", async () => {
@@ -257,6 +251,7 @@ describe("inline title + body editor on the page", () => {
         editorRef={editorRef as never}
       />,
     )
+    fireEvent.click(screen.getByTestId("task-body-read"))
     const prose = await waitFor(() => {
       const el = document.querySelector<HTMLElement>(".ProseMirror, [contenteditable=true]")
       if (!el || !editorRef.current) throw new Error("editor not mounted")

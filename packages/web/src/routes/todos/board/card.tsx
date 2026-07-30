@@ -1,9 +1,9 @@
-import { useMemo } from "react"
+import { memo, useCallback, useMemo } from "react"
 import { Bell, Calendar, ChevronRight, Pause, TriangleAlert } from "lucide-react"
 import type {
   Employee,
   WorkItemCompactWire,
-  WorkItemDetailWire,
+  WorkItemOpenDetailWire,
   WorkItemTreeWire,
 } from "@/lib/api"
 import { publicWorkItemReference } from "@/lib/todos"
@@ -21,7 +21,7 @@ import { CardTree } from "./card-tree"
 
 export interface CardEnrichment {
   tree?: WorkItemTreeWire
-  detail?: WorkItemDetailWire
+  detail?: WorkItemOpenDetailWire
 }
 
 /** Roll-up counts over all descendants (the mock's 2/5 = closed/total). */
@@ -41,7 +41,7 @@ export function rollupOf(tree: WorkItemTreeWire | undefined, rootStatus: string)
 }
 
 /** The one-line why on blocked/escalated cards: the latest transition note. */
-export function reasonOf(item: WorkItemCompactWire, detail: WorkItemDetailWire | undefined): string | null {
+export function reasonOf(item: WorkItemCompactWire, detail: WorkItemOpenDetailWire | undefined): string | null {
   if (item.status !== "blocked" && item.status !== "escalated") return null
   const events = detail?.events ?? []
   for (let i = events.length - 1; i >= 0; i--) {
@@ -62,7 +62,7 @@ export function reasonOf(item: WorkItemCompactWire, detail: WorkItemDetailWire |
  *  with a live session ref carry the line (the mock: PLA-18/ACM-41, not
  *  PLA-12) — the StateLine is delegation grammar about a session, not a
  *  generic "this column is executing" repeat. */
-export function workingSince(item: WorkItemCompactWire, detail: WorkItemDetailWire | undefined): string | null {
+export function workingSince(item: WorkItemCompactWire, detail: WorkItemOpenDetailWire | undefined): string | null {
   if (item.status !== "executing" || !item.sessionRef) return null
   const events = detail?.events ?? []
   let startedAt: string | undefined
@@ -123,13 +123,13 @@ export interface BoardCardProps {
   onOpenChild: (id: string) => void
   onAddSubTask: (parentId: string, title: string) => void
   /** Drag lift entry point (the drag hook owns pointer capture). */
-  onLiftPointerDown?: (event: React.PointerEvent, id: string) => void
+  onLiftPointerDown?: (event: React.PointerEvent, item: WorkItemCompactWire) => void
   dragging?: boolean
   /** Rendered as the floating drag preview: lifted treatment, inert. */
   ghost?: boolean
 }
 
-export function BoardCard({
+export const BoardCard = memo(function BoardCard({
   item,
   enrichment,
   byName,
@@ -148,12 +148,13 @@ export function BoardCard({
   const reason = reasonOf(item, detail)
   const working = workingSince(item, detail)
   const priority = tree?.root.priority ?? detail?.workItem.priority ?? 2
-  const spendUsd = tree?.spendUsd ?? detail?.spendUsd ?? 0
+  const spendUsd = tree?.spendUsd ?? 0
   const employee = item.assignee ? byName.get(item.assignee) : undefined
   const assigneeName = employee?.displayName ?? item.assignee
   const overdue = !!item.dueAt && Date.parse(item.dueAt) < Date.now()
   const approvalPending = item.approvalState === "pending"
   const sessionRefLabel = publicWorkItemReference(item.sessionRef?.ref ?? null)
+  const addSubTask = useCallback((title: string) => onAddSubTask(item.id, title), [item.id, onAddSubTask])
 
   return (
     <article
@@ -166,7 +167,8 @@ export function BoardCard({
       onKeyDown={(e) => {
         if (e.key === "Enter" && e.target === e.currentTarget) onOpen(item.id)
       }}
-      onPointerDown={(e) => onLiftPointerDown?.(e, item.id)}
+      onPointerDown={(e) => onLiftPointerDown?.(e, item)}
+      style={{ contentVisibility: "auto", containIntrinsicSize: "auto 160px" }}
       className={[
         "group focus-ring cursor-pointer select-none rounded-[var(--radius-lg)] px-[13px] py-3 outline-none transition-colors duration-150",
         ghost
@@ -308,9 +310,9 @@ export function BoardCard({
           tree={tree}
           cardDepth={item.depth ?? 0}
           onOpenChild={onOpenChild}
-          onAddSubTask={(title) => onAddSubTask(item.id, title)}
+          onAddSubTask={addSubTask}
         />
       )}
     </article>
   )
-}
+})

@@ -53,7 +53,7 @@ import { cleanupMcpConfigFile, sweepOrphanMcpConfigFiles } from "../mcp/resolver
 import { startStatusReconciler } from "./status-reconciler.js";
 import { armJinnAttachGate } from "../mcp/attachment.js";
 import { syncExternalTurn } from "./external-turns.js";
-import { pickEncoding, isCompressibleExt, compressStream } from "./compress.js";
+import { pickEncoding, isCompressibleExt, compressBuffer, compressStream, type Encoding } from "./compress.js";
 import { attachPtyWebSocket } from "./pty-ws.js";
 import { openWorkflowDatabase } from "../workflows/repository-migrations.js";
 import { importLegacyWorkflowDefinitions } from "../workflows/import-v1.js";
@@ -241,10 +241,28 @@ type RuntimeActivitySource = {
   onRuntimeActivity?: (cb: (sessionId: string, info: RuntimeActivityInfo | null) => void) => void;
 };
 
+type ServeStaticOptions = {
+  compress?: (encoding: Encoding, input: Buffer) => Buffer;
+  compressionCache?: {
+    entries: Map<string, Buffer>;
+    totalBytes: number;
+  };
+  compressionCacheMaxEntries?: number;
+  compressionCacheMaxBytes?: number;
+};
+
+const DEFAULT_COMPRESSED_ASSET_CACHE_MAX_ENTRIES = 256;
+const DEFAULT_COMPRESSED_ASSET_CACHE_MAX_BYTES = 32 * 1024 * 1024;
+const compressedAssetCache = {
+  entries: new Map<string, Buffer>(),
+  totalBytes: 0,
+};
+
 export function serveStatic(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   webDir: string,
+  options: ServeStaticOptions = {},
 ): boolean {
   if (!fs.existsSync(webDir)) return false;
 
@@ -298,6 +316,32 @@ export function serveStatic(
     headers["Content-Encoding"] = enc;
     headers["Vary"] = "Accept-Encoding";
     res.writeHead(200, headers);
+    if (isHashedAsset) {
+      const key = `${resolved}\0${fs.statSync(resolved).mtimeMs}\0${enc}`;
+      const cache = options.compressionCache ?? compressedAssetCache;
+      let compressed = cache.entries.get(key);
+      if (!compressed) {
+        compressed = (options.compress ?? compressBuffer)(enc, fs.readFileSync(resolved));
+        const maxEntries = options.compressionCacheMaxEntries ?? DEFAULT_COMPRESSED_ASSET_CACHE_MAX_ENTRIES;
+        const maxBytes = options.compressionCacheMaxBytes ?? DEFAULT_COMPRESSED_ASSET_CACHE_MAX_BYTES;
+        if (maxEntries > 0 && compressed.byteLength <= maxBytes) {
+          while (
+            cache.entries.size >= maxEntries
+            || cache.totalBytes + compressed.byteLength > maxBytes
+          ) {
+            const oldestKey = cache.entries.keys().next().value;
+            if (oldestKey === undefined) break;
+            const oldest = cache.entries.get(oldestKey);
+            cache.entries.delete(oldestKey);
+            cache.totalBytes -= oldest?.byteLength ?? 0;
+          }
+          cache.entries.set(key, compressed);
+          cache.totalBytes += compressed.byteLength;
+        }
+      }
+      res.end(compressed);
+      return true;
+    }
     fs.createReadStream(resolved).pipe(compressStream(enc)).pipe(res);
     return true;
   }

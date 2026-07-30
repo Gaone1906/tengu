@@ -4,6 +4,9 @@ import { MemoryRouter } from "react-router-dom"
 import { NavRibbon } from "../pill-nav"
 import { NAV_ITEMS } from "@/lib/nav"
 
+const prefetchRoute = vi.fn()
+vi.mock("@/lib/route-prefetch", () => ({ prefetchRoute: (...args: unknown[]) => prefetchRoute(...args) }))
+
 vi.mock("@/hooks/use-workspaces", () => ({
   useWorkspaces: () => ({ data: [] }),
   useStartWorkspace: () => ({ mutateAsync: vi.fn(), isPending: false, variables: undefined }),
@@ -49,6 +52,12 @@ describe("NavRibbon", () => {
       const link = screen.getByLabelText(item.label)
       expect(link.getAttribute("href")).toBe(item.href)
     }
+  })
+
+  it("prefetches a route when its nav link is hovered", () => {
+    renderRibbon({ listOpen: true })
+    fireEvent.pointerEnter(screen.getByLabelText("Todos"))
+    expect(prefetchRoute).toHaveBeenCalledWith("/todos")
   })
 
   it("marks the active route with aria-current and a non-accent fill", () => {

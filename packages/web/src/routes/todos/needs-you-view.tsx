@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react"
 import { Check, MessageSquareText } from "lucide-react"
-import type { Employee, WorkItemCompactWire, WorkItemDetailWire, WorkItemStatusWire } from "@/lib/api"
+import type { Employee, WorkItemCompactWire, WorkItemOpenDetailWire, WorkItemStatusWire } from "@/lib/api"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -75,7 +75,7 @@ function WorkRef({ item }: { item: WorkItemCompactWire }) {
 export function attentionIdLine(
   item: WorkItemCompactWire,
   kind: AttentionKind,
-  detail: WorkItemDetailWire | undefined,
+  detail: WorkItemOpenDetailWire | undefined,
 ): string {
   const parts: string[] = []
   const publicId = publicWorkItemReference(item.id)
@@ -184,7 +184,7 @@ function NeedsYouCard({
   onOpen,
 }: {
   item: WorkItemCompactWire
-  detail: WorkItemDetailWire | undefined
+  detail: WorkItemOpenDetailWire | undefined
   openChildren: number
   byName: Map<string, Employee>
   resolving: boolean
@@ -433,7 +433,7 @@ export function NeedsYouView({
   const detailIds = useMemo(() => visible.map((item) => item.id).slice(0, 60), [items, resolvingIds]) // eslint-disable-line react-hooks/exhaustive-deps
   const details = useOpenDetails(detailIds)
   const detailById = useMemo(() => {
-    const map = new Map<string, WorkItemDetailWire>()
+    const map = new Map<string, WorkItemOpenDetailWire>()
     for (const d of details.data ?? []) map.set(d.workItem.id, d)
     return map
   }, [details.data])

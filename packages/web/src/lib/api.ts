@@ -812,6 +812,9 @@ export interface WorkItemDetailWire {
   approvals?: WorkItemApprovalWire[]
 }
 
+/** Lightweight batch enrichment used by board/attention rows. */
+export type WorkItemOpenDetailWire = Pick<WorkItemDetailWire, "workItem" | "events">
+
 export interface ApprovalDecisionResultWire {
   workItem: WorkItemFullWire
   escalated: boolean
@@ -1138,11 +1141,27 @@ export const api = {
   /** Todos v2 slice 6: the board's lazy tree expansion (roll-ups + spend). */
   getWorkItemTree: (id: string, signal?: AbortSignal) =>
     get<{ tree: WorkItemTreeWire }>(`/api/work-items/${encodeURIComponent(id)}/tree`, signal ? { signal } : undefined),
+  /** ICI-648: all visible board trees in one request. */
+  getWorkItemTrees: (ids: string[], signal?: AbortSignal) => {
+    const q = new URLSearchParams({ ids: ids.join(",") })
+    return get<{ trees: Record<string, WorkItemTreeWire> }>(
+      `/api/work-items/trees?${q.toString()}`,
+      signal ? { signal } : undefined,
+    )
+  },
   /** Todos v2 slice 6: the switcher's department boards. */
   getDepartments: () => get<{ departments: DepartmentSummaryWire[] }>("/api/departments"),
   /** GRS-021a: full Todo detail (property stack + live spend + audit). */
   getWorkItem: (id: string, signal?: AbortSignal) =>
     get<WorkItemDetailWire>(`/api/work-items/${encodeURIComponent(id)}`, signal ? { signal } : undefined),
+  /** ICI-648: lightweight open-detail enrichment through the existing list route. */
+  getWorkItems: (ids: string[], signal?: AbortSignal) => {
+    const q = new URLSearchParams({ ids: ids.join(",") })
+    return get<{ workItems: WorkItemOpenDetailWire[] }>(
+      `/api/work-items?${q.toString()}`,
+      signal ? { signal } : undefined,
+    )
+  },
   /** GRS-021b: the operator's approval DECISION. Human-only server-side; a
    *  tool-marked caller is refused 403. Send-back is `reject` (+ optional note). */
   decideWorkItemApproval: (id: string, decision: "approve" | "reject", note?: string, choice?: string) =>

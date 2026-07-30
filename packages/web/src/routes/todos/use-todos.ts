@@ -5,6 +5,7 @@ import {
   type Employee,
   type WorkItemCompactWire,
   type WorkItemDetailWire,
+  type WorkItemOpenDetailWire,
   type WorkItemLabelWire,
   type WorkItemStatusWire,
 } from "@/lib/api"
@@ -22,12 +23,7 @@ export function useOpenDetails(openIds: string[], enabled = true) {
   const key = [...openIds].sort().join(",")
   return useQuery({
     queryKey: ["work-items", "open-details", key],
-    queryFn: async (): Promise<WorkItemDetailWire[]> => {
-      const settled = await Promise.allSettled(openIds.map((id) => api.getWorkItem(id)))
-      const out: WorkItemDetailWire[] = []
-      for (const s of settled) if (s.status === "fulfilled") out.push(s.value)
-      return out
-    },
+    queryFn: async (): Promise<WorkItemOpenDetailWire[]> => (await api.getWorkItems(openIds)).workItems,
     enabled: enabled && openIds.length > 0,
     staleTime: 10_000,
   })

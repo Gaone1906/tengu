@@ -1449,6 +1449,128 @@ describe("Todos v2 — sub-task create, tree route, new filters, cascade archive
     expect(missing.status).toBe(404);
   });
 
+  it("GET /api/work-items/trees returns root and leaf payloads equal to their single-tree responses and omits unknowns", async () => {
+    const root = store.createWorkItem({ title: "batch route tree root" });
+    const child = store.createWorkItem({ title: "batch route tree child", parentId: root.id });
+    const leaf = store.createWorkItem({ title: "batch route tree leaf", parentId: child.id });
+    const unknown = "ZZZ-424242";
+
+    const rootRes = makeRes();
+    await api.handleApiRequest(makeReq("GET", `/api/work-items/${root.id}/tree`), rootRes.res, ctx);
+    const leafRes = makeRes();
+    await api.handleApiRequest(makeReq("GET", `/api/work-items/${leaf.id}/tree`), leafRes.res, ctx);
+
+    const batchRes = makeRes();
+    await api.handleApiRequest(
+      makeReq("GET", `/api/work-items/trees?ids=${root.id},${leaf.id},${unknown}`),
+      batchRes.res,
+      ctx,
+    );
+
+    expect(batchRes.status).toBe(200);
+    expect(batchRes.body).toEqual({
+      trees: {
+        [root.id]: rootRes.body.tree,
+        [leaf.id]: leafRes.body.tree,
+      },
+    });
+    expect(batchRes.body.trees).not.toHaveProperty(unknown);
+  });
+
+  it("GET /api/work-items/trees rejects more than 100 ids with a readable 400", async () => {
+    const ids = Array.from({ length: 101 }, (_, index) => `ZZZ-${index + 1}`);
+    const cap = makeRes();
+    await api.handleApiRequest(makeReq("GET", `/api/work-items/trees?ids=${ids.join(",")}`), cap.res, ctx);
+
+    expect(cap.status).toBe(400);
+    expect(cap.body.error).toMatch(/ids.*at most 100/i);
+  });
+
+  it("GET /api/work-items/trees has the same identified-caller auth guard as the single-tree route", async () => {
+    const item = store.createWorkItem({ title: "batch route auth parity" });
+    const unauthenticatedHeaders = { [TOOL_CALL_HEADER]: TOOL_CALL_HEADER_VALUE };
+
+    const single = makeRes();
+    await api.handleApiRequest(
+      makeReq("GET", `/api/work-items/${item.id}/tree`, undefined, unauthenticatedHeaders),
+      single.res,
+      ctx,
+    );
+    const batch = makeRes();
+    await api.handleApiRequest(
+      makeReq("GET", `/api/work-items/trees?ids=${item.id}`, undefined, unauthenticatedHeaders),
+      batch.res,
+      ctx,
+    );
+
+    expect(single.status).toBe(403);
+    expect(batch.status).toBe(single.status);
+    expect(batch.body).toEqual(single.body);
+  });
+
+  it("GET /api/work-items?ids returns the open-detail subset from single-item payloads and omits unknowns", async () => {
+    const first = store.createWorkItem({ title: "batch detail first" });
+    const second = store.createWorkItem({ title: "batch detail second" });
+    const unknown = "ZZZ-424242";
+
+    const firstRes = makeRes();
+    await api.handleApiRequest(makeReq("GET", `/api/work-items/${first.id}`), firstRes.res, ctx);
+    const secondRes = makeRes();
+    await api.handleApiRequest(makeReq("GET", `/api/work-items/${second.id}`), secondRes.res, ctx);
+
+    const batchRes = makeRes();
+    await api.handleApiRequest(
+      makeReq("GET", `/api/work-items?ids=${first.id},${second.id},${unknown}`),
+      batchRes.res,
+      ctx,
+    );
+
+    expect(batchRes.status).toBe(200);
+    expect(batchRes.body).toEqual({
+      workItems: [
+        {
+          workItem: firstRes.body.workItem,
+          events: firstRes.body.events,
+        },
+        {
+          workItem: secondRes.body.workItem,
+          events: secondRes.body.events,
+        },
+      ],
+    });
+  });
+
+  it("GET /api/work-items?ids rejects more than 100 ids", async () => {
+    const ids = Array.from({ length: 101 }, (_, index) => `ZZZ-${index + 1}`);
+    const cap = makeRes();
+    await api.handleApiRequest(makeReq("GET", `/api/work-items?ids=${ids.join(",")}`), cap.res, ctx);
+
+    expect(cap.status).toBe(400);
+    expect(cap.body.error).toMatch(/ids.*at most 100/i);
+  });
+
+  it("GET /api/work-items?ids has the same identified-caller auth guard as the single-detail route", async () => {
+    const item = store.createWorkItem({ title: "batch detail auth parity" });
+    const unauthenticatedHeaders = { [TOOL_CALL_HEADER]: TOOL_CALL_HEADER_VALUE };
+
+    const single = makeRes();
+    await api.handleApiRequest(
+      makeReq("GET", `/api/work-items/${item.id}`, undefined, unauthenticatedHeaders),
+      single.res,
+      ctx,
+    );
+    const batch = makeRes();
+    await api.handleApiRequest(
+      makeReq("GET", `/api/work-items?ids=${item.id}`, undefined, unauthenticatedHeaders),
+      batch.res,
+      ctx,
+    );
+
+    expect(single.status).toBe(403);
+    expect(batch.status).toBe(single.status);
+    expect(batch.body).toEqual(single.body);
+  });
+
   it("filters by createdBy/parent/root/rootsOnly and compact rows carry the five v2 fields", async () => {
     const root = store.createWorkItem({ title: "filter fixture root v2", createdBy: "operator" });
     const child = store.createWorkItem({ title: "filter fixture child v2", parentId: root.id, createdBy: "a-lead" });

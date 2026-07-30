@@ -1396,7 +1396,11 @@ const MessageRow = React.memo(function MessageRow({ msg, index: i, messages, loa
   }, [messages, i, isUser, isNotification])
 
   return (
-    <div key={msg.id || i} data-message-id={msg.id || `idx-${i}`}>
+    <div
+      key={msg.id || i}
+      data-message-id={msg.id || `idx-${i}`}
+      style={{ contentVisibility: "auto", containIntrinsicSize: "auto 120px" }}
+    >
       {/* Timestamp divider */}
       {showTimestamp && <TimestampDivider label={formattedTimestamp} />}
 

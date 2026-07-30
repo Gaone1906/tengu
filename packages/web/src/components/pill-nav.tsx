@@ -9,6 +9,7 @@ import { useBreadcrumbs } from "@/context/breadcrumb-context"
 import { cn } from "@/lib/utils"
 import { useFeatures } from "@/hooks/use-features"
 import { WorkspaceSwitcher } from "@/components/workspaces/workspace-menu"
+import { prefetchRoute } from "@/lib/route-prefetch"
 
 // ---------------------------------------------------------------------------
 // Frosted pill primitives (mockup _shared.css `.pill` recipe)
@@ -93,6 +94,8 @@ export function NavList({
             key={item.href}
             to={item.href}
             onClick={onNavigate}
+            onPointerEnter={() => prefetchRoute(item.href)}
+            onFocus={() => prefetchRoute(item.href)}
             aria-current={isActive ? "page" : undefined}
             className={cn(
               "flex h-10 items-center gap-3 rounded-[10px] px-3 text-[length:var(--text-subheadline)] transition-colors",
@@ -208,6 +211,8 @@ function RibbonRow({
       <Link
         to={href}
         onClick={onClick}
+        onPointerEnter={() => prefetchRoute(href)}
+        onFocus={() => prefetchRoute(href)}
         aria-label={label}
         aria-current={isActive ? "page" : undefined}
         className={cls}
@@ -310,6 +315,8 @@ export function NavRibbon({
             // color-emoji presentation as the chat variant — no toggle/morph.
             <Link
               to="/"
+              onPointerEnter={() => prefetchRoute("/")}
+              onFocus={() => prefetchRoute("/")}
               aria-label={portalName}
               title={portalName}
               className="relative flex size-11 items-center justify-center rounded-[12px] transition-colors hover:bg-[var(--fill-secondary)]"
