@@ -141,7 +141,9 @@ export class PiEngine implements InterruptibleEngine {
     args.push("--session-id", piSessionId, "--session-dir", sessionDir);
     if (mcpExtension.attached) args.push("--extension", mcpExtension.extensionPath);
     if (opts.cliFlags?.length) args.push(...opts.cliFlags);
-    args.push(prompt);
+    // The prompt goes over stdin, never argv: pi reads any dash-leading token as an
+    // option ("Unknown option: -") and has no `--` separator to escape it, so a
+    // prompt like "- " would kill the turn before the model saw it.
 
     logger.info(
       `Pi engine starting: ${bin} --provider ${provider ?? "(default)"} --model ${model}` +
@@ -158,6 +160,18 @@ export class PiEngine implements InterruptibleEngine {
         stdio: ["pipe", "pipe", "pipe"],
         detached: process.platform !== "win32",
       });
+
+      if (proc.stdin) {
+        // A prompt written to a pi that has already died raises EPIPE here; the
+        // close handler below reports the real failure, so surface it and move on.
+        proc.stdin.on("error", (err: Error) => {
+          logger.warn(`Pi engine could not write the prompt to stdin for session ${trackingId}: ${err.message}`);
+        });
+        proc.stdin.write(prompt);
+        proc.stdin.end();
+      } else {
+        logger.error(`Pi engine spawned without a stdin pipe for session ${trackingId}; the prompt cannot be delivered`);
+      }
 
       const rl = readline.createInterface({ input: proc.stdout, terminal: false });
 

@@ -5,7 +5,13 @@ import type { EngineResult } from "../../shared/types.js";
 interface FakeProc {
   stdout: PassThrough;
   stderr: PassThrough;
-  stdin: { end: () => void };
+  stdin: {
+    on: (event: string, cb: (...a: any[]) => void) => void;
+    write: (chunk: string) => void;
+    end: () => void;
+  };
+  stdinWrites: string[];
+  stdinEnded: boolean;
   exitCode: number | null;
   killed: boolean;
   kill: (sig?: string) => boolean;
@@ -33,7 +39,13 @@ function makeFakeProc(): FakeProc {
   const p: FakeProc = {
     stdout,
     stderr,
-    stdin: { end: () => {} },
+    stdin: {
+      on: () => {},
+      write: (chunk: string) => { p.stdinWrites.push(chunk); },
+      end: () => { p.stdinEnded = true; },
+    },
+    stdinWrites: [],
+    stdinEnded: false,
     exitCode: null,
     killed: false,
     pid: 8888,
@@ -170,5 +182,45 @@ describe("PiEngine lifecycle", () => {
     const result = await promise;
     expect(result.result).toBe("");
     expect(result.error).toBe("Interrupted: user stopped");
+  });
+});
+
+/**
+ * Pi's parser reads any dash-leading argv token as an option — `pi "- "` exits with
+ * `Error: Unknown option: -` — and it has no `--` separator (it reports `--` itself
+ * as an unknown option). Its documented escape hatch is stdin, which pi consumes as
+ * the message when no positional prompt is present.
+ */
+describe("PiEngine — prompt delivery over stdin", () => {
+  async function runWithPrompt(prompt: string) {
+    const engine = new PiEngine();
+    const promise = engine.run({ prompt, cwd: "/tmp", sessionId: "jinn-pi-dash", model: "ollama/gemma4:12b" });
+    await flush();
+    const call = spawnCalls[spawnCalls.length - 1]!;
+    return { promise, call };
+  }
+
+  it.each(["- ", "-p do the thing", "--json output please", "-"])(
+    "keeps the dash-leading prompt %j off argv and writes it to stdin",
+    async (prompt) => {
+      const { promise, call } = await runWithPrompt(prompt);
+      expect(call.args).not.toContain(prompt);
+      expect(call.proc.stdinWrites.join("")).toBe(prompt);
+      expect(call.proc.stdinEnded).toBe(true);
+      call.proc.emitStdout(agentEnd("ok") + "\n");
+      await flush();
+      call.proc.close(0);
+      await promise;
+    },
+  );
+
+  it("still delivers an ordinary prompt, and never as a trailing positional", async () => {
+    const { promise, call } = await runWithPrompt("hello there");
+    expect(call.args).not.toContain("hello there");
+    expect(call.proc.stdinWrites.join("")).toBe("hello there");
+    call.proc.emitStdout(agentEnd("ok") + "\n");
+    await flush();
+    call.proc.close(0);
+    await promise;
   });
 });

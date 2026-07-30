@@ -202,6 +202,13 @@ function rateLimitFromStopFailure(payload: HookPayload | undefined): EngineRateL
   return { status: "rejected", rateLimitType: "interactive_detected" };
 }
 
+/**
+ * The prompt is user text, and the claude CLI's parser reads a leading dash as a
+ * flag (`error: unknown option '- '`), killing the PTY before the turn starts. So
+ * the prompt trails everything behind `--`. That is also the only placement that
+ * works: put it earlier and the variadic `--mcp-config` swallows it; put `--`
+ * earlier and the flags after it become positionals.
+ */
 export function buildInteractiveArgs(o: InteractiveArgsOpts): string[] {
   const args: string[] = [];
   if (o.resumeSessionId) args.push("--resume", o.resumeSessionId);
@@ -210,7 +217,6 @@ export function buildInteractiveArgs(o: InteractiveArgsOpts): string[] {
   if (o.attachments?.length) {
     prompt += buildAttachmentSuffix(o.attachments);
   }
-  args.push(prompt); // positional — MUST precede variadic --mcp-config
 
   args.push("--chrome");
   if (o.effortLevel && o.effortLevel !== "default") args.push("--effort", o.effortLevel);
@@ -221,6 +227,7 @@ export function buildInteractiveArgs(o: InteractiveArgsOpts): string[] {
   if (o.appendSystemPrompt) args.push("--append-system-prompt", o.appendSystemPrompt);
   if (o.cliFlags?.length) args.push(...o.cliFlags);
   if (o.mcpConfigPath) args.push("--mcp-config", o.mcpConfigPath);
+  args.push("--", prompt);
   return args;
 }
 

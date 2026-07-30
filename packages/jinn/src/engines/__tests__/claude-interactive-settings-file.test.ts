@@ -223,7 +223,7 @@ describe("InteractiveClaudeEngine — settings file survives model-switch cold r
       systemPrompt: "# Full system context",
     } as any);
     await flush();
-    const unchangedPrompt = spawnArgs[0][spawnArgs[0].indexOf("c1") + 1];
+    const unchangedPrompt = spawnArgs[0][spawnArgs[0].indexOf("--") + 1];
     expect(unchangedPrompt).toBe("cold unchanged");
     hookCb!({ hook_event_name: "SessionStart", session_id: "c1" });
     hookCb!({ hook_event_name: "Stop", last_assistant_message: "done" });
@@ -240,7 +240,7 @@ describe("InteractiveClaudeEngine — settings file survives model-switch cold r
       platformContextRefresh: refresh,
     } as any);
     await flush();
-    const dirtyPrompt = spawnArgs[1][spawnArgs[1].indexOf("c1") + 1];
+    const dirtyPrompt = spawnArgs[1][spawnArgs[1].indexOf("--") + 1];
     expect(dirtyPrompt).toBe(`${refresh}\n\ncold dirty`);
     hookCb!({ hook_event_name: "SessionStart", session_id: "c1" });
     hookCb!({ hook_event_name: "Stop", last_assistant_message: "done" });

@@ -139,6 +139,7 @@ describe("buildInteractiveArgs — system prompt + sentinel via CLI flag", () =>
     const i = args.indexOf("--append-system-prompt");
     return i >= 0 ? args[i + 1] : undefined;
   };
+  const trailingPositional = (args: string[]): string | undefined => args[args.indexOf("--") + 1];
 
   it("emits --append-system-prompt carrying the persona AND the sentinel", () => {
     const args = buildInteractiveArgs({
@@ -172,8 +173,7 @@ describe("buildInteractiveArgs — system prompt + sentinel via CLI flag", () =>
       ].join("\n"),
     });
     const args = buildInteractiveArgs({ prompt, settingsPath: "/tmp/s.json", resumeSessionId: "original-claude-id" });
-    const positionalPrompt = args[args.indexOf("original-claude-id") + 1];
-    expect(positionalPrompt).toBe("spawn the child now");
+    expect(trailingPositional(args)).toBe("spawn the child now");
   });
 
   it("can carry an explicit platform context refresh in the positional resume prompt", () => {
@@ -185,8 +185,43 @@ describe("buildInteractiveArgs — system prompt + sentinel via CLI flag", () =>
       platformContextRefresh: refresh,
     } as any);
     const args = buildInteractiveArgs({ prompt, settingsPath: "/tmp/s.json", resumeSessionId: "original-claude-id" });
-    const positionalPrompt = args[args.indexOf("original-claude-id") + 1];
-    expect(positionalPrompt).toBe(`${refresh}\n\nspawn the child now`);
+    expect(trailingPositional(args)).toBe(`${refresh}\n\nspawn the child now`);
+  });
+});
+
+/**
+ * A prompt starting with `-` is read by the claude CLI's parser as a flag
+ * (`error: unknown option '- '`) and the PTY dies before the turn starts. The
+ * prompt therefore trails the whole flag list behind `--`, which is also the only
+ * placement that leaves the variadic `--mcp-config` its value.
+ */
+describe("buildInteractiveArgs — dash-leading prompts", () => {
+  it.each(["- ", "-p do the thing", "--json output please", "-"])(
+    "passes %j as a positional, not a flag",
+    (prompt) => {
+      const args = buildInteractiveArgs({
+        prompt,
+        settingsPath: "/tmp/s.json",
+        mcpConfigPath: "/tmp/mcp.json",
+        resumeSessionId: "claude-id",
+      });
+      const separator = args.indexOf("--");
+      expect(separator).toBeGreaterThanOrEqual(0);
+      expect(args.slice(separator + 1)).toEqual([prompt]);
+    },
+  );
+
+  it("keeps the variadic --mcp-config and its value ahead of the separator", () => {
+    const args = buildInteractiveArgs({
+      prompt: "- ",
+      settingsPath: "/tmp/s.json",
+      mcpConfigPath: "/tmp/mcp.json",
+    });
+    const separator = args.indexOf("--");
+    const configFlag = args.indexOf("--mcp-config");
+    expect(configFlag).toBeGreaterThanOrEqual(0);
+    expect(args[configFlag + 1]).toBe("/tmp/mcp.json");
+    expect(configFlag + 1).toBeLessThan(separator);
   });
 });
 
