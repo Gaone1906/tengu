@@ -175,6 +175,7 @@ describe("the task page", () => {
     renderTask()
 
     expect(screen.getByTestId("task-page-skeleton")).toBeTruthy()
+    expect(screen.getByTestId("task-banner-skeleton")).toBeTruthy()
     expect(screen.getByTestId("task-details-toggle")).toBeTruthy()
     expect(screen.getByTestId("task-activity")).toBeTruthy()
 
@@ -184,6 +185,15 @@ describe("the task page", () => {
     await waitFor(() => expect(screen.queryByTestId("task-page-skeleton")).toBeNull())
     expect(screen.getByTestId("task-details-toggle")).toBeTruthy()
     expect(screen.getByTestId("task-activity")).toBeTruthy()
+  })
+
+  it("reserves a two-line mobile title while the detail is pending", () => {
+    stubMobileViewport()
+    getWorkItem.mockImplementation(() => new Promise(() => {}))
+    renderTask()
+
+    expect(screen.getByTestId("task-id-skeleton").className).toContain("h-[18px]")
+    expect(screen.getByTestId("task-title-skeleton").className).toContain("h-[62px]")
   })
 
   it("keeps the crumb and chip bands single-height while second-wave data lands", async () => {

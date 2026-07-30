@@ -654,6 +654,7 @@ describe("board states (states mock §6 — stage C)", () => {
     renderBoard("/todos/b/platform")
     await waitFor(() => expect(screen.getByTestId("board-skeleton")).toBeTruthy())
     expect(screen.getByTestId("board-skeleton-closed-rail")).toBeTruthy()
+    expect(screen.getByTestId("board-skeleton").children).toHaveLength(6)
   })
 
   it("a board load failure surfaces the calm error card, not a blank surface", async () => {

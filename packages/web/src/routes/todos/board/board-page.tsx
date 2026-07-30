@@ -964,7 +964,7 @@ function FilteredEmptyCard({ count, onClear }: { count: number; onClear: () => v
 /** Loading keeps exact card geometry so nothing shifts when data lands
  *  (states mock §6 .skel-col: 56px overline bar, 85%/55% title bars). */
 function BoardSkeleton() {
-  const cardsPerColumn = [3, 2, 3, 2]
+  const cardsPerColumn = [3, 2, 3, 2, 1]
   return (
     <div className="flex min-h-full items-start gap-3 px-10 pb-8 pt-5" data-testid="board-skeleton" aria-hidden>
       {cardsPerColumn.map((cards, column) => (

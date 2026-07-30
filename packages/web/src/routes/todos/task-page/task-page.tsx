@@ -601,8 +601,19 @@ function TaskPageSkeleton({ mobile }: { mobile: boolean }) {
     "bg-[var(--fill-tertiary)] motion-safe:animate-[skeletonPulse_1.6s_var(--ease-smooth)_infinite]"
   return (
     <div data-testid="task-page-skeleton" className="min-w-0" aria-hidden>
-      {mobile && <div className={`mb-1 h-3 w-14 rounded-md ${pulse}`} />}
-      <div className={`${mobile ? "h-8 w-[82%]" : "h-[38px] w-[68%]"} rounded-[10px] ${pulse}`} />
+      {!mobile && (
+        <div
+          data-testid="task-banner-skeleton"
+          className={`mb-3.5 h-[126px] w-full rounded-[var(--radius-xl)] ${pulse}`}
+        />
+      )}
+      {mobile && (
+        <div data-testid="task-id-skeleton" className={`mb-1 h-[18px] w-14 rounded-md ${pulse}`} />
+      )}
+      <div
+        data-testid="task-title-skeleton"
+        className={`${mobile ? "h-[62px] w-[82%]" : "h-[38px] w-[68%]"} rounded-[10px] ${pulse}`}
+      />
       <div className={`mt-3 flex ${mobile ? "h-[34px]" : "h-7"} items-center gap-2`}>
         <span className={`h-full w-[92px] rounded-full ${pulse}`} />
         <span className={`h-full w-[116px] rounded-full ${pulse}`} />
