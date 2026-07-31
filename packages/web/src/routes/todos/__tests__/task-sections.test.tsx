@@ -112,6 +112,25 @@ function comment(id: string, body: string, at: string, extra: Partial<WorkItemCo
   }
 }
 
+function imageAttachment(
+  id: string,
+  filename: string,
+  commentId: string | null = null,
+): WorkItemAttachmentWire {
+  return {
+    id,
+    workItemId: "PLA-12",
+    commentId,
+    filename,
+    mime: "image/png",
+    bytes: 1024,
+    sha256: id,
+    storagePath: `/tmp/${filename}`,
+    uploadedBy: "operator",
+    createdAt: "2026-07-22T08:00:00.000Z",
+  }
+}
+
 function renderTask(path = "/todos/PLA-12") {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
   return render(
@@ -332,6 +351,116 @@ describe("attachments + activity", () => {
     const file = new File(["bytes"], "spec.md", { type: "text/markdown" })
     fireEvent.change(screen.getByTestId("attachment-file-input"), { target: { files: [file] } })
     await waitFor(() => expect(uploadWorkItemAttachment).toHaveBeenCalledWith("PLA-12", file))
+  })
+
+  it("navigates the item image gallery with wrapping arrow keys and buttons", async () => {
+    const first = imageAttachment("wia_first", "first.png")
+    const second = imageAttachment("wia_second", "second.png")
+    getWorkItem.mockResolvedValue(detailOf(full("PLA-12")))
+    listWorkItemAttachments.mockResolvedValue({ attachments: [first, second] })
+    renderTask()
+
+    const firstTile = await screen.findByTestId("attachment-tile-wia_first")
+    fireEvent.click(firstTile)
+    expect(screen.getByTestId("attachment-lightbox-image").getAttribute("alt")).toBe("first.png")
+
+    fireEvent.keyDown(window, { key: "ArrowRight" })
+    expect(screen.getByTestId("attachment-lightbox-image").getAttribute("alt")).toBe("second.png")
+
+    fireEvent.click(screen.getByTestId("attachment-lightbox-prev"))
+    expect(screen.getByTestId("attachment-lightbox-image").getAttribute("alt")).toBe("first.png")
+
+    fireEvent.keyDown(window, { key: "ArrowLeft" })
+    expect(screen.getByTestId("attachment-lightbox-image").getAttribute("alt")).toBe("second.png")
+
+    fireEvent.click(screen.getByTestId("attachment-lightbox-next"))
+    expect(screen.getByTestId("attachment-lightbox-image").getAttribute("alt")).toBe("first.png")
+  })
+
+  it("hides gallery arrows when only one image can be previewed", async () => {
+    getWorkItem.mockResolvedValue(detailOf(full("PLA-12")))
+    listWorkItemAttachments.mockResolvedValue({ attachments: [imageAttachment("wia_only", "only.png")] })
+    renderTask()
+
+    fireEvent.click(await screen.findByTestId("attachment-tile-wia_only"))
+    expect(screen.queryByTestId("attachment-lightbox-prev")).toBeNull()
+    expect(screen.queryByTestId("attachment-lightbox-next")).toBeNull()
+  })
+
+  it("closes from empty space or Escape, not the image, and restores tile focus", async () => {
+    getWorkItem.mockResolvedValue(detailOf(full("PLA-12")))
+    listWorkItemAttachments.mockResolvedValue({ attachments: [imageAttachment("wia_close", "close.png")] })
+    renderTask()
+
+    const tile = await screen.findByTestId("attachment-tile-wia_close")
+    fireEvent.click(tile)
+    const image = screen.getByTestId("attachment-lightbox-image")
+    fireEvent.pointerDown(image, { pointerId: 1 })
+    expect(screen.getByTestId("attachment-lightbox")).toBeTruthy()
+
+    fireEvent.keyDown(document, { key: "Escape" })
+    await waitFor(() => expect(screen.queryByTestId("attachment-lightbox")).toBeNull())
+    await waitFor(() => expect(document.activeElement).toBe(tile))
+
+    fireEvent.click(tile)
+    fireEvent.pointerDown(screen.getByTestId("attachment-lightbox"), { pointerId: 1 })
+    await waitFor(() => expect(screen.queryByTestId("attachment-lightbox")).toBeNull())
+  })
+
+  it("toggles, adjusts, and pans zoom before navigation resets the image to fit", async () => {
+    const first = imageAttachment("wia_zoom", "zoom.png")
+    const second = imageAttachment("wia_after", "after.png")
+    getWorkItem.mockResolvedValue(detailOf(full("PLA-12")))
+    listWorkItemAttachments.mockResolvedValue({ attachments: [first, second] })
+    renderTask()
+
+    fireEvent.click(await screen.findByTestId("attachment-tile-wia_zoom"))
+    let image = screen.getByTestId("attachment-lightbox-image")
+    fireEvent.click(screen.getByTestId("attachment-lightbox-zoom"))
+    expect(image.dataset.zoom).toBe("2")
+
+    fireEvent.keyDown(window, { key: "0" })
+    expect(image.dataset.zoom).toBe("1")
+    fireEvent.keyDown(window, { key: "+" })
+    expect(image.dataset.zoom).toBe("1.5")
+    fireEvent.keyDown(window, { key: "-" })
+    expect(image.dataset.zoom).toBe("1")
+
+    fireEvent.doubleClick(image)
+    expect(image.dataset.zoom).toBe("2")
+    fireEvent.pointerDown(image, { pointerId: 1, clientX: 20, clientY: 30 })
+    fireEvent.pointerMove(image, { pointerId: 1, clientX: 45, clientY: 65 })
+    fireEvent.pointerUp(image, { pointerId: 1 })
+    expect(image.style.transform).toContain("translate(25px, 35px)")
+
+    fireEvent.click(screen.getByTestId("attachment-lightbox-next"))
+    image = screen.getByTestId("attachment-lightbox-image")
+    expect(image.getAttribute("alt")).toBe("after.png")
+    expect(image.dataset.zoom).toBe("1")
+    expect(image.style.transform).toContain("translate(0px, 0px)")
+  })
+
+  it("keeps each comment's image gallery isolated from item and sibling images", async () => {
+    const rootComment = comment("wic_gallery", "Gallery", "2026-07-22T08:00:00.000Z")
+    const siblingComment = comment("wic_sibling", "Sibling", "2026-07-22T09:00:00.000Z")
+    getWorkItem.mockResolvedValue(detailOf(full("PLA-12")))
+    listWorkItemComments.mockResolvedValue({ comments: [rootComment, siblingComment], total: 2 })
+    listWorkItemAttachments.mockResolvedValue({
+      attachments: [
+        imageAttachment("wia_item", "item.png"),
+        imageAttachment("wia_comment_a", "comment-a.png", "wic_gallery"),
+        imageAttachment("wia_comment_b", "comment-b.png", "wic_gallery"),
+        imageAttachment("wia_sibling", "sibling.png", "wic_sibling"),
+      ],
+    })
+    renderTask()
+
+    fireEvent.click(await screen.findByTestId("comment-attachment-wia_comment_a"))
+    expect(screen.getByTestId("attachment-lightbox-image").getAttribute("alt")).toBe("comment-a.png")
+    fireEvent.keyDown(window, { key: "ArrowRight" })
+    expect(screen.getByTestId("attachment-lightbox-image").getAttribute("alt")).toBe("comment-b.png")
+    fireEvent.keyDown(window, { key: "ArrowRight" })
+    expect(screen.getByTestId("attachment-lightbox-image").getAttribute("alt")).toBe("comment-a.png")
   })
 
   it("renders comments in the delegation grammar with their attachment chips, folds quiet updates, and sends with pending files", async () => {

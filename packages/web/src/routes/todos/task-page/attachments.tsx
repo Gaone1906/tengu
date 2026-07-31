@@ -58,6 +58,7 @@ export function AttachmentsSection({
               key={attachment.id}
               attachment={attachment}
               preview={preview}
+              gallery={images}
               meta={metaOf(attachment)}
               action={
                 <button

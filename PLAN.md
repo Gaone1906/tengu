@@ -1,85 +1,140 @@
-# ICI-658 — Pinned sessions persisted in DB · RESUME (land the reviewed branch)
+# ICI-660 — Todo detail: live-use feedback round
 
-**Todo (operator's words):** "I want to be able to have the same pinned sessions on all my
-devices on all browsers of the same instance. + have an easy way to pull pinned sessions via
-MCP & API if not already easy."
+Base: `main` @ `b6f4bd30838dd006969be114886e36fe40941faa`
+Branch: `build/ICI-660-detail-polish`
 
-**Feedback this round:** "intuitively merge it. resolve conflicts" (operator, on the blocked
-`land` node).
-
-**Branch:** `build/ICI-658-pinned-sessions-db` @ `4055a2f4`
-**Base:** `main` @ `5242f915b009cc2b26fe416aaaff01c73e30532b`
+The list/board/create/detail redesign already merged (`b6f4bd30`). The operator then
+used it live and filed three defects (comment `wic_04a6c376b9a3`, 2026-07-31, with
+screenshot `Screenshot 2026-07-31 at 15.52.08.png`). This round fixes exactly those
+three, on top of merged `main`.
 
 ---
 
-## State
+## 1. Desktop detail page dumps everything on the left
 
-The feature is built and independently verified `ship` (Blockers 0, Majors 0, Minors 0,
-comment `wic_7671127032ba`). The operator approved the land. The `land` node then failed:
-`main` had moved from `77d86463` to `5242f915` and no longer merged cleanly.
+> "Todo detail page on desktop shows everything in left hand side. The whole right
+> hand side is empty. see screenshot."
 
-So this round is not a rebuild. It is: bring the branch up to current `main`, resolve the
-conflict, re-run the gates on the merged HEAD, and hand back a branch that lands.
+**Cause.** `task-page.tsx:391` builds the document grid as
+`w-full max-w-[920px] … lg:grid-cols-[minmax(0,1fr)_260px]` with no horizontal
+centring, and `crumb-bar.tsx` pads `px-10` across the full width. On any viewport
+wider than ~920px + sidebar the page hugs the left edge and everything right of the
+property rail is dead space. The screenshot shows it at ~3440px: content ends around
+x≈950, the remaining ~2500px is empty. The skeleton container at `task-page.tsx:356`
+has the same defect and must move with it.
 
-## What actually conflicts
+**Fix.** One centred content container shared by the crumb bar and the document grid,
+so the page keeps a single spine (design law: *one content spine per page*) and the
+gutters are symmetric. Widen the cap so the rail is not crammed against the reading
+column: document column + `gap-x-9` + 260px rail inside roughly `max-w-[1080px]`,
+`mx-auto`. Mobile (`< 700px`) is untouched — already a single column.
 
-`git merge-tree 5242f915 4055a2f4` reports exactly one conflict:
+The crumb bar must move with the grid; leaving it full-width while the document
+centres would break the spine and is not an acceptable outcome.
 
-| File | Verdict |
-|---|---|
-| `PLAN.md` | **CONFLICT** — both sides rewrote it whole. It is a per-build scratch artifact tracked at the repo root; every build overwrites the previous ticket's plan. |
-| `packages/web/src/hooks/use-query-invalidation.ts` | Auto-merges. `main` restructured the file (156 lines); the branch adds a 3-line `case 'pins:changed'`. Merged output keeps that case at the head of the same `switch`, next to `notes:changed`, both immediate-invalidate-and-`return`. Structurally correct — but it is a textual auto-merge into a heavily rewritten file, so it gets verified by tests, not by inspection. |
-| `packages/web/src/lib/query-keys.ts` | Auto-merges. `main` adds `TODO_WRITE_KEY`, the branch adds `queryKeys.pins`. Both survive. |
+Files: `packages/web/src/routes/todos/task-page/task-page.tsx` (grid :391, skeleton
+:356), `packages/web/src/routes/todos/task-page/crumb-bar.tsx` (its `px-10` becomes
+the shared container's).
 
-Nothing else on the branch (gateway `api.ts`, `registry.ts`, `session-tools.ts`,
-`chat-sidebar.tsx`, the six test files, `use-pins.ts`) is touched by `main` since the base.
+## 2. The ID should copy when clicked
 
-## Approach
+> "On click of id in the detail page should copy it."
 
-1. In the existing worktree `~/Projects/.worktrees/jinn-build-ICI-658`, on
-   `build/ICI-658-pinned-sessions-db`, merge current `main` (`5242f915`) **into the branch**.
-   Merge, not rebase: it leaves the two reviewed commits (`1c8768f8`, `4055a2f4`)
-   byte-identical, so the `ship` verdict still applies to them and only the merge commit is new.
-2. Resolve `PLAN.md` to **this file** (the branch side). `PLAN.md` always reflects the most
-   recently landed build; taking the incoming ticket's plan is the consistent rule.
-3. Run the full gates on the merged HEAD. `main`'s rewrite of `use-query-invalidation.ts` is
-   the only place the merge could have gone semantically wrong, and both invalidation suites
-   cover it.
-4. Re-run the cross-browser pin QA on the merged HEAD in an isolated sandbox, because AC1/AC2
-   were proven on pre-merge code.
+Today the ID is inert: a `<span>` in the desktop crumb (`crumb-bar.tsx:96-101`) and a
+plain `<div>` on mobile (`task-page.tsx:441-447`). Copying is buried in the ⋯ menu
+(`crumb-bar.tsx:131-137`).
+
+**Fix.** Both ID renderings become buttons that copy the bare ID (`ICI-660`, not the
+URL — the link button beside them already does URLs) and show a short visible
+confirmation. Keep the ⋯ "Copy ID" item: it is the menu path and removing it was not
+asked for.
+
+Files: `crumb-bar.tsx`, `task-page.tsx`.
+
+## 3. The image preview is a dead end
+
+> "on click and open of screenshot preview should allow me to easily click out and
+> close the preview or allow me to go back and forth with some arrow buttons or
+> keyboard arrows for quick access & preview. it should also allow me to zoom in on
+> the images."
+
+`AttachmentLightbox` (`attachment-preview.tsx:104-155`) shows one image with close +
+download. Three gaps:
+
+- **Click-out.** `DialogContent` is a `min(1100px, 100vw-96px)` box; a click beside the
+  image lands inside that box and does nothing. Only the thin true backdrop closes.
+- **No navigation.** `useAttachmentPreview` holds a single `active` attachment with no
+  notion of the set it came from.
+- **No zoom.**
+
+**Fix.**
+- The lightbox surface fills the viewport; a pointer press anywhere that is not the
+  image, the toolbar, or an arrow closes it. Esc keeps working; focus returns to the
+  tile that opened it.
+- `open()` takes the previewable set alongside the attachment. Gallery scope is the
+  group you opened from: the item-level image grid (`attachments.tsx`) or that one
+  comment's chips (`activity.tsx` `AttachmentChips`) — already separate hook
+  instances, so this is honest rather than an invented cross-page gallery.
+- ‹ › buttons plus ← → keys move within the set, wrapping at the ends, absent when the
+  set has one image. Navigating resets zoom.
+- Zoom: a toolbar control and double-click on the image toggle fit ↔ zoomed;
+  `+` / `-` / `0` on the keyboard; drag to pan while zoomed; a click on the image while
+  zoomed pans rather than closing. Wheel and pinch zoom are **out of scope**.
+- Tap targets ≥34px at 390px (Jinn Taste §2), tokens only, both themes.
+
+Files: `attachment-preview.tsx` (hook + lightbox), `attachments.tsx` and `activity.tsx`
+(pass their set to `open`).
+
+---
 
 ## Acceptance criteria
 
-1. `git merge-tree --write-tree main <new HEAD>` exits 0 — current `main` merges the branch
-   with zero conflicts.
-2. `packages/web/src/lib/query-keys.ts` on the merged HEAD exports **both** `TODO_WRITE_KEY`
-   (from `main`) and `queryKeys.pins` (from the branch).
-3. `packages/web/src/hooks/use-query-invalidation.ts` on the merged HEAD still routes
-   `pins:changed` to an immediate `invalidateQueries({ queryKey: queryKeys.pins })`, and
-   `main`'s Todo invalidation is intact — proven by `use-query-invalidation-company.test.tsx`
-   **and** `use-query-invalidation-todos.test.tsx` both passing.
-4. `pnpm typecheck`, `pnpm test`, and `pnpm build` are green on the merged HEAD, run after the
-   final edit. Test count is at or above the 5,068 the round-2 verifier recorded.
-5. Browser QA on the merged HEAD, in a throwaway sandbox on a non-production port: pinning a
-   chat in browser A makes it appear under Pinned in browser B with neither reloaded, and the
-   pin survives a gateway restart. (Re-proves original AC1 and AC2 post-merge.)
-6. The diff `4055a2f4..<new HEAD>` contains no product-code changes — only the merge of `main`
-   and `PLAN.md`. No new feature work, no refactors.
-7. Leak-grep of the full branch diff against `main` is clean.
+1. At 1440×900 the detail page's content is horizontally centred: the left gutter and
+   the right gutter outside the property rail are within 8px of each other, and the
+   crumb bar's first glyph shares its x with the title. Proved by screenshot at
+   1440×900 **and** 1920×1080.
+2. At 390×844 the detail page layout is unchanged from `main` — single column, no
+   centring container, no new horizontal scroll.
+3. Clicking the ID in the desktop crumb bar writes exactly `ICI-660` (bare ID, no URL,
+   no whitespace) to the clipboard and shows a visible confirmation; clicking the
+   mobile ID line does the same. The ⋯ menu's "Copy ID" still works.
+4. With ≥2 previewable images in the item-level grid: opening one and pressing `→`
+   shows the next; `←` from the first wraps to the last; the ‹ › buttons do the same.
+   With exactly one image the arrows are absent.
+5. A pointer press on empty space beside the image closes the preview; a pointer press
+   on the image itself does not. Esc closes. Focus returns to the tile that opened it.
+6. Zoom: the toolbar control and double-click both toggle zoomed state; `+`/`-`/`0`
+   change it; while zoomed the image can be dragged; navigating to another image
+   returns to fit.
+7. A comment's chips form their own gallery — arrows move only within that comment's
+   attachments, never into the item-level set.
+8. `pnpm typecheck`, `pnpm test`, `pnpm lint`, `pnpm build` all green, with every
+   existing `task-page.test.tsx` and `task-sections.test.tsx` case still passing.
+9. Screenshot matrix on an isolated sandbox (port ≥7778, never 7777/7788): detail page
+   and open lightbox, at 1440×900 and 390×844, light and dark.
+
+## Tests
+
+- `packages/web/src/routes/todos/__tests__/task-sections.test.tsx` — lightbox: arrow
+  key and button navigation with wrap; arrows absent for a single image; click-outside
+  closes and click-on-image does not; zoom toggle and reset-on-navigate; comment
+  gallery isolated from the item gallery.
+- `packages/web/src/routes/todos/__tests__/task-page.test.tsx` — ID click copies the
+  bare ID, desktop and mobile (stub `navigator.clipboard`).
+- Layout centring is a browser/screenshot check, not a vitest assertion — jsdom has no
+  layout. AC1 and AC2 are proved by measured screenshots.
 
 ## Out of scope
 
-- **Untracking `PLAN.md`.** It is the systemic cause of this conflict and it will block the
-  next build the same way, but fixing it changes the `jinn-build` workflow contract, not this
-  ticket. Reported, not fixed. (Also flagged in round 1.)
-- Any change to pin behaviour, schema, API shape, or the Pinned section's visuals. The feature
-  passed review; a merge round is not the place to touch it.
-- The other open build worktrees (ICI-640, ICI-651, ICI-660) that will hit the same `PLAN.md`
-  conflict.
-- Pushing or deploying. The `land` node merges.
+- Any gateway or API change. Web-only.
+- List and board surfaces, the create dialog, the Attention inbox.
+- Wheel/pinch zoom, a cross-section "every image on this Todo" gallery, slideshow,
+  rotate, attachment reordering.
+- Refactoring `task-page.tsx` beyond the container change.
 
-## Safety
+## Notes
 
-Sandbox QA only: throwaway `JINN_HOME`, port 7778+ (never 7777, never 7788), via the
-`jinn-sandbox` skill, destroyed afterwards even on failure. Kill only PIDs this run started.
-No other worktree is touched.
+- `PLAN.md` at the repo root is the pipeline's scratch file and currently holds
+  ICI-658's plan on `main`; overwriting it is the convention, not a product change.
+- Safety: never port 7777 or 7788, never `~/.jinn`; sandbox on ≥7778 via the
+  `jinn-sandbox` skill and destroy it even if the run fails.
