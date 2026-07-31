@@ -2,7 +2,7 @@
 import { useEffect, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useGateway } from '@/hooks/use-gateway'
-import { queryKeys } from '@/lib/query-keys'
+import { queryKeys, TODO_WRITE_KEY } from '@/lib/query-keys'
 import { patchSessionBackgroundActivity, removeFromSessionsCache } from '@/hooks/use-sessions'
 import { mergeTodoIntoCaches } from '@/routes/todos/todo-edit-request'
 import type { BackgroundActivity, SessionsResponse } from '@/lib/api'
@@ -18,8 +18,8 @@ function handleCompanyChanged(
   if (entity === 'todo') {
     // Apply the safe version-aware patch synchronously; an older event can never
     // overwrite a newer cached revision. The patch alone cannot insert a created
-    // Todo or move one between the board's per-status column queries, so every
-    // todo event ALSO schedules the debounced reconciliation pass (ICI-570).
+    // Todo or prove that it still belongs under the board's other filters, so
+    // every todo event ALSO schedules the debounced reconciliation pass (ICI-570).
     const value = p.value
     if (value && typeof value === 'object' && !Array.isArray(value) && typeof (value as { id?: unknown }).id === 'string') {
       mergeTodoIntoCaches(qc, value as { id: string; version?: number })
@@ -55,11 +55,86 @@ function handleCompanyChanged(
  */
 export function useQueryInvalidation() {
   const qc = useQueryClient()
-  const { subscribe } = useGateway()
+  const { subscribe, connectionSeq } = useGateway()
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const maxTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pendingRef = useRef<Set<string>>(new Set())
+  const scheduleFlushRef = useRef<() => void>(() => {})
+  const previousConnectionSeqRef = useRef(connectionSeq)
 
   useEffect(() => {
+    function clearTimers() {
+      if (timerRef.current) clearTimeout(timerRef.current)
+      if (maxTimerRef.current) clearTimeout(maxTimerRef.current)
+      timerRef.current = null
+      maxTimerRef.current = null
+    }
+
+    function flush() {
+      clearTimers()
+      // A Todo mutation (drag commit, editor save, approval decision) holds an
+      // optimistic view of the todo caches — a refetch landing mid-flight could
+      // clobber it. Defer ONLY the todo keys and retry after the next quiet
+      // window; every other category flushes now.
+      const deferTodos = qc.isMutating({ mutationKey: TODO_WRITE_KEY }) > 0
+      const kept = new Set<string>()
+      for (const key of pendingRef.current) {
+        if (key === 'todos' || key.startsWith('todo:')) {
+          if (deferTodos) {
+            kept.add(key)
+          } else if (key === 'todos') {
+            qc.invalidateQueries({ queryKey: ['work-items'] })
+            qc.invalidateQueries({ queryKey: ['work-item-tree'] })
+            qc.invalidateQueries({ queryKey: ['departments'] })
+          } else {
+            const id = key.slice('todo:'.length)
+            qc.invalidateQueries({ queryKey: ['work-item', id] })
+            qc.invalidateQueries({ queryKey: ['work-item-comments', id] })
+            qc.invalidateQueries({ queryKey: ['work-item-attachments', id] })
+          }
+          continue
+        }
+        switch (key) {
+          case 'sessions':
+            qc.invalidateQueries({ queryKey: queryKeys.sessions.all })
+            break
+          case 'work-item-sessions':
+            qc.invalidateQueries({ queryKey: ['work-item-sessions'] })
+            break
+          case 'cron':
+            qc.invalidateQueries({ queryKey: queryKeys.cron.all })
+            break
+          case 'skills':
+            qc.invalidateQueries({ queryKey: queryKeys.skills.all })
+            break
+          case 'org':
+            qc.invalidateQueries({ queryKey: queryKeys.org.all })
+            break
+          case 'engines':
+            qc.invalidateQueries({ queryKey: queryKeys.engines.all })
+            break
+          case 'config':
+            qc.invalidateQueries({ queryKey: queryKeys.config })
+            break
+          case 'status':
+            qc.invalidateQueries({ queryKey: queryKeys.status })
+            break
+          case 'instance-migration':
+            qc.invalidateQueries({ queryKey: queryKeys.instanceMigration })
+            break
+        }
+      }
+      pendingRef.current = kept
+      if (kept.size > 0) scheduleFlush()
+    }
+
+    function scheduleFlush() {
+      if (timerRef.current) clearTimeout(timerRef.current)
+      timerRef.current = setTimeout(flush, 1000)
+      if (!maxTimerRef.current) maxTimerRef.current = setTimeout(flush, 2000)
+    }
+
+    scheduleFlushRef.current = scheduleFlush
     const unsub = subscribe((event: string, payload: unknown) => {
       const p = payload as Record<string, unknown> | undefined
 
@@ -156,71 +231,22 @@ export function useQueryInvalidation() {
           return // No invalidation for unknown events
       }
 
-      // Debounce: flush pending invalidations after 1000ms of quiet
-      if (timerRef.current) clearTimeout(timerRef.current)
-      const flush = () => {
-        timerRef.current = null
-        // A live mutation (drag commit, editor save, approval decision) holds an
-        // optimistic view of the todo caches — a refetch landing mid-flight could
-        // clobber it. Defer ONLY the todo keys and retry after the next quiet
-        // window; every other category flushes now.
-        const deferTodos = qc.isMutating() > 0
-        const kept = new Set<string>()
-        for (const key of pendingRef.current) {
-          if (key === 'todos' || key.startsWith('todo:')) {
-            if (deferTodos) {
-              kept.add(key)
-            } else if (key === 'todos') {
-              qc.invalidateQueries({ queryKey: ['work-items'] })
-              qc.invalidateQueries({ queryKey: ['work-item-tree'] })
-              qc.invalidateQueries({ queryKey: ['departments'] })
-            } else {
-              const id = key.slice('todo:'.length)
-              qc.invalidateQueries({ queryKey: ['work-item', id] })
-              qc.invalidateQueries({ queryKey: ['work-item-comments', id] })
-              qc.invalidateQueries({ queryKey: ['work-item-attachments', id] })
-            }
-            continue
-          }
-          switch (key) {
-            case 'sessions':
-              qc.invalidateQueries({ queryKey: queryKeys.sessions.all })
-              break
-            case 'work-item-sessions':
-              qc.invalidateQueries({ queryKey: ['work-item-sessions'] })
-              break
-            case 'cron':
-              qc.invalidateQueries({ queryKey: queryKeys.cron.all })
-              break
-            case 'skills':
-              qc.invalidateQueries({ queryKey: queryKeys.skills.all })
-              break
-            case 'org':
-              qc.invalidateQueries({ queryKey: queryKeys.org.all })
-              break
-            case 'engines':
-              qc.invalidateQueries({ queryKey: queryKeys.engines.all })
-              break
-            case 'config':
-              qc.invalidateQueries({ queryKey: queryKeys.config })
-              break
-            case 'status':
-              qc.invalidateQueries({ queryKey: queryKeys.status })
-              break
-            case 'instance-migration':
-              qc.invalidateQueries({ queryKey: queryKeys.instanceMigration })
-              break
-          }
-        }
-        pendingRef.current = kept
-        if (kept.size > 0) timerRef.current = setTimeout(flush, 1000)
-      }
-      timerRef.current = setTimeout(flush, 1000)
+      // Trailing quiet-window debounce with a hard ceiling: sustained gateway
+      // traffic still reconciles pending caches every two seconds.
+      scheduleFlush()
     })
 
     return () => {
       unsub()
-      if (timerRef.current) clearTimeout(timerRef.current)
+      clearTimers()
+      if (scheduleFlushRef.current === scheduleFlush) scheduleFlushRef.current = () => {}
     }
   }, [subscribe, qc])
+
+  useEffect(() => {
+    if (connectionSeq === previousConnectionSeqRef.current) return
+    previousConnectionSeqRef.current = connectionSeq
+    pendingRef.current.add('todos')
+    scheduleFlushRef.current()
+  }, [connectionSeq])
 }

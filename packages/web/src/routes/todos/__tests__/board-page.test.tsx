@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { WorkItemCompactWire, WorkItemListWire, WorkItemStatusWire, WorkItemTreeWire } from "@/lib/api"
+import { useQueryInvalidation } from "@/hooks/use-query-invalidation"
 import TodoBoardPage from "../board/board-page"
 import { boardColumnQueryKey, boardScopeParams } from "../board/use-board"
 import { clearBoardScrollCache } from "../board/board-route"
@@ -28,6 +29,17 @@ const setWorkItemStatus = vi.fn()
 const updateWorkItem = vi.fn()
 const createWorkItem = vi.fn()
 const assignWorkItem = vi.fn()
+let gatewayListener: ((event: string, payload: unknown) => void) | undefined
+
+vi.mock("@/hooks/use-gateway", () => ({
+  useGateway: () => ({
+    connectionSeq: 1,
+    subscribe: (next: (event: string, payload: unknown) => void) => {
+      gatewayListener = next
+      return () => { gatewayListener = undefined }
+    },
+  }),
+}))
 
 vi.mock("@/lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api")>()
@@ -132,10 +144,16 @@ function LocationProbe() {
   return <span data-testid="location" data-state={JSON.stringify(location.state ?? {})}>{location.pathname}</span>
 }
 
-function renderBoard(path: string) {
+function LiveInvalidation() {
+  useQueryInvalidation()
+  return null
+}
+
+function renderBoard(path: string, live = false) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
   const view = render(
     <QueryClientProvider client={client}>
+      {live && <LiveInvalidation />}
       <MemoryRouter initialEntries={[path]}>
         <Routes>
           <Route path="/todos/b/:board" element={<TodoBoardPage />} />
@@ -341,6 +359,75 @@ describe("the board surface", () => {
     await waitFor(() => expect(screen.getByTestId("board-card-PLA-1").textContent).toContain("Changed title"))
     expect(avatarRender).toHaveBeenCalledTimes(1)
     expect(avatarRender).toHaveBeenCalledWith("scout")
+  })
+
+  it("relocates a live Todo payload once and updates both column counts before refetch", async () => {
+    rows.executing = [compact({ id: "PLA-3", status: "executing", version: 4 })]
+    totals.executing = 1
+    totals.in_review = 0
+    renderBoard("/todos/b/platform", true)
+
+    await screen.findByTestId("board-card-PLA-3")
+    await waitFor(() => {
+      const boardCalls = listWorkItems.mock.calls.filter(([params]) => params?.status)
+      expect(boardCalls).toHaveLength(8)
+    })
+    listWorkItems.mockImplementation(() => new Promise(() => {}))
+
+    act(() => gatewayListener?.("company:changed", {
+      entity: "todo",
+      action: "status-transitioned",
+      id: "PLA-3",
+      version: 5,
+      value: { id: "PLA-3", version: 5, status: "in_review" },
+    }))
+
+    await waitFor(() => {
+      const cards = screen.getAllByTestId("board-card-PLA-3")
+      expect(cards).toHaveLength(1)
+      expect(screen.getByTestId("board-column-executing").contains(cards[0])).toBe(false)
+      expect(screen.getByTestId("board-column-in_review").contains(cards[0])).toBe(true)
+      expect(screen.getByTestId("board-column-executing").getAttribute("aria-label")).toBe("Executing column, 0 items")
+      expect(screen.getByTestId("board-column-in_review").getAttribute("aria-label")).toBe("In review column, 1 items")
+    })
+  })
+
+  it("moves a live completed Todo into Closed with updated counts before refetch", async () => {
+    rows.in_review = [compact({ id: "PLA-4", status: "in_review", version: 4 })]
+    totals.in_review = 1
+    totals.done = 0
+    renderBoard("/todos/b/platform", true)
+
+    await screen.findByTestId("board-card-PLA-4")
+    await waitFor(() => {
+      const boardCalls = listWorkItems.mock.calls.filter(([params]) => params?.status)
+      expect(boardCalls).toHaveLength(8)
+    })
+    listWorkItems.mockImplementation(() => new Promise(() => {}))
+
+    act(() => gatewayListener?.("company:changed", {
+      entity: "todo",
+      action: "status-transitioned",
+      id: "PLA-4",
+      version: 5,
+      value: { id: "PLA-4", version: 5, status: "done" },
+    }))
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("board-card-PLA-4")).toBeNull()
+      expect(screen.getByTestId("board-column-in_review").getAttribute("aria-label")).toBe("In review column, 0 items")
+      expect(screen.getByTestId("board-closed-rail").getAttribute("aria-label")).toBe("Closed, 1 items — expand")
+    })
+
+    fireEvent.click(screen.getByTestId("board-closed-rail"))
+
+    await waitFor(() => {
+      const cards = screen.getAllByTestId("board-card-PLA-4")
+      expect(cards).toHaveLength(1)
+      expect(screen.getByTestId("board-closed-group-done").contains(cards[0])).toBe(true)
+      expect(screen.getByTestId("board-closed-group-done").textContent).toContain("Done1")
+      expect(screen.getByTestId("board-closed-collapse").textContent).toContain("Closed1")
+    })
   })
 })
 

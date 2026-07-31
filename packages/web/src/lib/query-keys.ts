@@ -1,3 +1,5 @@
+export const TODO_WRITE_KEY = ['todo-write'] as const
+
 export const queryKeys = {
   pins: ['pins'] as const,
   sessions: {
