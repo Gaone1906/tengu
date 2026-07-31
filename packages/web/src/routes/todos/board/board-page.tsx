@@ -465,6 +465,7 @@ export default function TodoBoardPage() {
     : departmentTitle(board.slug)
   const blockedTotal = countByStatus.blocked ?? 0
   const escalatedTotal = countByStatus.escalated ?? 0
+  const closedTotal = CLOSED_STATUSES.reduce((sum, status) => sum + (countByStatus[status] ?? 0), 0)
   const attentionSegmentItems = useMemo(
     () =>
       [...(itemsByStatus.blocked ?? []), ...(itemsByStatus.escalated ?? []),
@@ -641,7 +642,7 @@ export default function TodoBoardPage() {
           {!isAttention && mobile && (
             <div className="mt-4 flex gap-2 overflow-x-auto" role="tablist" aria-label="Board segments">
               {(["active", "attention", "closed"] as const).map((seg) => {
-                const count = seg === "active" ? data.openTotal : seg === "attention" ? blockedTotal + escalatedTotal : data.closedTotal
+                const count = seg === "active" ? data.openTotal : seg === "attention" ? blockedTotal + escalatedTotal : closedTotal
                 const label = seg === "active" ? "Active" : seg === "attention" ? "Attention" : "Closed"
                 const on = segment === seg
                 const filtersOn = activeFilterCount(filters) > 0 || !!filters.q
@@ -727,12 +728,12 @@ export default function TodoBoardPage() {
               {visibleStatuses.map((status) => columnFor(status))}
               {closedOpen ? (
                 <section className="flex w-[262px] min-w-[238px] flex-none flex-col gap-3" data-testid="board-closed-column">
-                  <ClosedColumnHeader count={data.closedTotal} onCollapse={() => setClosedOpen(false)} />
+                  <ClosedColumnHeader count={closedTotal} onCollapse={() => setClosedOpen(false)} />
                   {CLOSED_STATUSES.map((status) => (
                     <ClosedColumnGroup
                       key={status}
                       status={status as "done" | "cancelled"}
-                      count={data.columns[status]?.total ?? 0}
+                      count={countByStatus[status] ?? 0}
                       hasMore={data.columns[status]?.hasMore ?? false}
                       loadMore={data.columns[status]?.loadMore ?? (() => {})}
                       loadingMore={data.columns[status]?.loadingMore ?? false}
@@ -744,7 +745,7 @@ export default function TodoBoardPage() {
                   ))}
                 </section>
               ) : (
-                <ClosedRail count={data.closedTotal} onExpand={() => setClosedOpen(true)} />
+                <ClosedRail count={closedTotal} onExpand={() => setClosedOpen(true)} />
               )}
             </div>
             )

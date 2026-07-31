@@ -391,6 +391,44 @@ describe("the board surface", () => {
       expect(screen.getByTestId("board-column-in_review").getAttribute("aria-label")).toBe("In review column, 1 items")
     })
   })
+
+  it("moves a live completed Todo into Closed with updated counts before refetch", async () => {
+    rows.in_review = [compact({ id: "PLA-4", status: "in_review", version: 4 })]
+    totals.in_review = 1
+    totals.done = 0
+    renderBoard("/todos/b/platform", true)
+
+    await screen.findByTestId("board-card-PLA-4")
+    await waitFor(() => {
+      const boardCalls = listWorkItems.mock.calls.filter(([params]) => params?.status)
+      expect(boardCalls).toHaveLength(8)
+    })
+    listWorkItems.mockImplementation(() => new Promise(() => {}))
+
+    act(() => gatewayListener?.("company:changed", {
+      entity: "todo",
+      action: "status-transitioned",
+      id: "PLA-4",
+      version: 5,
+      value: { id: "PLA-4", version: 5, status: "done" },
+    }))
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("board-card-PLA-4")).toBeNull()
+      expect(screen.getByTestId("board-column-in_review").getAttribute("aria-label")).toBe("In review column, 0 items")
+      expect(screen.getByTestId("board-closed-rail").getAttribute("aria-label")).toBe("Closed, 1 items — expand")
+    })
+
+    fireEvent.click(screen.getByTestId("board-closed-rail"))
+
+    await waitFor(() => {
+      const cards = screen.getAllByTestId("board-card-PLA-4")
+      expect(cards).toHaveLength(1)
+      expect(screen.getByTestId("board-closed-group-done").contains(cards[0])).toBe(true)
+      expect(screen.getByTestId("board-closed-group-done").textContent).toContain("Done1")
+      expect(screen.getByTestId("board-closed-collapse").textContent).toContain("Closed1")
+    })
+  })
 })
 
 describe("card anatomy", () => {
