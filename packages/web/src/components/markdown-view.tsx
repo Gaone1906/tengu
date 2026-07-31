@@ -38,6 +38,7 @@ import sql from "react-syntax-highlighter/dist/esm/languages/prism/sql";
 import graphql from "react-syntax-highlighter/dist/esm/languages/prism/graphql";
 import docker from "react-syntax-highlighter/dist/esm/languages/prism/docker";
 import markdown from "react-syntax-highlighter/dist/esm/languages/prism/markdown";
+import { CodeBlockChrome } from "./code-block-chrome";
 
 // The languages reachable from file-view's EXT_TO_LANG (plus common fenced-block langs).
 const PRISM_LANGUAGES: Record<string, unknown> = {
@@ -181,6 +182,7 @@ export function MarkdownView({
               style={{ border: 0, borderTop: "1px solid var(--separator)" }}
             />
           ),
+          pre: ({ children }) => <>{children}</>,
           code(props) {
             const { children, className, node, ...rest } = props as {
               children?: React.ReactNode;
@@ -189,9 +191,10 @@ export function MarkdownView({
               inline?: boolean;
             };
             const match = /language-(\w+)/.exec(className ?? "");
-            const text = String(children ?? "").replace(/\n$/, "");
+            const source = String(children ?? "");
+            const text = source.replace(/\n$/, "");
             // Inline code (no language class and no newline) → styled <code>.
-            const isInline = !match && !text.includes("\n");
+            const isInline = !match && !source.includes("\n");
             if (isInline) {
               return (
                 <code
@@ -210,22 +213,26 @@ export function MarkdownView({
               );
             }
             return (
-              <SyntaxHighlighter
+              <CodeBlockChrome
+                code={text}
                 language={match ? match[1] : "text"}
-                style={codeTheme}
-                customStyle={{
-                  margin: "0 0 var(--space-4) 0",
-                  maxWidth: "100%",
-                  borderRadius: "var(--radius-md, 12px)",
-                  fontSize: "13px",
-                  fontFamily: "var(--font-mono)",
-                  border: "1px solid var(--separator)",
-                }}
-                codeTagProps={{ style: { whiteSpace: "pre-wrap", overflowWrap: "anywhere" } }}
-                wrapLongLines
+                className="mb-[var(--space-4)]"
               >
-                {text}
-              </SyntaxHighlighter>
+                <SyntaxHighlighter
+                  language={match ? match[1] : "text"}
+                  style={codeTheme}
+                  customStyle={{
+                    margin: 0,
+                    maxWidth: "100%",
+                    fontSize: "13px",
+                    fontFamily: "var(--font-mono)",
+                  }}
+                  codeTagProps={{ style: { whiteSpace: "pre-wrap", overflowWrap: "anywhere" } }}
+                  wrapLongLines
+                >
+                  {text}
+                </SyntaxHighlighter>
+              </CodeBlockChrome>
             );
           },
         }}
