@@ -1,9 +1,21 @@
 import { logger } from "../shared/logger.js";
 import { deliverClaimedSessionDelivery } from "../sessions/callbacks.js";
-import { claimSessionDelivery, listSessionsForGroup } from "../sessions/registry.js";
+import {
+  claimSessionDelivery,
+  claimSessionDeliveryWithinSourceLimit,
+  getSession,
+  listSessionsForGroup,
+} from "../sessions/registry.js";
 import { currentApproval, listApprovals } from "../work-items/approval-rows.js";
-import { addComment } from "../work-items/comments.js";
-import { getWorkItem, isBlockDeclared, WORKFLOW_RUN_ACTOR, type ApprovalTargetKind, type WorkItemStatus } from "../work-items/store.js";
+import { addComment, type WorkItemComment } from "../work-items/comments.js";
+import {
+  getWorkItem,
+  isBlockDeclared,
+  listWorkItemEvents,
+  WORKFLOW_RUN_ACTOR,
+  type ApprovalTargetKind,
+  type WorkItemStatus,
+} from "../work-items/store.js";
 import { transition, transitionDerived, TransitionError } from "../work-items/transitions.js";
 import { parseTodoApprovalRef } from "../workflows/todo-approval-ref.js";
 import type { WorkflowError } from "../workflows/runtime.js";
@@ -258,6 +270,70 @@ function notifyParked(input: {
   deliverClaimedSessionDelivery(delivery.id).catch((error) => {
     logger.warn(`Workflow run ${input.runId} could not deliver its parked-gate notice to session ${session.id}: `
       + `${error instanceof Error ? error.message : String(error)}`);
+  });
+}
+
+export const MAX_OPERATOR_COMMENTS_PER_WORKFLOW_RUN = 5;
+
+function latestWorkflowPhaseSession(todoId: string) {
+  const events = listWorkItemEvents(todoId);
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!;
+    if (event.kind !== "session_linked" || typeof event.detail?.sessionId !== "string") continue;
+    const session = getSession(event.detail.sessionId);
+    if (session?.workflowProvenance?.kind === "phase") return session;
+  }
+  return undefined;
+}
+
+function operatorCommentPrompt(comment: WorkItemComment): string {
+  return `💬 The operator commented on Todo ${comment.workItemId} while your workflow run is active or parked.\n\n`
+    + `${comment.body}\n\n`
+    + `Answer on the Todo by calling comment_work_item { id: "${comment.workItemId}", body: "<answer>", `
+    + `parentCommentId: "${comment.id}" }. Do not decide a parked gate or change the run's acceptance criteria from this comment. `
+    + `If your phase is still active, continue its original work and call workflow_submit_output when it is complete. `
+    + `If the phase already completed, only answer the comment on the Todo.`;
+}
+
+/** Forward only the operator side of a Todo conversation to the newest phase
+ * session. Employee/system answers stop here, so their Todo comments cannot
+ * create a reply loop. */
+export function forwardWorkflowTodoComment(comment: WorkItemComment): void {
+  if (comment.authorKind !== "operator" || comment.author !== "operator") return;
+  const session = latestWorkflowPhaseSession(comment.workItemId);
+  const provenance = session?.workflowProvenance;
+  if (!session || provenance?.kind !== "phase") return;
+
+  const message = operatorCommentPrompt(comment);
+  const claim = claimSessionDeliveryWithinSourceLimit({
+    targetSessionId: session.id,
+    sourceKind: "workflow-run",
+    sourceId: provenance.runId,
+    sourceAttempt: comment.id,
+    sourceOutcome: "operator-comment",
+    sourceVersion: 1,
+    deliveryKind: "workflow-todo-comment",
+    payload: {
+      message,
+      displayMessage: `💬 ${comment.workItemId} · operator comment\n${comment.body}`,
+    },
+  }, MAX_OPERATOR_COMMENTS_PER_WORKFLOW_RUN);
+  if (claim.capped) {
+    addComment({
+      workItemId: comment.workItemId,
+      parentCommentId: comment.id,
+      author: "workflow",
+      authorKind: "system",
+      body: `**Comment not forwarded** — workflow run \`${provenance.runId}\` already received `
+        + `${MAX_OPERATOR_COMMENTS_PER_WORKFLOW_RUN} operator comments, which is the per-run cap. `
+        + `The run and any parked gate are unchanged.`,
+    });
+    return;
+  }
+  if (!claim.delivery || claim.delivery.status === "accepted") return;
+  deliverClaimedSessionDelivery(claim.delivery.id).catch((error) => {
+    logger.warn(`Workflow run ${provenance.runId} could not deliver Todo comment ${comment.id} `
+      + `to session ${session.id}: ${error instanceof Error ? error.message : String(error)}`);
   });
 }
 

@@ -3579,6 +3579,65 @@ export function claimSessionDelivery(
   return { delivery, claimed: result.changes === 1 };
 }
 
+/**
+ * Claim one source-bound delivery without letting that source exceed a durable
+ * delivery budget. The source attempt is checked first without the target, so
+ * retrying after a newer target appears reuses the original receipt.
+ */
+export function claimSessionDeliveryWithinSourceLimit(
+  input: SessionDeliveryIdentity & { payload: SessionDeliveryPayload },
+  maxDeliveries: number,
+): { delivery?: SessionDelivery; claimed: boolean; capped: boolean } {
+  if (!Number.isInteger(maxDeliveries) || maxDeliveries < 1) {
+    throw new Error('maxDeliveries must be a positive integer');
+  }
+  const identity = canonicalSessionDeliveryIdentity(input);
+  validateSessionDeliveryIdentity(identity);
+  if (typeof input.payload.message !== 'string' || typeof input.payload.displayMessage !== 'string') {
+    throw new Error('callback delivery payload requires message and displayMessage');
+  }
+  const database = initDb();
+  const claim = database.transaction(() => {
+    const existing = database.prepare(`
+      ${CALLBACK_DELIVERY_SELECT}
+      WHERE source_kind = ?
+        AND source_id = ?
+        AND source_attempt = ?
+        AND source_outcome = ?
+        AND source_version = ?
+        AND delivery_kind = ?
+      ORDER BY created_at, id
+      LIMIT 1
+    `).get(
+      identity.sourceKind,
+      identity.sourceId,
+      identity.sourceAttempt,
+      identity.sourceOutcome,
+      identity.sourceVersion,
+      identity.deliveryKind,
+    ) as SessionDeliveryRow | undefined;
+    if (existing) {
+      return { delivery: sessionDeliveryFromRow(existing), claimed: false, capped: false };
+    }
+    const count = Number(database.prepare(`
+      SELECT COUNT(*)
+      FROM callback_deliveries
+      WHERE source_kind = ?
+        AND source_id = ?
+        AND source_outcome = ?
+        AND delivery_kind = ?
+    `).pluck().get(
+      identity.sourceKind,
+      identity.sourceId,
+      identity.sourceOutcome,
+      identity.deliveryKind,
+    ));
+    if (count >= maxDeliveries) return { claimed: false, capped: true };
+    return { ...claimSessionDelivery(input), capped: false };
+  });
+  return claim.immediate();
+}
+
 /** Lease one due pending receipt before network I/O. The lease itself is stored
  * in next_attempt_at, so duplicate emitters and retry sweeps cannot concurrently
  * spend multiple retry attempts for the same durable identity. */

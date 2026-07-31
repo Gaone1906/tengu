@@ -149,6 +149,7 @@ import { resolveMessageAudiences, speechContextApplies } from "./speech-context.
 import { isJsonMediaType } from "./media-type.js";
 import { readJsonlTail } from "./jsonl-tail.js";
 import { completedStreamedBlockIds } from "./streamed-blocks.js";
+import { forwardWorkflowTodoComment } from "./workflow-todo-surface.js";
 import { deliverClaimedSessionDelivery, notifyParentSession, notifyRateLimited, notifyRateLimitResumed, notifyOperatorChannel, notifyAttachedTalkSessions, recoverPendingSessionDeliveries } from "../sessions/callbacks.js";
 import { clearDelegationCompletionContract, DELEGATION_COMPLETION_TRACKED_META_KEY } from "../sessions/delegation-completion-contract.js";
 import { clipSessionMessage, sessionCommGuards, prepareLateralSend, isDescendantOf, resolveCallerIdentity, type CallerIdentity } from "./session-comm-guards.js";
@@ -4074,6 +4075,7 @@ export async function handleApiRequest(
           ...workItemCommentAuthor(caller),
           parentCommentId,
         });
+        forwardWorkflowTodoComment(comment);
         emitTodoProjectionEvent(context, params.id, "commented");
         return json(res, { comment }, 201);
       } catch (err) {
