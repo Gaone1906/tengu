@@ -193,6 +193,7 @@ function commentPreview(body: string): string {
 function AttachmentChips({ attachments, workItemId }: { attachments: WorkItemAttachmentWire[]; workItemId: string }) {
   const preview = useAttachmentPreview()
   if (attachments.length === 0) return null
+  const images = attachments.filter((attachment) => preview.canPreview(attachment))
   return (
     <div className="ml-[42px] mt-[9px] flex flex-wrap gap-2">
       {attachments.map((attachment) =>
@@ -201,6 +202,7 @@ function AttachmentChips({ attachments, workItemId }: { attachments: WorkItemAtt
             key={attachment.id}
             attachment={attachment}
             preview={preview}
+            gallery={images}
             meta={formatBytes(attachment.bytes)}
             dense
             testId={`comment-attachment-${attachment.id}`}

@@ -28,6 +28,7 @@ const listWorkItemAttachments = vi.fn()
 const listWorkItemComments = vi.fn()
 const listWorkItemSessions = vi.fn()
 const getOrg = vi.fn()
+const writeClipboardText = vi.fn()
 
 vi.mock("@/lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api")>()
@@ -127,6 +128,11 @@ function stubMobileViewport() {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: writeClipboardText },
+  })
+  writeClipboardText.mockResolvedValue(undefined)
   getWorkItemTree.mockImplementation((id: string) =>
     Promise.resolve({ tree: { root: treeNode(full(id)), totals: {}, spendUsd: 0 } }),
   )
@@ -142,6 +148,7 @@ beforeEach(() => {
 
 afterEach(() => {
   delete (window as { matchMedia?: unknown }).matchMedia
+  delete (navigator as { clipboard?: unknown }).clipboard
 })
 
 describe("ancestor helpers", () => {
@@ -277,6 +284,32 @@ describe("the task page", () => {
     await waitFor(() => expect(screen.getByTestId("task-crumb-PLA-12")).toBeTruthy())
     expect(screen.getByTestId("task-crumb-PLA-14")).toBeTruthy()
     expect(getWorkItemTree).toHaveBeenCalledWith("PLA-12")
+  })
+
+  it("copies the bare desktop ID from the crumb and keeps the menu copy path", async () => {
+    getWorkItem.mockResolvedValue(detailOf(full("PLA-12")))
+    renderTask()
+
+    await screen.findByTestId("task-title")
+    fireEvent.click(screen.getByTestId("task-copy-id"))
+    await waitFor(() => expect(writeClipboardText).toHaveBeenCalledWith("PLA-12"))
+    expect(screen.getByTestId("task-callout").textContent).toBe("Copied PLA-12")
+
+    writeClipboardText.mockClear()
+    fireEvent.pointerDown(screen.getByTestId("task-crumb-more"), { button: 0, ctrlKey: false })
+    fireEvent.click(await screen.findByText("Copy ID"))
+    await waitFor(() => expect(writeClipboardText).toHaveBeenCalledWith("PLA-12"))
+  })
+
+  it("copies the bare ID from the mobile ID line with visible confirmation", async () => {
+    stubMobileViewport()
+    getWorkItem.mockResolvedValue(detailOf(full("PLA-12")))
+    renderTask()
+
+    await screen.findByTestId("task-title")
+    fireEvent.click(screen.getByTestId("task-copy-id-mobile"))
+    await waitFor(() => expect(writeClipboardText).toHaveBeenCalledWith("PLA-12"))
+    expect(screen.getByTestId("task-callout").textContent).toBe("Copied PLA-12")
   })
 
   it("renders the document and persistent properties on first paint without a Details toggle", async () => {

@@ -161,6 +161,17 @@ export default function TaskPage() {
   useEffect(() => () => {
     if (calloutTimer.current !== null) window.clearTimeout(calloutTimer.current)
   }, [])
+  const copyId = useCallback(() => {
+    if (!id) return
+    const pending = navigator.clipboard?.writeText(id)
+    if (!pending) {
+      announce("Clipboard unavailable")
+      return
+    }
+    void pending
+      .then(() => announce(`Copied ${id}`))
+      .catch(() => announce("Couldn't copy the ID"))
+  }, [id, announce])
 
   const setStatus = useSetWorkItemStatus()
   const decide = useDecideApproval()
@@ -346,6 +357,7 @@ export default function TaskPage() {
               id={id}
               title=""
               onOpenAncestor={openTodo}
+              onCopyId={copyId}
               mobile={mobile}
             />
             <div
@@ -353,7 +365,7 @@ export default function TaskPage() {
               className={
                 mobile
                   ? "flex flex-col px-4 pb-[calc(96px+var(--safe-bottom,0px))] pt-1.5"
-                  : "w-full max-w-[920px] px-10 pb-8 pt-2"
+                  : "mx-auto w-full max-w-[1080px] px-10 pb-8 pt-2"
               }
             >
               <TaskPageSkeleton
@@ -380,6 +392,7 @@ export default function TaskPage() {
             id={id}
             title={item?.title ?? ""}
             onOpenAncestor={openTodo}
+            onCopyId={copyId}
             mobile={mobile}
           />
 
@@ -388,7 +401,7 @@ export default function TaskPage() {
             className={
               mobile
                 ? "flex flex-col px-4 pb-[calc(96px+var(--safe-bottom,0px))] pt-1.5"
-                : "grid w-full max-w-[920px] grid-cols-1 gap-x-9 px-10 pb-8 pt-2 lg:grid-cols-[minmax(0,1fr)_260px]"
+                : "mx-auto grid w-full max-w-[1080px] grid-cols-1 gap-x-9 px-10 pb-8 pt-2 lg:grid-cols-[minmax(0,1fr)_260px]"
             }
           >
             {detail && (
@@ -438,12 +451,16 @@ export default function TaskPage() {
 
             <main className="min-w-0">
               {mobile && (
-                <div
-                  className="mb-1 text-[12px] tracking-[.04em] text-[var(--text-tertiary)]"
+                <button
+                  type="button"
+                  data-testid="task-copy-id-mobile"
+                  aria-label={`Copy ${id}`}
+                  onClick={copyId}
+                  className="focus-ring relative -mx-1 mb-1 block w-fit rounded-md px-1 text-[12px] tracking-[.04em] text-[var(--text-tertiary)] outline-none after:absolute after:bottom-0 after:left-0 after:h-[34px] after:w-full after:content-[''] hover:bg-[var(--fill-quaternary)] hover:text-[var(--text-secondary)]"
                   style={{ fontFamily: "var(--font-code)" }}
                 >
                   {id}
-                </div>
+                </button>
               )}
 
               <TaskTitle

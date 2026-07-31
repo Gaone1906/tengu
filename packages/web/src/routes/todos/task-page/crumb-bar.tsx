@@ -36,6 +36,7 @@ export function CrumbBar({
   id,
   title,
   onOpenAncestor,
+  onCopyId,
   mobile,
 }: {
   boardLabel: string
@@ -44,16 +45,17 @@ export function CrumbBar({
   id: string
   title: string
   onOpenAncestor: (id: string) => void
+  onCopyId: () => void
   mobile: boolean
 }) {
-  const copy = (text: string) => void navigator.clipboard?.writeText(text).catch(() => {})
+  const copyText = (text: string) => void navigator.clipboard?.writeText(text).catch(() => {})
   return (
     <div
       data-testid="task-crumb-bar"
       className={
         mobile
           ? "flex min-h-[52px] items-center gap-2 px-3.5 pb-2 pt-[calc(10px+var(--safe-top,0px))]"
-          : "flex min-h-[56px] items-center gap-2 px-10 pb-2 pt-3.5"
+          : "mx-auto flex min-h-[56px] w-full max-w-[1080px] items-center gap-2 px-10 pb-2 pt-3.5"
       }
     >
       {mobile ? (
@@ -93,12 +95,16 @@ export function CrumbBar({
               <Csep />
             </span>
           ))}
-          <span
-            className="flex-none text-[11.5px] tracking-[.04em] text-[var(--text-tertiary)]"
+          <button
+            type="button"
+            data-testid="task-copy-id"
+            aria-label={`Copy ${id}`}
+            onClick={onCopyId}
+            className="focus-ring -mx-1 flex min-h-[34px] flex-none items-center rounded-md px-1 text-[11.5px] tracking-[.04em] text-[var(--text-tertiary)] outline-none hover:bg-[var(--fill-quaternary)] hover:text-[var(--text-secondary)]"
             style={{ fontFamily: "var(--font-code)" }}
           >
             {id}
-          </span>
+          </button>
           <span className="min-w-0 truncate text-[13px] font-medium text-[var(--text-primary)]">{title}</span>
         </div>
       )}
@@ -108,7 +114,7 @@ export function CrumbBar({
           type="button"
           aria-label={`Copy link to ${id}`}
           data-testid="task-copy-link"
-          onClick={() => copy(`${window.location.origin}${todoPath(id)}`)}
+          onClick={() => copyText(`${window.location.origin}${todoPath(id)}`)}
           className="focus-ring grid size-[34px] place-items-center rounded-[10px] text-[var(--text-tertiary)] outline-none hover:bg-[var(--fill-tertiary)] hover:text-[var(--text-secondary)]"
         >
           <LinkIcon size={14} strokeWidth={2} aria-hidden />
@@ -130,7 +136,7 @@ export function CrumbBar({
           >
             <DropdownMenuItem
               className="flex min-h-9 cursor-pointer items-center gap-2 rounded-[9px] px-2.5 text-[length:var(--text-footnote)] font-medium text-[var(--text-primary)] focus:bg-[var(--fill-secondary)]"
-              onClick={() => copy(id)}
+              onClick={onCopyId}
             >
               <Copy size={13} aria-hidden />
               Copy ID
