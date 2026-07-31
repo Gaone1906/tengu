@@ -916,7 +916,14 @@ export const api = {
   refreshEngineLimits: (engine?: string) =>
     post<EngineLimitsResponse>(`/api/engine-limits/refresh${engine ? `?engine=${encodeURIComponent(engine)}` : ""}`, {}),
   getSessions: () => get<SessionsResponse>("/api/sessions"),
-  getPinnedSessions: () => get<Record<string, unknown>[]>("/api/sessions?pinned=1"),
+  getPinnedSessions: async () => {
+    const payload = await get<unknown>("/api/sessions?pinned=1")
+    if (Array.isArray(payload)) return payload as Record<string, unknown>[]
+    if (payload && typeof payload === "object" && Array.isArray((payload as SessionsResponse).sessions)) {
+      return (payload as SessionsResponse).sessions
+    }
+    return []
+  },
   getPins: () => get<PinsResponse>("/api/pins"),
   pinChat: (key: string) => post<{ status: string }>("/api/pins", { key }),
   unpinChat: (key: string) => del<{ status: string }>(`/api/pins/${encodeURIComponent(key)}`),

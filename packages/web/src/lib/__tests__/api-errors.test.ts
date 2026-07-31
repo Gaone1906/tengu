@@ -11,6 +11,27 @@ const { api, ApiError, TodoApiError } = await import("../api")
 describe("typed API errors", () => {
   beforeEach(() => authFetch.mockReset())
 
+  it("unwraps the legacy sessions envelope for pinned-session version skew", async () => {
+    const sessions = [{ id: "session-pinned" }]
+    authFetch.mockResolvedValue(new Response(JSON.stringify({
+      sessions,
+      counts: { __direct__: 1 },
+      perGroup: 50,
+    }), { status: 200, headers: { "Content-Type": "application/json" } }))
+
+    await expect(api.getPinnedSessions()).resolves.toEqual(sessions)
+  })
+
+  it("preserves the current pinned-session array response", async () => {
+    const sessions = [{ id: "session-current" }]
+    authFetch.mockResolvedValue(new Response(JSON.stringify(sessions), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }))
+
+    await expect(api.getPinnedSessions()).resolves.toEqual(sessions)
+  })
+
   it("posts every rich-create field exactly once", async () => {
     authFetch.mockResolvedValue(new Response(JSON.stringify({
       workItem: { id: "OPS-7", title: "Ship the ledger" },
