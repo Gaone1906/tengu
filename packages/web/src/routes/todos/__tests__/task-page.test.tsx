@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { MemoryRouter, Route, Routes } from "react-router-dom"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { WorkItemDetailWire, WorkItemFullWire, WorkItemStatusWire, WorkItemTreeNodeWire } from "@/lib/api"
@@ -24,6 +24,10 @@ const getWorkItem = vi.fn()
 const getWorkItemTree = vi.fn()
 const setWorkItemStatus = vi.fn()
 const decideWorkItemApproval = vi.fn()
+const listWorkItemAttachments = vi.fn()
+const listWorkItemComments = vi.fn()
+const listWorkItemSessions = vi.fn()
+const getOrg = vi.fn()
 
 vi.mock("@/lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api")>()
@@ -34,11 +38,15 @@ vi.mock("@/lib/api", async (importOriginal) => {
       getWorkItemTree: (...args: unknown[]) => getWorkItemTree(...args),
       setWorkItemStatus: (...args: unknown[]) => setWorkItemStatus(...args),
       decideWorkItemApproval: (...args: unknown[]) => decideWorkItemApproval(...args),
-      listWorkItemSessions: vi.fn().mockResolvedValue([]),
+      listWorkItemAttachments: (...args: unknown[]) => listWorkItemAttachments(...args),
+      listWorkItemComments: (...args: unknown[]) => listWorkItemComments(...args),
+      workItemAttachmentUrl: (id: string, attachmentId: string) =>
+        `/api/work-items/${id}/attachments/${attachmentId}`,
+      listWorkItemSessions: (...args: unknown[]) => listWorkItemSessions(...args),
       getDepartments: vi.fn().mockResolvedValue({
         departments: [{ slug: "platform", prefix: "PLA", createdAt: "2026-07-01T00:00:00.000Z", todoCount: 4 }],
       }),
-      getOrg: vi.fn().mockResolvedValue({ departments: ["platform"], employees: [], hierarchy: { root: null, sorted: [], warnings: [] } }),
+      getOrg: (...args: unknown[]) => getOrg(...args),
       listWorkItems: vi.fn().mockResolvedValue({ workItems: [], total: 0, nextOffset: null }),
     },
   }
@@ -122,6 +130,14 @@ beforeEach(() => {
   getWorkItemTree.mockImplementation((id: string) =>
     Promise.resolve({ tree: { root: treeNode(full(id)), totals: {}, spendUsd: 0 } }),
   )
+  listWorkItemAttachments.mockResolvedValue({ attachments: [] })
+  listWorkItemComments.mockResolvedValue({ comments: [], total: 0 })
+  listWorkItemSessions.mockResolvedValue([])
+  getOrg.mockResolvedValue({
+    departments: ["platform"],
+    employees: [],
+    hierarchy: { root: null, sorted: [], warnings: [] },
+  })
 })
 
 afterEach(() => {
@@ -149,6 +165,98 @@ describe("ancestor helpers", () => {
 })
 
 describe("the task page", () => {
+  it("holds ordinary task geometry without reserving a banner until the detail resolves", async () => {
+    let resolveDetail!: (detail: WorkItemDetailWire) => void
+    getWorkItem.mockImplementation(
+      () => new Promise<WorkItemDetailWire>((resolve) => {
+        resolveDetail = resolve
+      }),
+    )
+    renderTask()
+
+    expect(screen.getByTestId("task-page-skeleton")).toBeTruthy()
+    expect(screen.queryByTestId("task-banner-skeleton")).toBeNull()
+    expect(screen.getByTestId("task-details-toggle")).toBeTruthy()
+    expect(screen.getByTestId("task-activity")).toBeTruthy()
+
+    await act(async () => {
+      resolveDetail(detailOf(full("PLA-12")))
+    })
+    await waitFor(() => expect(screen.queryByTestId("task-page-skeleton")).toBeNull())
+    expect(screen.getByTestId("task-details-toggle")).toBeTruthy()
+    expect(screen.getByTestId("task-activity")).toBeTruthy()
+  })
+
+  it("reserves the banner when navigation identifies a banner-bearing task", () => {
+    getWorkItem.mockImplementation(() => new Promise(() => {}))
+    renderTask("/todos/PLA-12", { bannerExpected: true })
+
+    expect(screen.getByTestId("task-banner-skeleton")).toBeTruthy()
+  })
+
+  it("reserves a two-line mobile title while the detail is pending", () => {
+    stubMobileViewport()
+    getWorkItem.mockImplementation(() => new Promise(() => {}))
+    renderTask()
+
+    expect(screen.getByTestId("task-id-skeleton").className).toContain("h-[18px]")
+    expect(screen.getByTestId("task-title-skeleton").className).toContain("h-[62px]")
+  })
+
+  it("keeps the crumb and chip bands single-height while second-wave data lands", async () => {
+    const item = full("PLA-12", { rootId: "PLA-1", parentId: "PLA-1", assignee: "platform-dev" })
+    let resolveTree!: (value: { tree: { root: WorkItemTreeNodeWire; totals: {}; spendUsd: number } }) => void
+    let resolveSessions!: (value: Array<{ status: string }>) => void
+    getWorkItem.mockResolvedValue(detailOf(item))
+    getWorkItemTree.mockImplementation(
+      () => new Promise((resolve) => {
+        resolveTree = resolve
+      }),
+    )
+    listWorkItemSessions.mockImplementation(
+      () => new Promise((resolve) => {
+        resolveSessions = resolve
+      }),
+    )
+    getOrg.mockResolvedValue({
+      departments: ["platform"],
+      employees: [{
+        name: "platform-dev",
+        displayName: "Platform Engineer With A Long Name",
+        department: "platform",
+        rank: "senior",
+        engine: "codex",
+        model: "default",
+        persona: "Builds the platform",
+      }],
+      hierarchy: { root: null, sorted: [], warnings: [] },
+    })
+    renderTask()
+
+    const crumbBefore = await screen.findByTestId("task-crumb-bar")
+    const chipsBefore = await screen.findByTestId("task-chip-cluster")
+    expect(crumbBefore.className).toContain("min-h-[56px]")
+    expect(chipsBefore.className).toContain("max-[700px]:flex-nowrap")
+    expect(chipsBefore.querySelectorAll(":scope > button")).toHaveLength(3)
+
+    await act(async () => {
+      resolveTree({
+        tree: {
+          root: treeNode(full("PLA-1"), [treeNode(item)]),
+          totals: {},
+          spendUsd: 0,
+        },
+      })
+      resolveSessions([{ status: "running" }])
+    })
+
+    await waitFor(() => expect(screen.getByTestId("task-crumb-PLA-1")).toBeTruthy())
+    expect(screen.getByTestId("task-crumb-bar").className).toBe(crumbBefore.className)
+    expect(screen.getByTestId("task-chip-cluster").className).toBe(chipsBefore.className)
+    expect(screen.getByTestId("task-chip-cluster").querySelectorAll(":scope > button")).toHaveLength(3)
+    expect(screen.getByTestId("chip-working")).toBeTruthy()
+  })
+
   it("renders the breadcrumb (board › ancestors › ID + title) and the title block", async () => {
     const item = full("PLA-22", { title: "Postal-code validation", rootId: "PLA-12", parentId: "PLA-14", depth: 2 })
     getWorkItem.mockResolvedValue(detailOf(item))
@@ -170,19 +278,59 @@ describe("the task page", () => {
     expect(getWorkItemTree).toHaveBeenCalledWith("PLA-12")
   })
 
-  it("renders the rail's read rows: status, priority, assignee, verify, spend", async () => {
-    const item = full("PLA-12", { assignee: "mason", priority: 3, budgetUsd: 10 })
-    getWorkItem.mockResolvedValue({ ...detailOf(item), spendUsd: 4.35 })
+  it("moves the key properties into header chips and folds the document behind Details", async () => {
+    const item = full("PLA-12", {
+      assignee: "mason",
+      priority: 3,
+      budgetUsd: 10,
+      body: "A short **markdown** body",
+      acceptance: "- [x] Works\n- [ ] Ships",
+    })
+    getWorkItemTree.mockResolvedValue({
+      tree: {
+        root: treeNode(item, [treeNode(full("PLA-13", { parentId: "PLA-12", depth: 1 }))]),
+        totals: {},
+        spendUsd: 0,
+      },
+    })
+    listWorkItemAttachments.mockResolvedValue({
+      attachments: [{
+        id: "wia_1",
+        workItemId: "PLA-12",
+        commentId: null,
+        filename: "proof.png",
+        mime: "image/png",
+        bytes: 10,
+        sha256: "abc",
+        storagePath: "/tmp/proof.png",
+        uploadedBy: "operator",
+        createdAt: "2026-07-20T09:00:00.000Z",
+      }],
+    })
+    getWorkItem.mockResolvedValue({
+      ...detailOf(item),
+      spendUsd: 4.35,
+      labels: [{ id: "lbl_1", name: "build", color: null, department: null, createdAt: "2026-07-01T00:00:00.000Z" }],
+    })
     renderTask()
 
-    const rail = await screen.findByTestId("task-props-rail")
-    expect(rail).toBeTruthy()
-    expect((screen.getByTestId("rail-status")).textContent).toContain("Executing")
-    expect((screen.getByTestId("rail-priority")).textContent).toContain("High")
-    expect((screen.getByTestId("rail-assignee")).textContent).toContain("mason")
-    expect((screen.getByTestId("rail-verify")).textContent).toContain("Round 1 of")
-    expect((screen.getByTestId("rail-spend")).textContent).toContain("$4.35")
-    expect((screen.getByTestId("rail-spend")).textContent).toContain("$10")
+    const chips = await screen.findByTestId("task-chip-cluster")
+    expect(chips.textContent).toContain("Executing")
+    expect(chips.textContent).toContain("High")
+    expect(chips.textContent).toContain("mason")
+    expect(chips.textContent).toContain("build")
+
+    const toggle = screen.getByTestId("task-details-toggle")
+    const content = screen.getByTestId("task-details-content") as HTMLDivElement
+    await waitFor(() =>
+      expect(toggle.textContent).toContain("Acceptance 1/2 · 1 sub-task · 1 attachment · body 4 words"),
+    )
+    expect(toggle.getAttribute("aria-expanded")).toBe("false")
+    expect(content.hidden).toBe(true)
+    expect(screen.getByTestId("task-props-rail")).toBeTruthy()
+    fireEvent.click(toggle)
+    expect(toggle.getAttribute("aria-expanded")).toBe("true")
+    expect(content.hidden).toBe(false)
   })
 
   it("banner precedence: escalated wins over a pending approval", async () => {
@@ -351,7 +499,7 @@ describe("the task page", () => {
   it("desktop keeps the tab bar; the in-flow composer is the one composer", async () => {
     getWorkItem.mockResolvedValue(detailOf(full("PLA-12")))
     renderTask()
-    await screen.findByTestId("task-props-rail")
+    await screen.findByTestId("task-chip-cluster")
     expect(screen.getByTestId("page-layout").dataset.hideMobileTabBar).toBe("false")
     expect(screen.getByTestId("task-composer")).toBeTruthy()
     expect(screen.queryByTestId("task-composer-mobile")).toBeNull()
@@ -366,10 +514,9 @@ describe("the task page", () => {
     const bar = screen.getByTestId("task-composer-mobile")
     expect(bar).toBeTruthy()
     // Mock anatomy: paperclip · "+ Comment" capsule · send, in that order.
-    const controls = bar.querySelectorAll("button, input")
-    expect((controls[0] as HTMLElement).getAttribute("aria-label")).toBe("Attach")
-    expect((controls[1] as HTMLInputElement).placeholder).toBe("Comment")
-    expect((controls[2] as HTMLElement).getAttribute("aria-label")).toBe("Send")
+    expect((screen.getByTestId("composer-input") as HTMLTextAreaElement).placeholder).toBe("Comment")
+    expect(screen.getByTestId("composer-attach").getAttribute("aria-label")).toBe("Attach")
+    expect(screen.getByTestId("composer-send").getAttribute("aria-label")).toBe("Send")
     expect(screen.queryByTestId("task-composer")).toBeNull()
   })
 })

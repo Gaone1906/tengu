@@ -306,15 +306,26 @@ describe("attachments + activity", () => {
     const rows: WorkItemAttachmentWire[] = [
       { id: "wia_1", workItemId: "PLA-12", commentId: null, filename: "checkout-flow.png", mime: "image/png", bytes: 240 * 1024, sha256: "a", storagePath: "/x", uploadedBy: "mason", createdAt: "2026-07-22T08:00:00.000Z" },
       { id: "wia_2", workItemId: "PLA-12", commentId: "wic_1", filename: "region-matrix.csv", mime: "text/csv", bytes: 4096, sha256: "b", storagePath: "/y", uploadedBy: "mason", createdAt: "2026-07-22T08:00:00.000Z" },
+      { id: "wia_3", workItemId: "PLA-12", commentId: null, filename: "release-notes.pdf", mime: "application/pdf", bytes: 8192, sha256: "c", storagePath: "/z", uploadedBy: "mason", createdAt: "2026-07-22T08:00:00.000Z" },
     ]
     getWorkItem.mockResolvedValue(detailOf(full("PLA-12")))
     listWorkItemAttachments.mockResolvedValue({ attachments: rows })
     uploadWorkItemAttachment.mockResolvedValue(rows[0])
     renderTask()
 
-    const section = await screen.findByTestId("task-attachments")
-    await waitFor(() => expect(section.textContent).toContain("checkout-flow.png"))
-    expect(section.textContent).toContain("240 KB")
+    await screen.findByTestId("task-attachments")
+    const tile = await screen.findByTestId("attachment-tile-wia_1")
+    expect(tile.getAttribute("aria-label")).toBe("Preview checkout-flow.png")
+    const caption = screen.getByTestId("attachment-caption-wia_1")
+    expect(caption.className).toContain("absolute")
+    expect(caption.className).toContain("opacity-0")
+    expect(caption.className).toContain("[@media(hover:hover)]:group-hover/tile:opacity-100")
+    expect(caption.className).toContain("group-focus-within/tile:opacity-100")
+    expect(caption.textContent).toContain("checkout-flow.png")
+    expect(caption.textContent).toContain("240 KB")
+    const fileRow = screen.getByTestId("attachment-row-wia_3")
+    expect(fileRow.textContent).toContain("release-notes.pdf")
+    expect(fileRow.textContent).toContain("8 KB")
     // The comment-level row stays out of the item section.
     expect(screen.queryByTestId("attachment-row-wia_2")).toBeNull()
 
@@ -348,7 +359,8 @@ describe("attachments + activity", () => {
     uploadWorkItemAttachment.mockResolvedValue({})
     renderTask()
 
-    const activity = await screen.findByTestId("task-activity")
+    await waitFor(() => expect(screen.queryByTestId("task-page-skeleton")).toBeNull())
+    const activity = screen.getByTestId("task-activity")
     await waitFor(() => expect(activity.textContent).toContain("Form states are in"))
     // The reply is indented under the thread root, tombstone-shaped grammar intact.
     expect(screen.getByTestId("activity-comment-wic_2").className).toContain("ml-[30px]")
@@ -395,11 +407,8 @@ describe("attachments + activity", () => {
     expect(block.textContent).not.toContain("`")
     expect(block.textContent).not.toContain("pipeline-status")
 
-    const bodyRail = block.children[1]
-    const renderedLines = [...bodyRail.children]
-      .filter((child) => child.tagName === "DIV")
-      .map((child) => child.textContent)
-    expect(renderedLines).toEqual(["PLAN done and code", "•item", "1.item", "text"])
+    expect(block.querySelector("ul li")?.textContent?.trim()).toBe("item")
+    expect(block.querySelector("ol li")?.textContent?.replace(/\s+/g, " ").trim()).toBe("item text")
   })
 
   it("shows newest blocks first, keeps replies chronological, and expands quiet updates newest first", async () => {
@@ -422,8 +431,8 @@ describe("attachments + activity", () => {
     })
     renderTask()
 
-    const activity = await screen.findByTestId("task-activity")
     await screen.findByTestId("activity-comment-wic_newest")
+    const activity = screen.getByTestId("task-activity")
     const comments = [...activity.querySelectorAll('[data-testid^="activity-comment-"]')]
       .map((node) => node.getAttribute("data-testid"))
     expect(comments).toEqual([
@@ -440,7 +449,7 @@ describe("attachments + activity", () => {
     expect(expandedEvents).toEqual(["whisper-e4", "whisper-e3", "whisper-e2"])
   })
 
-  it("places the desktop composer before the feed and keeps an expanded fold open when a newer comment is prepended", async () => {
+  it("places the desktop composer after the feed and keeps an expanded fold open when a newer comment is prepended", async () => {
     const events = [
       event("e1", "created", "2026-07-20T08:00:00.000Z"),
       event("e2", "metadata_edited", "2026-07-20T09:00:00.000Z"),
@@ -457,7 +466,7 @@ describe("attachments + activity", () => {
     const fold = await screen.findByTestId("activity-fold-e2")
     const composer = screen.getByTestId("task-composer")
     const olderBlock = screen.getByTestId("activity-comment-wic_older")
-    expect(composer.compareDocumentPosition(olderBlock) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(olderBlock.compareDocumentPosition(composer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
 
     fireEvent.click(fold)
     expect(fold.getAttribute("aria-expanded")).toBe("true")

@@ -129,7 +129,7 @@ function emptyTree(id: string, status: WorkItemStatusWire = "backlog", priority 
 
 function LocationProbe() {
   const location = useLocation()
-  return <span data-testid="location">{location.pathname}</span>
+  return <span data-testid="location" data-state={JSON.stringify(location.state ?? {})}>{location.pathname}</span>
 }
 
 function renderBoard(path: string) {
@@ -289,7 +289,18 @@ describe("the board surface", () => {
     renderBoard("/todos/b/platform")
     const card = await screen.findByTestId("board-card-PLA-1")
     fireEvent.click(card)
-    await waitFor(() => expect(screen.getByTestId("location").textContent).toBe("/todos/PLA-1"))
+    const location = await screen.findByTestId("location")
+    expect(location.textContent).toBe("/todos/PLA-1")
+    expect(JSON.parse(location.dataset.state!)).toMatchObject({ bannerExpected: false })
+  })
+
+  it("tells the task route when a card will render a banner", async () => {
+    rows.blocked = [compact({ id: "PLA-9", status: "blocked" })]
+    renderBoard("/todos/b/platform")
+    fireEvent.click(await screen.findByTestId("board-card-PLA-9"))
+
+    const location = await screen.findByTestId("location")
+    expect(JSON.parse(location.dataset.state!)).toMatchObject({ bannerExpected: true })
   })
 
   it("re-renders only the card whose board row changed", async () => {
@@ -363,6 +374,72 @@ describe("card anatomy", () => {
     renderBoard("/todos/b/platform")
     const card = await screen.findByTestId("board-card-PLA-5")
     expect(card.textContent).toContain("Approval")
+  })
+
+  it("adds a markdown-free preview line from the Todo body", async () => {
+    rows.backlog = [compact({ id: "PLA-15", status: "backlog" })]
+    const tree = emptyTree("PLA-15")
+    tree.root.body = "## Plan\n\nShip the **quiet** card preview with `one renderer`."
+    getWorkItemTrees.mockResolvedValue({ trees: { "PLA-15": tree } })
+    renderBoard("/todos/b/platform")
+
+    const card = await screen.findByTestId("board-card-PLA-15")
+    expect(card.textContent).toContain("Ship the quiet card preview with one renderer.")
+    expect(card.textContent).not.toContain("##")
+    expect(card.textContent).not.toContain("**")
+    expect(card.textContent).not.toContain("`")
+  })
+
+  it("FLIPs cards below an item when delayed enrichment grows its card", async () => {
+    rows.backlog = [
+      compact({ id: "PLA-15", status: "backlog" }),
+      compact({ id: "PLA-16", status: "backlog" }),
+    ]
+    let release!: () => void
+    let enriched = false
+    getWorkItemTrees.mockImplementation(
+      (ids: string[]) =>
+        new Promise((resolve) => {
+          release = () => {
+            const trees = Object.fromEntries(ids.map((id) => {
+              const tree = emptyTree(id)
+              if (id === "PLA-15") tree.root.body = "Delayed body preview"
+              return [id, tree]
+            }))
+            resolve({ trees })
+          }
+        }),
+    )
+    const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const id = this.dataset.boardCard
+      const top = id === "PLA-16" ? (enriched ? 112 : 80) : 0
+      return {
+        x: 0, y: top, left: 0, top, right: 240, bottom: top + 72, width: 240, height: 72,
+        toJSON: () => ({}),
+      } as DOMRect
+    })
+    const animate = vi.fn()
+    Object.defineProperty(HTMLElement.prototype, "animate", {
+      configurable: true,
+      value: animate,
+    })
+
+    renderBoard("/todos/b/platform")
+    const lowerCard = await screen.findByTestId("board-card-PLA-16")
+    await waitFor(() => expect(release).toBeTypeOf("function"))
+    enriched = true
+    await act(async () => {
+      release()
+    })
+    await waitFor(() => expect(screen.getByTestId("board-card-PLA-15").textContent).toContain("Delayed body preview"))
+    expect(animate).toHaveBeenCalledWith(
+      [{ transform: "translateY(-32px)" }, { transform: "translateY(0)" }],
+      { duration: 200, easing: "cubic-bezier(.34,1.3,.64,1)" },
+    )
+    expect(animate.mock.instances).toContain(lowerCard)
+
+    rect.mockRestore()
+    delete (HTMLElement.prototype as { animate?: unknown }).animate
   })
 
   it("renders the roll-up pill from the tree and expands the in-place tray", async () => {
@@ -590,6 +667,8 @@ describe("board states (states mock §6 — stage C)", () => {
     listWorkItems.mockImplementation(() => new Promise(() => {}))
     renderBoard("/todos/b/platform")
     await waitFor(() => expect(screen.getByTestId("board-skeleton")).toBeTruthy())
+    expect(screen.getByTestId("board-skeleton-closed-rail")).toBeTruthy()
+    expect(screen.getByTestId("board-skeleton").children).toHaveLength(6)
   })
 
   it("a board load failure surfaces the calm error card, not a blank surface", async () => {

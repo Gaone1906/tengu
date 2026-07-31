@@ -29,7 +29,7 @@ import { FilterBar } from "../filter-bar"
 import { TodoFilterSheet } from "../todo-filter-sheet"
 import { NeedsYouView } from "../needs-you-view"
 import { NewTodoDialog } from "../new-todo-dialog"
-import { BoardCard, type CardEnrichment } from "./card"
+import { BoardCard, cardLayoutKey, rollupOf, type CardEnrichment } from "./card"
 import { BoardColumn, DragSlot } from "./column"
 import { ClosedColumnGroup, ClosedColumnHeader, ClosedRail } from "./closed-rail"
 import { BoardSwitcher, departmentTitle } from "./board-switcher"
@@ -51,7 +51,6 @@ import {
   recallBoardScroll,
   rememberBoardScroll,
 } from "./board-route"
-import { rollupOf } from "./card"
 
 /* Todos v2 slice 6 — the board surface (design contract:
  * docs/superpowers/design/todos-v2-board — board.html is the visual truth).
@@ -405,7 +404,18 @@ export default function TodoBoardPage() {
 
   // Opening a card carries the board context so the task page's crumb knows
   // its way back (the board name is the back affordance).
-  const onOpen = useCallback((id: string) => navigate(todoPath(id), { state: { fromBoard: key } }), [navigate, key])
+  const onOpen = useCallback(
+    (id: string, item?: WorkItemCompactWire) =>
+      navigate(todoPath(id), {
+        state: {
+          fromBoard: key,
+          bannerExpected: item
+            ? item.status === "blocked" || item.status === "escalated" || item.approvalState === "pending"
+            : undefined,
+        },
+      }),
+    [navigate, key],
+  )
 
   // ── Attention board actions (reuses the shipped decision surface). The
   // approval cluster is Approve · Reject…, and a rejection carries its own
@@ -524,7 +534,7 @@ export default function TodoBoardPage() {
         key={status}
         status={status}
         count={count}
-        orderKey={items.map((item) => item.id).join(",")}
+        orderKey={items.map((item) => `${item.id}:${cardLayoutKey(item, enrichmentById.get(item.id))}`).join(",")}
         onQuickAdd={quickAdd}
         hasMore={column?.hasMore ?? false}
         remaining={Math.max(0, (column?.total ?? 0) - items.length)}
@@ -965,7 +975,7 @@ function FilteredEmptyCard({ count, onClear }: { count: number; onClear: () => v
 /** Loading keeps exact card geometry so nothing shifts when data lands
  *  (states mock §6 .skel-col: 56px overline bar, 85%/55% title bars). */
 function BoardSkeleton() {
-  const cardsPerColumn = [3, 2, 3, 2]
+  const cardsPerColumn = [3, 2, 3, 2, 1]
   return (
     <div className="flex min-h-full items-start gap-3 px-10 pb-8 pt-5" data-testid="board-skeleton" aria-hidden>
       {cardsPerColumn.map((cards, column) => (
@@ -999,6 +1009,10 @@ function BoardSkeleton() {
           </div>
         </div>
       ))}
+      <div
+        data-testid="board-skeleton-closed-rail"
+        className="h-24 w-11 flex-none rounded-[var(--radius-lg)] bg-[var(--fill-quaternary)] motion-safe:animate-[skeletonPulse_1.6s_var(--ease-smooth)_infinite]"
+      />
     </div>
   )
 }
