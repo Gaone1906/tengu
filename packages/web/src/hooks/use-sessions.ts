@@ -92,6 +92,13 @@ export function useSessions() {
   })
 }
 
+export function usePinnedSessions() {
+  return useQuery({
+    queryKey: [...queryKeys.pins, 'sessions'] as const,
+    queryFn: api.getPinnedSessions,
+  })
+}
+
 export function useSessionCounts() {
   const qc = useQueryClient()
   return useQuery({

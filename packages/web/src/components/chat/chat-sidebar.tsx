@@ -10,7 +10,7 @@ import { EmployeeAvatar } from "@/components/ui/employee-avatar"
 import { useSettings } from "@/routes/settings-provider"
 import { cleanPreview } from "@/lib/clean-preview"
 import { queryKeys } from "@/lib/query-keys"
-import { useSessions, useSessionCounts, useSessionSearch, useUpdateSession, useDeleteSession, useBulkDeleteSessions, useDuplicateSession, useArchiveSession, useUnarchiveSession } from "@/hooks/use-sessions"
+import { useSessions, usePinnedSessions, useSessionCounts, useSessionSearch, useUpdateSession, useDeleteSession, useBulkDeleteSessions, useDuplicateSession, useArchiveSession, useUnarchiveSession } from "@/hooks/use-sessions"
 import { usePins, useTogglePin } from "@/hooks/use-pins"
 import {
   ContextMenu,
@@ -1171,6 +1171,7 @@ export function ChatSidebar({
 
   const qc = useQueryClient()
   const { data: rawSessions, isLoading: loading } = useSessions()
+  const { data: pinnedSessionRows = [] } = usePinnedSessions()
   const { data: meta } = useSessionCounts()
   const counts = meta?.counts ?? {}
   const updateSessionMutation = useUpdateSession()
@@ -1185,13 +1186,20 @@ export function ChatSidebar({
   const sessions = useMemo(() => {
     if (!rawSessions) return []
     const filtered = (rawSessions as Session[]).filter(isVisibleSource)
+    const loadedIds = new Set(filtered.map((session) => session.id))
+    for (const session of pinnedSessionRows as Session[]) {
+      if (isVisibleSource(session) && !loadedIds.has(session.id)) {
+        filtered.push(session)
+        loadedIds.add(session.id)
+      }
+    }
     filtered.sort((a, b) => {
       const ta = a.lastActivity || a.createdAt || ""
       const tb = b.lastActivity || b.createdAt || ""
       return tb.localeCompare(ta)
     })
     return filtered
-  }, [rawSessions])
+  }, [rawSessions, pinnedSessionRows])
 
   const [search, setSearch] = useState("")
   // Search spans ALL sessions server-side (the loaded page is only a subset).

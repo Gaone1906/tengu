@@ -916,6 +916,7 @@ export const api = {
   refreshEngineLimits: (engine?: string) =>
     post<EngineLimitsResponse>(`/api/engine-limits/refresh${engine ? `?engine=${encodeURIComponent(engine)}` : ""}`, {}),
   getSessions: () => get<SessionsResponse>("/api/sessions"),
+  getPinnedSessions: () => get<Record<string, unknown>[]>("/api/sessions?pinned=1"),
   getPins: () => get<PinsResponse>("/api/pins"),
   pinChat: (key: string) => post<{ status: string }>("/api/pins", { key }),
   unpinChat: (key: string) => del<{ status: string }>(`/api/pins/${encodeURIComponent(key)}`),
