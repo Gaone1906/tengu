@@ -6,7 +6,7 @@ import { useStickToBottom } from '@/hooks/use-stick-to-bottom'
 import { useMessageTts, stopMessageTts } from './use-message-tts'
 import { ChatBlockInline, statusMark } from './chat-blocks'
 import { blockFallbackContent, isActiveDelegationStatus, type LiveBlockArrival } from '@/lib/blocks'
-import { ChevronDown, Wrench } from 'lucide-react'
+import { ChevronDown, FileText, Globe, Search, Terminal, Wrench, type LucideIcon } from 'lucide-react'
 import { parseTeammateReply, TeammateReply } from './teammate-reply'
 import { parseAgentRelay, AgentRelay } from './agent-relay'
 import { DispatchRow } from './dispatch-row'
@@ -38,6 +38,22 @@ function findActiveToolIndex(msgs: Message[]): number {
     if (!isToolDone(msgs[i])) return i
   }
   return -1
+}
+
+const TOOL_GLYPH_RULES: ReadonlyArray<{
+  glyph: LucideIcon
+  matches: readonly string[]
+}> = [
+  { glyph: FileText, matches: ['read', 'write', 'edit', 'file', 'patch', 'notebook'] },
+  { glyph: Terminal, matches: ['bash', 'shell', 'exec', 'run', 'command'] },
+  { glyph: Search, matches: ['grep', 'glob', 'search', 'find'] },
+  { glyph: Globe, matches: ['fetch', 'web', 'browser', 'http'] },
+]
+
+export function toolGlyphForName(toolName: string): LucideIcon {
+  const normalized = toolName.replace(/^mcp__.*?__/i, '').toLowerCase()
+  return TOOL_GLYPH_RULES.find(({ matches }) => matches.some((match) => normalized.includes(match)))?.glyph
+    ?? Wrench
 }
 
 function isDelegationToolCall(msg: Message): boolean {
@@ -616,6 +632,7 @@ function ToolGroup({
             const done = isToolDone(m)
             const key = m.id || `${m.toolCall}-${index}`
             const status = done ? 'done' : index === activeIndex ? 'running' : 'queued'
+            const ToolGlyph = toolGlyphForName(m.toolCall || '')
             return (
               <div
                 key={key}
@@ -624,6 +641,7 @@ function ToolGroup({
                 <span className="grid size-4 shrink-0 place-items-center">
                   {statusMark(status)}
                 </span>
+                <ToolGlyph size={13} aria-hidden="true" className="shrink-0 text-[var(--text-tertiary)]" />
                 <span className="min-w-0 truncate text-[length:var(--text-footnote)] font-[var(--weight-medium)] text-[var(--text-primary)]">
                   {m.toolCall || `Tool ${index + 1}`}
                 </span>

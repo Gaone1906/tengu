@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
-import { ChatMessages } from '../chat-messages'
+import { FileText, Globe, Search, Terminal, Wrench } from 'lucide-react'
+import { ChatMessages, toolGlyphForName } from '../chat-messages'
 import type { Message } from '@/lib/conversations'
 
 /** Activity blocks render CompanyActivityCard, which reads useNavigate — those
@@ -15,6 +16,17 @@ function renderRouted(messages: Message[], loading = false) {
 }
 
 describe('ChatMessages tool groups', () => {
+  it.each([
+    ['Read', FileText],
+    ['SHELL_COMMAND', Terminal],
+    ['find_matches', Search],
+    ['WebFetch', Globe],
+    ['unknown_tool', Wrench],
+    ['mcp__jinn__FILE_EDIT', FileText],
+  ])('maps %s to its tool-kind glyph', (toolName, expectedGlyph) => {
+    expect(toolGlyphForName(toolName)).toBe(expectedGlyph)
+  })
+
   it('renders unsafe markdown links as plain text', () => {
     const messages: Message[] = [{
       id: 'm1',
@@ -113,6 +125,45 @@ describe('ChatMessages tool groups', () => {
 
     expect(within(group).getAllByLabelText('Running')).toHaveLength(1)
     expect(within(group).getByText('run_tests').closest('div')?.textContent).toContain('run_tests')
+  })
+
+  it('keeps the current done, queued, and running status marks', () => {
+    const messages: Message[] = [
+      {
+        id: 'tool-done',
+        role: 'assistant',
+        content: 'Used file_read',
+        timestamp: 100,
+        toolCall: 'file_read',
+      },
+      {
+        id: 'tool-queued',
+        role: 'assistant',
+        content: 'Using inspect_repo',
+        timestamp: 101,
+        toolCall: 'inspect_repo',
+      },
+      {
+        id: 'tool-running',
+        role: 'assistant',
+        content: 'Using run_tests',
+        timestamp: 102,
+        toolCall: 'run_tests',
+      },
+    ]
+
+    render(<ChatMessages messages={messages} loading />)
+
+    fireEvent.click(screen.getByRole('button', { name: /3 tools running/i }))
+    const group = screen.getByTestId('tool-group-list')
+    const doneRow = within(group).getByText('file_read').closest('div')
+    const queuedRow = within(group).getByText('inspect_repo').closest('div')
+    const runningRow = within(group).getByText('run_tests').closest('div')
+
+    expect(doneRow?.querySelector('.lucide-check')).not.toBeNull()
+    expect(queuedRow?.querySelector('.lucide-circle')).not.toBeNull()
+    expect(runningRow?.querySelector('.lucide-loader-circle')).not.toBeNull()
+    expect(within(group).getAllByLabelText('Running')).toHaveLength(1)
   })
 
   it('keeps a tool group active when a live block follows it', () => {

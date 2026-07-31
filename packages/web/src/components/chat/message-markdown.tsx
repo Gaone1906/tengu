@@ -4,6 +4,7 @@ import { buildFileReadRequest } from '@/lib/file-read-request'
 import { isTodoId, TODO_ID_MENTION_SOURCE, todoPath } from '@/lib/todo-id'
 import { useOpenFile } from '@/components/chat/file-open-context'
 import { useKnownTodoPrefixes } from '@/components/chat/todo-prefix-context'
+import { CodeBlockChrome } from '@/components/code-block-chrome'
 import { ChevronDown } from 'lucide-react'
 
 // Bare paths stay deliberately narrow: optional ~/ or / prefix, ≥1
@@ -171,43 +172,10 @@ export function parseFenceLang(line: string): string {
 }
 
 function CodeBlock({ code, lang, keyProp }: { code: string; lang?: string; keyProp: number }) {
-  const [copied, setCopied] = useState(false)
-
-  function handleCopy() {
-    navigator.clipboard.writeText(code).then(() => {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
-    })
-  }
-
   return (
-    // Soft contained card — no hairline (fill + shadow-subtle). The header strip
-    // lifts the copy button off the first line of code (fixes mobile overlap).
-    <div key={keyProp} className="code-block-wrap my-[var(--space-2)] rounded-[var(--radius-md)] overflow-hidden bg-[var(--fill-tertiary)] shadow-[var(--shadow-subtle)]">
-      <div className="flex items-center justify-between gap-[var(--space-2)] py-[3px] pl-[var(--space-3)] pr-[var(--space-1)] bg-[var(--fill-secondary)]">
-        <span className="text-[length:var(--text-caption2)] tracking-wide text-[var(--text-tertiary)] font-[family-name:var(--font-code)]">
-          {lang || 'text'}
-        </span>
-        <button
-          onClick={handleCopy}
-          aria-label={copied ? 'Copied' : 'Copy code'}
-          title={copied ? 'Copied' : 'Copy'}
-          className="inline-flex h-[26px] w-[26px] items-center justify-center rounded-[7px] border-none bg-transparent text-[var(--text-quaternary)] transition-colors hover:bg-[var(--fill-tertiary)] hover:text-[var(--text-secondary)] cursor-pointer"
-        >
-          {copied ? (
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <polyline points="20 6 9 17 4 12" />
-            </svg>
-          ) : (
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <rect x="9" y="9" width="13" height="13" rx="2" />
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-            </svg>
-          )}
-        </button>
-      </div>
+    <CodeBlockChrome key={keyProp} code={code} language={lang} className="my-[var(--space-2)]">
       <pre className="code-block overflow-x-auto py-[var(--space-3)] px-[var(--space-4)] text-[length:var(--text-footnote)] leading-normal font-[family-name:var(--font-code)] text-[var(--text-primary)]"><code>{code}</code></pre>
-    </div>
+    </CodeBlockChrome>
   )
 }
 
