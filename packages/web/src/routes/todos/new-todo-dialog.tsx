@@ -118,7 +118,7 @@ function PropertyChip({
         data-testid={testId}
         aria-expanded={active || undefined}
         onClick={onClick}
-        className={`focus-ring inline-flex min-h-8 items-center gap-1.5 rounded-full px-2.5 text-[12px] font-medium outline-none transition-colors ${
+        className={`focus-ring inline-flex min-h-9 items-center gap-1.5 rounded-full px-2.5 text-[12px] font-medium outline-none transition-colors ${
           active
             ? "bg-[var(--accent-fill)] text-[var(--accent)]"
             : "bg-[var(--fill-tertiary)] text-[var(--text-secondary)] hover:bg-[var(--fill-secondary)]"

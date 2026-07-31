@@ -57,6 +57,14 @@ beforeEach(() => {
 })
 
 describe("NewTodoDialog", () => {
+  it("gives every property chip at least a 34px tap target", () => {
+    renderDialog()
+
+    for (const chip of screen.getAllByTestId(/^todo-new-.*-chip$/)) {
+      expect(chip.classList.contains("min-h-9")).toBe(true)
+    }
+  })
+
   it("creates once with the rich payload, then assigns through the legal edge", async () => {
     const user = userEvent.setup()
     const { onCreated } = renderDialog()

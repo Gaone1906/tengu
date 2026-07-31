@@ -45,8 +45,7 @@ export function groupTodoListItems(
   needsAttention: WorkItemCompactWire[],
 ): TodoListGroup[] {
   const attentionIds = new Set(needsAttention.map(({ id }) => id))
-  const allItems = Object.values(columns).flatMap(({ items }) => items)
-  const needsItems = allItems.filter(({ id }) => attentionIds.has(id))
+  const needsItems = needsAttention
   const hoistedByStatus = new Map<WorkItemStatusWire, number>()
   for (const item of needsItems) {
     hoistedByStatus.set(item.status, (hoistedByStatus.get(item.status) ?? 0) + 1)

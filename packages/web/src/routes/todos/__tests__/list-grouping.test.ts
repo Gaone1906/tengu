@@ -30,6 +30,28 @@ function item(id: string, status: WorkItemStatusWire): WorkItemCompactWire {
 }
 
 describe("groupTodoListItems", () => {
+  it("hoists an attention item outside the loaded status page", () => {
+    const needsReview = item("PLA-21", "in_review")
+    const groups = groupTodoListItems(
+      {
+        backlog: { items: [], total: 0 },
+        assigned: { items: [], total: 0 },
+        executing: { items: [], total: 0 },
+        in_review: { items: [], total: 21 },
+        blocked: { items: [], total: 0 },
+        escalated: { items: [], total: 0 },
+        done: { items: [], total: 0 },
+        cancelled: { items: [], total: 0 },
+      },
+      [needsReview],
+    )
+
+    expect(groups.find((group) => group.key === "needs-you")?.items.map(({ id }) => id)).toEqual(["PLA-21"])
+    expect(groups.find((group) => group.key === "in-review")?.items).toEqual([])
+    expect(groups.find((group) => group.key === "in-review")?.count).toBe(20)
+    expect(groups.flatMap((group) => group.items).filter(({ id }) => id === "PLA-21")).toHaveLength(1)
+  })
+
   it("hoists attention items exactly once and keeps an ordinary blocked item in Blocked", () => {
     const needsReview = item("ICI-1", "in_review")
     const needsBlocked = item("ICI-2", "blocked")

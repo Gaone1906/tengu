@@ -139,6 +139,14 @@ beforeEach(() => {
 })
 
 describe("the list-first Todos surface", () => {
+  it("gives both view controls at least a 34px tap target", async () => {
+    renderTodos("/todos/b/platform")
+    await screen.findByTestId("todo-list-group-backlog")
+
+    expect(screen.getByTestId("todos-view-list").classList.contains("h-9")).toBe(true)
+    expect(screen.getByTestId("todos-view-board").classList.contains("h-9")).toBe(true)
+  })
+
   it("shows the grouped list by default and keeps Closed collapsed", async () => {
     rows.executing = [compact("PLA-1", "executing")]
     rows.done = [compact("PLA-2", "done")]
