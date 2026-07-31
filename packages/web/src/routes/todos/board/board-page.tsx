@@ -404,7 +404,18 @@ export default function TodoBoardPage() {
 
   // Opening a card carries the board context so the task page's crumb knows
   // its way back (the board name is the back affordance).
-  const onOpen = useCallback((id: string) => navigate(todoPath(id), { state: { fromBoard: key } }), [navigate, key])
+  const onOpen = useCallback(
+    (id: string, item?: WorkItemCompactWire) =>
+      navigate(todoPath(id), {
+        state: {
+          fromBoard: key,
+          bannerExpected: item
+            ? item.status === "blocked" || item.status === "escalated" || item.approvalState === "pending"
+            : undefined,
+        },
+      }),
+    [navigate, key],
+  )
 
   // ── Attention board actions (reuses the shipped decision surface). The
   // approval cluster is Approve · Reject…, and a rejection carries its own
@@ -523,7 +534,7 @@ export default function TodoBoardPage() {
         key={status}
         status={status}
         count={count}
-        orderKey={items.map((item) => `${item.id}:${cardLayoutKey(item, enrichmentOf(item.id))}`).join(",")}
+        orderKey={items.map((item) => `${item.id}:${cardLayoutKey(item, enrichmentById.get(item.id))}`).join(",")}
         onQuickAdd={quickAdd}
         hasMore={column?.hasMore ?? false}
         remaining={Math.max(0, (column?.total ?? 0) - items.length)}

@@ -165,7 +165,7 @@ describe("ancestor helpers", () => {
 })
 
 describe("the task page", () => {
-  it("holds the loaded task geometry with a skeleton until the detail resolves", async () => {
+  it("holds ordinary task geometry without reserving a banner until the detail resolves", async () => {
     let resolveDetail!: (detail: WorkItemDetailWire) => void
     getWorkItem.mockImplementation(
       () => new Promise<WorkItemDetailWire>((resolve) => {
@@ -175,7 +175,7 @@ describe("the task page", () => {
     renderTask()
 
     expect(screen.getByTestId("task-page-skeleton")).toBeTruthy()
-    expect(screen.getByTestId("task-banner-skeleton")).toBeTruthy()
+    expect(screen.queryByTestId("task-banner-skeleton")).toBeNull()
     expect(screen.getByTestId("task-details-toggle")).toBeTruthy()
     expect(screen.getByTestId("task-activity")).toBeTruthy()
 
@@ -185,6 +185,13 @@ describe("the task page", () => {
     await waitFor(() => expect(screen.queryByTestId("task-page-skeleton")).toBeNull())
     expect(screen.getByTestId("task-details-toggle")).toBeTruthy()
     expect(screen.getByTestId("task-activity")).toBeTruthy()
+  })
+
+  it("reserves the banner when navigation identifies a banner-bearing task", () => {
+    getWorkItem.mockImplementation(() => new Promise(() => {}))
+    renderTask("/todos/PLA-12", { bannerExpected: true })
+
+    expect(screen.getByTestId("task-banner-skeleton")).toBeTruthy()
   })
 
   it("reserves a two-line mobile title while the detail is pending", () => {

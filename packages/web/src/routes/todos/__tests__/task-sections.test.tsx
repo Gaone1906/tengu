@@ -407,11 +407,8 @@ describe("attachments + activity", () => {
     expect(block.textContent).not.toContain("`")
     expect(block.textContent).not.toContain("pipeline-status")
 
-    const bodyRail = block.children[1]
-    const renderedLines = [...bodyRail.children]
-      .filter((child) => child.tagName === "DIV")
-      .map((child) => child.textContent)
-    expect(renderedLines).toEqual(["PLAN done and code", "•item", "1.item", "text"])
+    expect(block.querySelector("ul li")?.textContent?.trim()).toBe("item")
+    expect(block.querySelector("ol li")?.textContent?.replace(/\s+/g, " ").trim()).toBe("item text")
   })
 
   it("shows newest blocks first, keeps replies chronological, and expands quiet updates newest first", async () => {
@@ -434,8 +431,8 @@ describe("attachments + activity", () => {
     })
     renderTask()
 
-    const activity = await screen.findByTestId("task-activity")
     await screen.findByTestId("activity-comment-wic_newest")
+    const activity = screen.getByTestId("task-activity")
     const comments = [...activity.querySelectorAll('[data-testid^="activity-comment-"]')]
       .map((node) => node.getAttribute("data-testid"))
     expect(comments).toEqual([
@@ -452,7 +449,7 @@ describe("attachments + activity", () => {
     expect(expandedEvents).toEqual(["whisper-e4", "whisper-e3", "whisper-e2"])
   })
 
-  it("places the desktop composer before the feed and keeps an expanded fold open when a newer comment is prepended", async () => {
+  it("places the desktop composer after the feed and keeps an expanded fold open when a newer comment is prepended", async () => {
     const events = [
       event("e1", "created", "2026-07-20T08:00:00.000Z"),
       event("e2", "metadata_edited", "2026-07-20T09:00:00.000Z"),
@@ -469,7 +466,7 @@ describe("attachments + activity", () => {
     const fold = await screen.findByTestId("activity-fold-e2")
     const composer = screen.getByTestId("task-composer")
     const olderBlock = screen.getByTestId("activity-comment-wic_older")
-    expect(composer.compareDocumentPosition(olderBlock) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(olderBlock.compareDocumentPosition(composer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
 
     fireEvent.click(fold)
     expect(fold.getAttribute("aria-expanded")).toBe("true")

@@ -91,6 +91,7 @@ export function nodeOf(root: WorkItemTreeNodeWire | undefined, id: string): Work
 interface TaskRouteState {
   fromBoard?: string
   focusBannerReason?: boolean
+  bannerExpected?: boolean
 }
 
 const LIVE_SESSION_STATES = new Set(["running", "waiting"])
@@ -374,7 +375,10 @@ export default function TaskPage() {
                   : "w-full max-w-[920px] px-10 pb-8 pt-2"
               }
             >
-              <TaskPageSkeleton mobile={mobile} />
+              <TaskPageSkeleton
+                mobile={mobile}
+                bannerExpected={routeState.bannerExpected ?? routeState.focusBannerReason ?? false}
+              />
             </div>
           </div>
         </div>
@@ -596,12 +600,12 @@ export default function TaskPage() {
   )
 }
 
-function TaskPageSkeleton({ mobile }: { mobile: boolean }) {
+function TaskPageSkeleton({ mobile, bannerExpected }: { mobile: boolean; bannerExpected: boolean }) {
   const pulse =
     "bg-[var(--fill-tertiary)] motion-safe:animate-[skeletonPulse_1.6s_var(--ease-smooth)_infinite]"
   return (
     <div data-testid="task-page-skeleton" className="min-w-0" aria-hidden>
-      {!mobile && (
+      {bannerExpected && (
         <div
           data-testid="task-banner-skeleton"
           className={`mb-3.5 h-[126px] w-full rounded-[var(--radius-xl)] ${pulse}`}

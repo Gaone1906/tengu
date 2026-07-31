@@ -86,7 +86,7 @@ export function cardLayoutKey(item: WorkItemCompactWire, enrichment: CardEnrichm
   const tree = enrichment?.tree
   const detail = enrichment?.detail
   const rollup = rollupOf(tree, item.status)
-  const spendUsd = tree?.spendUsd ?? detail?.spendUsd ?? 0
+  const spendUsd = tree?.spendUsd ?? 0
   const body = stripMarkdown(tree?.root.body ?? "").trim().length > 0
   const working = workingSince(item, detail) !== null
   const reason = reasonOf(item, detail) !== null
@@ -133,7 +133,7 @@ export interface BoardCardProps {
   byName: Map<string, Employee>
   expanded: boolean
   onToggleTree: (id: string) => void
-  onOpen: (id: string) => void
+  onOpen: (id: string, item?: WorkItemCompactWire) => void
   onOpenChild: (id: string) => void
   onAddSubTask: (parentId: string, title: string) => void
   /** Drag lift entry point (the drag hook owns pointer capture). */
@@ -178,9 +178,9 @@ export const BoardCard = memo(function BoardCard({
       role="button"
       tabIndex={0}
       aria-label={`${item.id} ${item.title}`}
-      onClick={() => onOpen(item.id)}
+      onClick={() => onOpen(item.id, item)}
       onKeyDown={(e) => {
-        if (e.key === "Enter" && e.target === e.currentTarget) onOpen(item.id)
+        if (e.key === "Enter" && e.target === e.currentTarget) onOpen(item.id, item)
       }}
       onPointerDown={(e) => onLiftPointerDown?.(e, item)}
       style={{ contentVisibility: "auto", containIntrinsicSize: "auto 160px" }}
