@@ -1,10 +1,25 @@
 import fs from "node:fs";
+import os from "node:os";
 import crypto from "node:crypto";
 
-export interface GatewayInfo { port: number; host?: string; secret: string; pid: number; token?: string; ptyPids?: number[]; }
+export interface GatewayInfo { port: number; host?: string; secret: string; pid: number; token?: string; ptyPids?: number[]; namespace?: string; }
 
-export function staleGatewayPids(info: Partial<GatewayInfo> | null | undefined, currentPid = process.pid): number[] {
+/** Identifies the pid namespace the recorded pids belong to. Under Docker this is
+ *  the container id, so it changes on every recreate. */
+function currentNamespace(): string {
+  return os.hostname();
+}
+
+export function staleGatewayPids(
+  info: Partial<GatewayInfo> | null | undefined,
+  currentPid = process.pid,
+  namespace = currentNamespace(),
+): number[] {
   if (!info) return [];
+  // Pids are only meaningful in the namespace that recorded them. A container
+  // restarts pids from 1, so a gateway.json left by an ungraceful stop names
+  // numbers now held by unrelated live processes. Absent field: assume foreign.
+  if (info.namespace !== namespace) return [];
   const candidates = [...(Array.isArray(info.ptyPids) ? info.ptyPids : []), info.pid];
   return candidates.filter((pid): pid is number =>
     typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0 && pid !== currentPid
@@ -20,6 +35,7 @@ export function writeGatewayInfo(file: string, opts: { port: number; host?: stri
     secret: opts.secret ?? previous?.secret ?? crypto.randomBytes(24).toString("hex"),
     token: opts.token ?? previous?.token,
     ptyPids: [],
+    namespace: currentNamespace(),
   };
   const tmp = `${file}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(info, null, 2), { mode: 0o600 });

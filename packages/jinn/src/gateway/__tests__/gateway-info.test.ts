@@ -22,8 +22,27 @@ describe("gateway-info", () => {
   });
 
   it("ignores token-only gateway info when deriving stale pids to reap", () => {
-    expect(staleGatewayPids({ token: "tok" } as any, 1234)).toEqual([]);
-    expect(staleGatewayPids({ pid: undefined, ptyPids: [111, undefined, 1234, 0, -1] } as any, 1234)).toEqual([111]);
+    expect(staleGatewayPids({ token: "tok", namespace: "h1" } as any, 1234, "h1")).toEqual([]);
+    expect(staleGatewayPids({ pid: undefined, ptyPids: [111, undefined, 1234, 0, -1], namespace: "h1" } as any, 1234, "h1")).toEqual([111]);
+  });
+
+  // A container restarts pids from 1, so pids recorded by a previous container
+  // name unrelated live processes — reaping them could signal PID 1.
+  it("does not reap pids recorded by a different namespace", () => {
+    const info = { pid: 7, ptyPids: [14, 22], namespace: "old-container" } as any;
+    expect(staleGatewayPids(info, 1234, "old-container")).toEqual([14, 22, 7]);
+    expect(staleGatewayPids(info, 1234, "new-container")).toEqual([]);
+  });
+
+  it("does not reap pids from gateway info written before namespaces were recorded", () => {
+    expect(staleGatewayPids({ pid: 7, ptyPids: [14] } as any, 1234, "h1")).toEqual([]);
+  });
+
+  it("writeGatewayInfo stamps the current namespace", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-"));
+    const file = path.join(dir, "gateway.json");
+    writeGatewayInfo(file, { port: 7777, pid: 1234 });
+    expect(readGatewayInfo(file)!.namespace).toBe(os.hostname());
   });
 
   it("formats gateway URLs for network, wildcard, and IPv6 hosts", () => {
