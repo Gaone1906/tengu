@@ -28,6 +28,7 @@ This is your home. Read these files when they provide context. For company opera
 | `CLAUDE.md` | Instructions for Claude sessions |
 | `AGENTS.md` | Instructions for Codex sessions |
 | `skills/` | Skill directories, each containing a `SKILL.md` playbook |
+| `scripts/` | Local automation scripts; `workflow-triggers/` is the home for scripts that fire Workflow events |
 | `org/` | Organizational structure - departments and employees |
 | `cron/` | Scheduled jobs: `jobs.json` + `runs/` for execution logs |
 | `docs/` | Architecture documentation for deeper self-awareness |

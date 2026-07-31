@@ -610,10 +610,11 @@ export async function runSetup(opts?: { force?: boolean }): Promise<void> {
   // Other standard dirs
   if (ensureDir(LOGS_DIR)) created.push(LOGS_DIR);
 
-  // Copy template contents for docs, skills, and org (skips existing files)
+  // Copy template contents for docs, skills, org, and scripts (skips existing files)
   created.push(...copyTemplateDir(path.join(TEMPLATE_DIR, "docs"), DOCS_DIR, templateMaterialization));
   created.push(...copyTemplateDir(path.join(TEMPLATE_DIR, "skills"), SKILLS_DIR, templateMaterialization));
   created.push(...copyTemplateDir(path.join(TEMPLATE_DIR, "org"), ORG_DIR, templateMaterialization));
+  created.push(...copyTemplateDir(path.join(TEMPLATE_DIR, "scripts"), path.join(JINN_HOME, "scripts"), templateMaterialization));
   // Seed talk/ (AURA voice persona + card-reference sidecar). The persona points
   // the orchestrator at talk/card-reference.md, so both must land in ~/.jinn/talk/.
   created.push(...copyTemplateDir(path.join(TEMPLATE_DIR, "talk"), path.join(JINN_HOME, "talk"), templateMaterialization));

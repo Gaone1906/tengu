@@ -44,6 +44,8 @@ Use `rerun_workflow_run` with `definition: "original"` or `"current"`. Use `retr
 
 Trigger nodes support `manual`, `schedule`, `event`, `todo-status`, and `workflow-call`. Fire authenticated events with `fire_workflow_event`.
 
+When an external process observes a condition and fires the event over HTTP, put its script in `<JINN_HOME>/scripts/workflow-triggers/`. Follow that directory's README for the event contract, idempotency, polling state, and operating-system scheduling.
+
 A `todo-status` trigger BINDS its run to the Todo that fired it: no new Todo is minted, and the run's Approval gates mirror onto that same Todo. Read the bound id as `{{ run.todoId }}`. Manual runs are unbound unless started with an explicit `todoId`; schedule and event runs are always unbound.
 
 A `todo-status` trigger fires for every Todo reaching `status` unless you narrow it with the optional `label`, `department`, and `assignee` filters. Every filter you set must match; an omitted one matches everything. `label` accepts a label id or a label name, matched against the Todo's labels as they stand when the trigger fires.
