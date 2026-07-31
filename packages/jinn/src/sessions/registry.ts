@@ -152,6 +152,13 @@ CREATE TABLE IF NOT EXISTS meta (
 )
 `;
 
+const CREATE_CHAT_PINS_TABLE = `
+CREATE TABLE IF NOT EXISTS chat_pins (
+  pin_key TEXT PRIMARY KEY,
+  pinned_at TEXT NOT NULL
+)
+`;
+
 function callbackDeliveriesTableSql(tableName = 'callback_deliveries'): string {
   return `
 CREATE TABLE ${tableName} (
@@ -605,6 +612,7 @@ export function initDb(): Database.Database {
     migrateQueueItemsSchema(database);
     migrateCallbackDeliveriesSchema(database);
     database.exec(CREATE_FILES_TABLE);
+    database.exec(CREATE_CHAT_PINS_TABLE);
   });
   try {
     runImmediateMigrationWithRetry(initialize);
@@ -2093,6 +2101,51 @@ export function listSessions(filter?: ListSessionsFilter): Session[] {
   return rows.map(rowToSession);
 }
 
+export interface ChatPin {
+  key: string;
+  kind: 'session' | 'employee';
+  pinnedAt: string;
+}
+
+export function listChatPins(): ChatPin[] {
+  const rows = initDb()
+    .prepare(`
+      SELECT chat_pins.pin_key, chat_pins.pinned_at
+      FROM chat_pins
+      LEFT JOIN sessions ON sessions.id = chat_pins.pin_key
+      WHERE chat_pins.pin_key LIKE 'emp:%' OR sessions.id IS NOT NULL
+    `)
+    .all() as Array<{ pin_key: string; pinned_at: string }>;
+  return rows.map((row) => ({
+    key: row.pin_key,
+    kind: row.pin_key.startsWith('emp:') ? 'employee' : 'session',
+    pinnedAt: row.pinned_at,
+  }));
+}
+
+export function pinChat(key: string): void {
+  initDb()
+    .prepare('INSERT INTO chat_pins (pin_key, pinned_at) VALUES (?, ?) ON CONFLICT(pin_key) DO NOTHING')
+    .run(key, new Date().toISOString());
+}
+
+export function unpinChat(key: string): void {
+  initDb().prepare('DELETE FROM chat_pins WHERE pin_key = ?').run(key);
+}
+
+export function listPinnedSessions(): Session[] {
+  const rows = initDb()
+    .prepare(`
+      SELECT sessions.*
+      FROM sessions
+      INNER JOIN chat_pins ON chat_pins.pin_key = sessions.id
+      WHERE sessions.archived_at IS NULL AND sessions.workflow_kind IS NULL
+      ORDER BY sessions.last_activity DESC
+    `)
+    .all() as Record<string, unknown>[];
+  return rows.map(rowToSession);
+}
+
 /**
  * The N most-recently-active sessions, newest first — a bounded window for
  * polled endpoints (e.g. /api/activity) that only ever surface the recent tail.
@@ -2661,6 +2714,7 @@ export function deleteSession(id: string): boolean {
     if (!session || session.work_item_id) return false;
     db.prepare('DELETE FROM messages WHERE session_id = ?').run(id);
     db.prepare('DELETE FROM queue_items WHERE session_id = ?').run(id);
+    db.prepare('DELETE FROM chat_pins WHERE pin_key = ?').run(id);
     return db.prepare('DELETE FROM sessions WHERE id = ? AND work_item_id IS NULL').run(id).changes > 0;
   });
   const deleted = txn();
@@ -2680,6 +2734,7 @@ export function deleteSessions(ids: string[]): number {
     const placeholders = deletable.map(() => '?').join(',');
     db.prepare(`DELETE FROM messages WHERE session_id IN (${placeholders})`).run(...deletable);
     db.prepare(`DELETE FROM queue_items WHERE session_id IN (${placeholders})`).run(...deletable);
+    db.prepare(`DELETE FROM chat_pins WHERE pin_key IN (${placeholders})`).run(...deletable);
     const result = db.prepare(`DELETE FROM sessions WHERE id IN (${placeholders}) AND work_item_id IS NULL`).run(...deletable);
     return { changes: result.changes, deletedIds: deletable };
   });

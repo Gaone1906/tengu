@@ -281,6 +281,17 @@ describe("session tools — unit (stub gateway)", () => {
     expect(LIST_LIMIT_MAX).toBe(50);
   });
 
+  it("list_sessions: pinned scope uses the pinned session route and unknown scopes list every valid choice", async () => {
+    const pinned = stub(() => ({ status: 200, body: [{ id: "p1" }, { id: "p2" }] }), "parent");
+    const out = (await tool("list_sessions").handler({ scope: "pinned" }, pinned.ctx)) as { sessions: unknown[] };
+
+    expect(pinned.calls[0].url).toBe("http://127.0.0.1:7777/api/sessions?pinned=1");
+    expect(out.sessions).toHaveLength(2);
+    await expect(tool("list_sessions").handler({ scope: "unknown" }, pinned.ctx)).rejects.toThrow(
+      'unknown scope "unknown" — use children, employee, recent, or pinned',
+    );
+  });
+
   it("stop_session POSTs the stop route; a 403 non-descendant refusal passes through readable", async () => {
     const ok = stub(() => ({ status: 200, body: { status: "stopped", sessionId: "c" } }), "p");
     const out = (await tool("stop_session").handler({ sessionId: "c" }, ok.ctx)) as Record<string, unknown>;

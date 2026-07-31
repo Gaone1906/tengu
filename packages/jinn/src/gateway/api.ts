@@ -29,6 +29,10 @@ import { buildContext, buildPlatformContextSnapshot, type BuildContextOptions } 
 import { buildPlatformContextRefresh, fingerprintPlatformContext } from "../engines/platform-context.js";
 import {
   listSessions,
+  listPinnedSessions,
+  listChatPins,
+  pinChat,
+  unpinChat,
   countSessions,
   listRecentPerGroup,
   listSessionsForGroup,
@@ -1722,6 +1726,8 @@ function operatorOnlyControlPlaneRoute(method: string, pathname: string): string
   if (method === "POST" && matchRoute("/api/sessions/:id/unarchive", pathname)) return "session unarchive";
   if (method === "POST" && matchRoute("/api/sessions/:id/reset", pathname)) return "session reset";
   if (method === "POST" && pathname === "/api/sessions/bulk-delete") return "session bulk delete";
+  if (method === "POST" && pathname === "/api/pins") return "chat pin update";
+  if (method === "DELETE" && matchRoute("/api/pins/:key", pathname)) return "chat pin update";
   if (method === "DELETE" && matchRoute("/api/sessions/:id/queue/:itemId", pathname)) return "session queue item cancel";
   if (method === "DELETE" && matchRoute("/api/sessions/:id/queue", pathname)) return "session queue clear";
   if (method === "POST" && matchRoute("/api/sessions/:id/queue/pause", pathname)) return "session queue pause";
@@ -2995,11 +3001,36 @@ export async function handleApiRequest(
       return json(res, payload);
     }
 
+    if (method === "GET" && pathname === "/api/pins") {
+      return json(res, { pins: listChatPins() });
+    }
+
+    if (method === "POST" && pathname === "/api/pins") {
+      const parsed = await readJsonBody(req, res);
+      if (!parsed.ok) return;
+      const key = (parsed.body as { key?: unknown }).key;
+      if (typeof key !== "string" || !key.trim()) return badRequest(res, "key must be a non-empty string");
+      pinChat(key.trim());
+      context.emit("pins:changed", {});
+      return json(res, { status: "pinned" });
+    }
+
+    const pinParams = matchRoute("/api/pins/:key", pathname);
+    if (method === "DELETE" && pinParams) {
+      unpinChat(pinParams.key);
+      context.emit("pins:changed", {});
+      return json(res, { status: "unpinned" });
+    }
+
     // GET /api/sessions
     //   ?group=<employee|__direct__|__cron__>&offset=M&limit=N → one group's page (sidebar "load more")
+    //   ?pinned=1                                           → pinned, non-archived sessions
     //   ?limit=0                                              → every session (power-user escape hatch)
     //   (default)                                             → top SESSION_LIST_PER_GROUP recent per group + counts
     if (method === "GET" && pathname === "/api/sessions") {
+      if (url.searchParams.get("pinned") === "1") {
+        return json(res, serializeSessionList(listPinnedSessions(), context));
+      }
       const query = url.searchParams.get("q");
       if (query && query.trim()) {
         const matches = searchSessions(query.trim());
@@ -3183,6 +3214,7 @@ export async function handleApiRequest(
       removeCodexSessionHome(params.id);
       logger.info(`Session deleted: ${params.id}`);
       context.emit("session:deleted", { sessionId: params.id });
+      context.emit("pins:changed", {});
       return json(res, { status: "deleted" });
     }
 
@@ -3427,6 +3459,7 @@ export async function handleApiRequest(
         removeCodexSessionHome(id);
         context.emit("session:deleted", { sessionId: id });
       }
+      if (count > 0) context.emit("pins:changed", {});
       logger.info(`Bulk deleted ${count} sessions`);
       return json(res, {
         status: "deleted",

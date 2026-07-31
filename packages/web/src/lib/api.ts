@@ -260,6 +260,16 @@ export interface SessionsResponse {
   perGroup: number
 }
 
+export interface ChatPin {
+  key: string
+  kind: 'session' | 'employee'
+  pinnedAt: string
+}
+
+export interface PinsResponse {
+  pins: ChatPin[]
+}
+
 // --- Model + capability registry (GET /api/engines) ---
 export interface ModelInfo {
   id: string;
@@ -906,6 +916,9 @@ export const api = {
   refreshEngineLimits: (engine?: string) =>
     post<EngineLimitsResponse>(`/api/engine-limits/refresh${engine ? `?engine=${encodeURIComponent(engine)}` : ""}`, {}),
   getSessions: () => get<SessionsResponse>("/api/sessions"),
+  getPins: () => get<PinsResponse>("/api/pins"),
+  pinChat: (key: string) => post<{ status: string }>("/api/pins", { key }),
+  unpinChat: (key: string) => del<{ status: string }>(`/api/pins/${encodeURIComponent(key)}`),
   /** One group's sessions, newest first — used by the sidebar "load more" button. */
   getSessionsForGroup: (group: string, offset: number, limit = 50) =>
     get<Record<string, unknown>[]>(

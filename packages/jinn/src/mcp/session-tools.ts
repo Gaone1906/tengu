@@ -263,11 +263,11 @@ export function buildSessionTools(): JinnMcpTool[] {
 
   const listSessions: JinnMcpTool = {
     name: "list_sessions",
-    description: "List capped session summaries by children, employee, or recent scope.",
+    description: "List session summaries by scope.",
     inputSchema: {
       type: "object",
       properties: {
-        scope: { type: "string", enum: ["children", "employee", "recent"], description: "Which sessions (default children)." },
+        scope: { type: "string", enum: ["children", "employee", "recent", "pinned"], description: "Which sessions (default children)." },
         employee: { type: "string" },
         limit: { type: "number" },
       },
@@ -301,8 +301,12 @@ export function buildSessionTools(): JinnMcpTool[] {
         if (status >= 400) throw gatewayFailure("listing recent sessions", status, body);
         const rec = (body ?? {}) as { sessions?: SessionRecord[] };
         sessions = Array.isArray(rec.sessions) ? rec.sessions : [];
+      } else if (scope === "pinned") {
+        const { status, body } = await gatewayRequest(ctx, "GET", "/api/sessions?pinned=1");
+        if (status >= 400) throw gatewayFailure("listing pinned sessions", status, body);
+        sessions = (Array.isArray(body) ? body : []) as SessionRecord[];
       } else {
-        throw new JinnMcpToolError(`unknown scope "${scope}" — use children, employee, or recent`);
+        throw new JinnMcpToolError(`unknown scope "${scope}" — use children, employee, recent, or pinned`);
       }
       return {
         scope,

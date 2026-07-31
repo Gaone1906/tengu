@@ -48,9 +48,13 @@ const ATTESTED = {
   // legitimate agent move. It costs 3 tokens and leaves Pi 3 under the ceiling.
   // Rebased for read_session's full-body and last=0 transcript contract. Its
   // concise field prose keeps Pi one token under the fixed ceiling.
-  rpc: { tokens: 4477, sha256: "cca3bb1aff660767f068464d0a861b61f8c9c1996bd0825b8349ab341659640a" },
-  pi: { tokens: 4910, sha256: "895ab9f65c428d1263f95dc751e5231c7d751d1b57bcedc29b72c592bb3b58b4" },
-  openai: { tokens: 4652, sha256: "45a42a845abad46eef732a00bc7b856908ae75bebe89e5c0498a2e73890f5cc0" },
+  // Reattested for list_sessions' `pinned` scope. The new enum value spent
+  // tokens; shortening its redundant description from an enumeration of the
+  // same scopes to "by scope" bought those back plus four,
+  // leaving Pi five under the unchanged ceiling.
+  rpc: { tokens: 4473, sha256: "f4f5469b03ba51f5ab483510cf873a4a3b9bce4619c3f6cefc184cd19ddc6041" },
+  pi: { tokens: 4906, sha256: "a1526da699bdb4d42a080a9640ed8b5645277d0ece9918d88aba0624eb83b280" },
+  openai: { tokens: 4648, sha256: "d8d29a009e189bc14a57336ac12408317c008a51ba4d32f385b32b75d83e83ef" },
 } as const;
 
 type TokenizerLoader = () => Promise<[{ Tiktoken: typeof import("js-tiktoken/lite").Tiktoken }, { default: typeof import("js-tiktoken/ranks/o200k_base").default }]>;
@@ -210,7 +214,7 @@ const EXPECTED_ENUMS = {
   edit_work_item: [["properties.priority", [0, 1, 2, 3]]],
   get_workflow_run: [["properties.view", ["full"]]],
   link_work_items: [["properties.kind", ["blocks", "relates", "duplicates"]]],
-  list_sessions: [["properties.scope", ["children", "employee", "recent"]]],
+  list_sessions: [["properties.scope", ["children", "employee", "recent", "pinned"]]],
   list_work_items: [
     ["properties.status", ["backlog", "assigned", "executing", "in_review", "done", "blocked", "escalated", "cancelled"]],
     ["properties.source", ["human", "delegation", "cron", "workflow", "session", "connector", "goal"]],

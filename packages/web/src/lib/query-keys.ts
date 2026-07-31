@@ -1,4 +1,5 @@
 export const queryKeys = {
+  pins: ['pins'] as const,
   sessions: {
     all: ['sessions'] as const,
     search: (q: string) => ['sessions', 'search', q] as const,

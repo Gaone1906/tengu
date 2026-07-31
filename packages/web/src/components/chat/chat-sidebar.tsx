@@ -11,6 +11,7 @@ import { useSettings } from "@/routes/settings-provider"
 import { cleanPreview } from "@/lib/clean-preview"
 import { queryKeys } from "@/lib/query-keys"
 import { useSessions, useSessionCounts, useSessionSearch, useUpdateSession, useDeleteSession, useBulkDeleteSessions, useDuplicateSession, useArchiveSession, useUnarchiveSession } from "@/hooks/use-sessions"
+import { usePins, useTogglePin } from "@/hooks/use-pins"
 import {
   ContextMenu,
   ContextMenuTrigger,
@@ -123,9 +124,9 @@ const RECENT_ERROR_WINDOW_MS = 24 * 60 * 60 * 1000
 
 const COLLAPSE_STORAGE_KEY = "jinn-sidebar-collapsed"
 const EXPANDED_STORAGE_KEY = "jinn-sidebar-expanded"
-const PINNED_STORAGE_KEY = "jinn-pinned-sessions"
 const OLDER_EXPANDED_STORAGE_KEY = "jinn-sidebar-older-expanded"
 const FOCUS_MODE_STORAGE_KEY = "jinn-sidebar-focus-mode"
+const EMPTY_PINNED_SESSIONS = new Set<string>()
 
 type FocusMode = "focused" | "all"
 
@@ -183,21 +184,6 @@ function markAllReadForEmployee(sessions: Session[]) {
   const arr = Array.from(read)
   if (arr.length > 500) arr.splice(0, arr.length - 500)
   localStorage.setItem("jinn-read-sessions", JSON.stringify(arr))
-}
-
-function getPinnedSessions(): Set<string> {
-  try {
-    const raw = localStorage.getItem(PINNED_STORAGE_KEY)
-    return raw ? new Set(JSON.parse(raw)) : new Set()
-  } catch {
-    return new Set()
-  }
-}
-
-function savePinnedSessions(pinned: Set<string>) {
-  try {
-    localStorage.setItem(PINNED_STORAGE_KEY, JSON.stringify(Array.from(pinned)))
-  } catch {}
 }
 
 function loadCollapsedState(): Set<string> {
@@ -1193,6 +1179,8 @@ export function ChatSidebar({
   const unarchiveSessionMutation = useUnarchiveSession()
   const bulkDeleteMutation = useBulkDeleteSessions()
   const duplicateSessionMutation = useDuplicateSession()
+  const { data: pinnedSessions = EMPTY_PINNED_SESSIONS } = usePins()
+  const { mutate: mutatePin } = useTogglePin()
 
   const sessions = useMemo(() => {
     if (!rawSessions) return []
@@ -1220,7 +1208,6 @@ export function ChatSidebar({
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null)
   const renameCancelledRef = useRef(false)
   const [readSessions, setReadSessions] = useState<Set<string>>(new Set())
-  const [pinnedSessions, setPinnedSessions] = useState<Set<string>>(new Set())
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const [olderExpanded, setOlderExpanded] = useState(false)
@@ -1257,7 +1244,6 @@ export function ChatSidebar({
 
   useEffect(() => {
     setReadSessions(getReadSessions())
-    setPinnedSessions(getPinnedSessions())
     setCollapsed(loadCollapsedState())
     setExpanded(loadExpandedState())
     try {
@@ -1339,14 +1325,8 @@ export function ChatSidebar({
   }, [])
 
   const togglePin = useCallback((pinKey: string) => {
-    setPinnedSessions((prev) => {
-      const next = new Set(prev)
-      if (next.has(pinKey)) next.delete(pinKey)
-      else next.add(pinKey)
-      savePinnedSessions(next)
-      return next
-    })
-  }, [])
+    mutatePin({ key: pinKey, pinned: !pinnedSessions.has(pinKey) })
+  }, [pinnedSessions, mutatePin])
 
   const handleMarkAllRead = useCallback((empSessions: Session[]) => {
     markAllReadForEmployee(empSessions)
@@ -1361,13 +1341,10 @@ export function ChatSidebar({
     const ids = empSessions.map((s) => s.id)
     try {
       await bulkDeleteMutation.mutateAsync(ids)
-      setPinnedSessions((prev) => {
-        const next = new Set(prev)
-        next.delete(`emp:${empName}`)
-        for (const id of ids) next.delete(id)
-        savePinnedSessions(next)
-        return next
-      })
+      const employeePin = `emp:${empName}`
+      if (pinnedSessions.has(employeePin)) {
+        mutatePin({ key: employeePin, pinned: false })
+      }
       startTransition(() => {
         if (selectedId && ids.includes(selectedId)) onNewChat()
       })
@@ -1375,13 +1352,6 @@ export function ChatSidebar({
   }
 
   async function handleDelete(sessionId: string) {
-    setPinnedSessions((prev) => {
-      if (!prev.has(sessionId)) return prev
-      const next = new Set(prev)
-      next.delete(sessionId)
-      savePinnedSessions(next)
-      return next
-    })
     // The page-level routine owns delete resolution end-to-end (mutation,
     // tab close, ONE atomic history REPLACE to the fallback session) so all
     // entry points — this row menu, the page ⋯ menu, Backspace — navigate
@@ -1414,13 +1384,6 @@ export function ChatSidebar({
         return
       }
       await archiveSessionMutation.mutateAsync(session.id)
-      setPinnedSessions((prev) => {
-        if (!prev.has(session.id)) return prev
-        const next = new Set(prev)
-        next.delete(session.id)
-        savePinnedSessions(next)
-        return next
-      })
       if (selectedId === session.id) onNewChat()
     } catch {}
   }

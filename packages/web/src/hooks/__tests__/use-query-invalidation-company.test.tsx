@@ -46,6 +46,12 @@ describe('company + session:created invalidation', () => {
     expect(calledWithKey(invalidate, ['work-item-sessions'])).toBe(true)
   })
 
+  it('refreshes pins immediately when another browser changes them', () => {
+    const { invalidate } = setup()
+    act(() => listener?.('pins:changed', {}))
+    expect(calledWithKey(invalidate, queryKeys.pins)).toBe(true)
+  })
+
   it('refreshes parent summaries when a delegated child changes runtime activity', async () => {
     const { client, invalidate } = setup()
     client.setQueryData(queryKeys.sessions.all, {

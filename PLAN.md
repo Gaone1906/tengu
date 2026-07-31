@@ -1,141 +1,154 @@
-# ICI-648 — Optimise Web UI performance
+# ICI-658 — Persist pinned sessions in the session DB
 
-Branch `build/ICI-648-web-perf` · base `16e1bdff907e538f0e758c297394cda07ebebfdb`
+**Todo (operator's words):** "I want to be able to have the same pinned sessions on all my
+devices on all browsers of the same instance. + have an easy way to pull pinned sessions via
+MCP & API if not already easy."
 
-The request names five axes: page loading, todo loading, asset loading, rendering,
-scrolling. Each one below is tied to a measured baseline taken on this branch, so
-"measurable gains" means a number that moved, not an impression.
-
----
-
-## Measured baseline (taken on this worktree, `pnpm --filter @jinn/web build`)
-
-| Thing | Baseline | Where |
-|---|---|---|
-| `/todos/:todoId` route chunk | **519.38 kB raw / 170.10 kB gzip** | `out/assets/task-page-*.js` |
-| Tiptap + ProseMirror inside it | present (`grep` hit) | `routes/todos/task-page/body-editor.tsx` static import |
-| Board cold-load enrichment requests | **up to 120** (60 `GET /api/work-items/:id/tree` + 60 `GET /api/work-items/:id`) | `use-board.ts:useBoardTrees`, `use-todos.ts:useOpenDetails`, cap `boardDetailIds(…, 60)` |
-| Static asset compression | re-run **per request** (brotli q5, no cache) | `gateway/server.ts:295-302` |
-| Board card memoisation | none | `routes/todos/board/card.tsx` |
-| Route chunk prefetch | none — every navigation shows a spinner while its chunk downloads | `main.tsx` + `lib/lazy-route.tsx` |
-| Total built JS | 3,402,356 B across 336 files | `out/assets` |
-
-Already good, deliberately left alone: route-level code splitting, `PrismAsyncLight`
-with a registered language subset, lazy emojilib / xterm / xyflow / global-search,
-passive scroll listeners, memoised `MessageRow` in chat, immutable `Cache-Control`
-on hashed assets, brotli/gzip negotiation, react-query `staleTime`/`gcTime`.
+**Base:** `main` @ `77d864630b4bd087e4942c6197d3386239e71670`
+**Branch:** `build/ICI-658-pinned-sessions-db`
+**Feedback this round:** none (first run).
 
 ---
 
-## Work
+## What exists today
 
-### W0 — Lock the gains in a harness (do this first)
-Files: `packages/web/scripts/perf-budget.mjs` (new), `packages/web/perf-budgets.json`
-(new), `packages/web/package.json` (add `perf:budget` script).
+Pins are browser-local only. `packages/web/src/components/chat/chat-sidebar.tsx` holds
+`pinnedSessions: Set<string>` (line 1223), hydrated from `localStorage["jinn-pinned-sessions"]`
+via `getPinnedSessions()` / `savePinnedSessions()` (lines 188-201) and mutated by `togglePin`
+(1341) plus two delete-cleanup paths (1364, 1378, 1417).
 
-Reads the emitted `out/assets/*`, gzips each tracked chunk, and exits non-zero when a
-tracked chunk or the initial critical path exceeds its budget. Also asserts named
-modules are absent from named chunks (e.g. `prosemirror` must not appear in the
-task-page chunk). Budgets file records `baseline` (today's number) next to `budget`
-(the new ceiling) so the diff itself carries the evidence.
+Two things matter about that Set and constrain the design:
 
-### W1 — Page + asset loading
-1. `routes/todos/task-page/body-editor.tsx` — move the tiptap editor behind
-   `React.lazy` + `Suspense`. The read-only path already renders `MarkdownView`;
-   the ProseMirror bundle loads on entering edit mode. No visual change.
-2. `gateway/server.ts:serveStatic` — memoise compressed bytes for hashed
-   `/assets/*` responses, keyed by resolved path + mtime + encoding, with a bounded
-   cache. These files are content-addressed and immutable, so compressing them once
-   is correct. Non-hashed paths keep streaming as today.
-3. `lib/lazy-route.tsx` + the nav component — expose a `prefetch()` on each lazy
-   route and call it on `pointerenter`/`focus` of a nav link, plus `requestIdleCallback`
-   for the two most-used routes. Failures are swallowed; prefetch never surfaces an
-   error or blocks navigation.
+1. **The keys are not all session ids.** Employee groups pin under `emp:<slug>`
+   (`pinKey`, lines 1555 / 1578). The same Set, the same menu item, the same toggle.
+2. **Order is irrelevant.** Every consumer sorts by activity (`pinnedRows.sort` line 1540,
+   `pinnedFlat.sort` line 1586). Only membership is read.
 
-### W2 — Todo loading (the N+1)
-4. Gateway: add `GET /api/work-items/trees?ids=a,b,c` in `gateway/api.ts`, backed by a
-   new `getWorkItemTrees(ids)` in `work-items/store.ts` that does one `WHERE root_id IN (…)`
-   read and one grouped session-spend query for the whole set. Same auth as the
-   single-item route. Additive only: `GET /api/work-items/:id/tree` stays.
-5. Same shape for the detail fan-out (`useOpenDetails`) — either a batch
-   `ids=` form of the list route or fold the two `reason` fields the board needs into
-   the batch tree payload, whichever keeps the wire type honest. Decide in code review
-   of the wire types; do not invent a third contract.
-6. Web: `useBoardTrees` / `useOpenDetails` call the batch endpoints. Query keys,
-   `staleTime`, and `placeholderData` behaviour unchanged.
+So the durable model the UI actually needs is *a set of opaque pin keys*, not a per-session
+boolean. The server nonetheless has to answer "which **sessions** are pinned" for the MCP/API
+half of the ask.
 
-### W3 — Rendering
-7. Memoise `routes/todos/board/card.tsx` (and its `CardTree` child) so a column
-   refetch that changes one card does not re-render the other 59. Stabilise the
-   callbacks passed into it in `board-page.tsx`.
+There is no server-side pin state at all: no column, no table, no route, no MCP field.
 
-### W4 — Scrolling
-8. `content-visibility: auto` + `contain-intrinsic-size` on board cards and chat
-   message rows, so offscreen rows skip layout and paint. CSS-only; keeps drag,
-   FLIP, streaming, and auto-scroll intact. Verified by a style assertion plus the
-   manual browser pass — no virtualisation, see out of scope.
+## Approach
 
----
+**Storage — one table, `chat_pins`,** added to the existing additive/idempotent DDL sequence in
+`packages/jinn/src/sessions/registry.ts` (alongside `CREATE_FILES_TABLE` / `CREATE_META_TABLE`):
+
+```sql
+CREATE TABLE IF NOT EXISTS chat_pins (
+  pin_key   TEXT PRIMARY KEY,
+  pinned_at TEXT NOT NULL
+)
+```
+
+Considered and rejected: a `sessions.pinned_at` column mirroring `archived_at`. It is the
+closer neighbour and gets delete-cascade for free, but it cannot hold `emp:` group pins, so it
+would leave the sidebar reading one Set from two sources. One mechanism beats two.
+
+The cost of the table is that pin rows must be reaped explicitly when a session is deleted.
+That goes **inside** the existing `deleteSession` / `deleteSessions` transactions in
+`registry.ts` (2657, 2671), next to the `messages` / `queue_items` deletes — one choke point,
+impossible to forget, and it retires the client-side cleanup at chat-sidebar 1378/1417.
+
+**API:**
+
+| Route | Purpose |
+| --- | --- |
+| `GET /api/pins` | `{ pins: [{ key, kind: 'session' \| 'employee', pinnedAt }] }` — what the sidebar hydrates from |
+| `POST /api/pins` `{ key }` | pin (idempotent) |
+| `DELETE /api/pins/:key` | unpin (idempotent; `:key` is URI-encoded, `emp:` keys included) |
+| `GET /api/sessions?pinned=1` | pinned sessions, serialized through the existing `serializeSessionList` — the operator's "pull pinned sessions via API" |
+
+Writes `context.emit("pins:changed")` so every other browser refetches — this is what makes
+"same pins on all my devices" live rather than reload-only.
+
+**MCP:** `list_sessions` gains `scope: "pinned"`, backed by `GET /api/sessions?pinned=1`.
+A new enum value on an existing tool, not a new tool — cheaper on the manifest budget and it
+lands where an agent already looks.
+
+⚠️ `mcp/__tests__/tool-manifest-budget.test.ts` is a hard gate with **1 token of headroom**
+(pi 4910 / ceiling 4911). Adding `"pinned"` will break it. Follow the practice documented in
+that file's own comments: buy the tokens back from dead prose first, and only rebase
+`MAX_MANIFEST_TOKENS` + the `ATTESTED` hashes with a comment explaining what was bought and
+what remains. Do not silently bump the ceiling.
+
+**Web:** replace the two localStorage helpers with a `usePins()` query + pin/unpin mutations
+(`lib/api.ts`, `hooks/use-pins.ts`, mirroring `useArchiveSession` in `hooks/use-sessions.ts`),
+add `pins` to `lib/query-keys.ts` and a `pins:changed` case to
+`hooks/use-query-invalidation.ts`. `pinnedSessions` stays a `Set<string>` derived from the
+query, so **every render, sort, float and menu path in chat-sidebar.tsx is untouched.**
+
+Mutations must be **optimistic** — the pin glyph moves on click, not on round-trip. A pin that
+waits for the network reads as lag (taste §2, "motion is crisp").
+
+**One-shot migration:** on first load after upgrade, if `localStorage["jinn-pinned-sessions"]`
+exists, POST its keys as a **union** with the server set, then remove the localStorage key so
+it can never run twice on that browser. Union, not replace: a second device carrying stale
+local pins must not clobber the server. Losing the operator's existing pins on upgrade is a
+failure, not a nit.
 
 ## Acceptance criteria
 
-1. `pnpm --filter @jinn/web build && pnpm --filter @jinn/web perf:budget` exits 0, and
-   exits non-zero when a tracked chunk is inflated past its budget (prove by
-   temporarily raising a chunk, capturing the red output, reverting).
-2. The `/todos/:todoId` route chunk is **≤ 85 kB gzip** (from 170.10 kB), and a grep of
-   that built chunk finds no `prosemirror` / `tiptap`. Both asserted by the harness.
-3. Editing a Todo body still works: the body renders read-only markdown on load, and
-   entering edit mode loads the editor, focuses it, and saves the same markdown as
-   today. Existing `routes/todos/__tests__/task-page.test.tsx` passes, plus a new test
-   for the lazy boundary.
-4. Rendering the board with 60 enrichable cards issues **≤ 2** enrichment fetches
-   (was up to 120). Asserted by a web test counting `fetch` calls.
-5. `GET /api/work-items/trees?ids=…` returns, for every id, a payload deep-equal to
-   `GET /api/work-items/:id/tree` for that id. Asserted by a gateway test over a seeded
-   set including a root with children and a leaf.
-6. The batch route rejects more than 100 ids with a readable 400, omits unknown ids
-   without failing the request, and refuses unauthenticated callers exactly as the
-   single-item route does. One test each.
-7. Serving the same hashed asset twice compresses once: a counter/spy shows one
-   compression pass for two requests, and the two responses are byte-identical with
-   identical headers.
-8. Re-rendering the board after one card's data changes re-renders that card only.
-   Asserted by a render-count test.
-9. Hovering a nav link starts its route chunk load at most once; a rejected prefetch
-   surfaces no error and does not break the subsequent real navigation. One test.
-10. No functional regression: `pnpm typecheck`, `pnpm lint`, `pnpm test` green in both
-    packages, verbatim tails pasted. Plus a manual pass on a **throwaway sandbox**
-    (own `JINN_HOME`, own non-prod port — never 7777, never 7788) covering chat
-    load + stream, board load + drag + column paging, task page open + body edit +
-    save, org map, workflow run, notes; screenshotted at 1440×900 and 390×844 in
-    **both** light and dark.
-11. A before/after table is posted to the Todo: per-chunk gzip bytes, board enrichment
-    request count, and the static-serve compression count.
+1. Pinning a chat in browser A makes it appear in the Pinned section of browser B (different
+   browser profile, same instance) without either browser being reloaded.
+2. Pins survive a gateway restart: pin, restart the sandbox gateway, reload — still pinned.
+3. Pinning an employee **group** (`emp:<slug>`) persists identically; group pins and session
+   pins round-trip through the same endpoints.
+4. Deleting a pinned session removes its `chat_pins` row (asserted directly against the DB),
+   and `GET /api/pins` never returns a key for a session that no longer exists.
+5. `GET /api/sessions?pinned=1` returns exactly the pinned, non-archived sessions in
+   `last_activity DESC` order, in the same serialized shape as `GET /api/sessions`.
+6. MCP `list_sessions { scope: "pinned" }` returns those same sessions; an unknown scope still
+   errors with the existing message listing the valid scopes.
+7. `tool-manifest-budget.test.ts` passes, with either the buy-back or an explicit rebase
+   comment naming what was spent.
+8. A browser holding pins in `localStorage["jinn-pinned-sessions"]` uploads them once on first
+   load (union with whatever the server already has), then the localStorage key is gone; a
+   second load performs no further upload.
+9. Pin/unpin is optimistic: the glyph and the Pinned section update on click, and a failed
+   request rolls the state back rather than leaving a phantom pin.
+10. `pnpm typecheck`, `pnpm test`, `pnpm lint` all pass; no regression in the existing
+    `chat-sidebar-helpers.test.ts` / `registry.test.ts` suites.
 
----
+## Tests
 
-## Out of scope (report, do not do)
+- `sessions/__tests__/pins.test.ts` — set/remove idempotency; `emp:` keys round-trip; the
+  delete-reaps-pins assertion for AC 4 (write the assertion first, watch it fail against the
+  un-reaped code, then wire the reap — taste §5 rule 1, implementer half).
+- `sessions/registry.test.ts` — `chat_pins` is created on a legacy DB that predates it.
+- `gateway/__tests__` — the four routes: shapes, idempotent double-pin/double-unpin,
+  URI-encoded `emp:` key on DELETE, `?pinned=1` ordering and archived-exclusion.
+- `mcp/__tests__/session-tools.test.ts` — `scope: "pinned"` hits the right path; unknown scope
+  still errors.
+- `web/hooks/__tests__/use-pins.test.ts` — the one-shot localStorage union + key removal, and
+  optimistic rollback on failure.
 
-- **Virtualising the Todos board columns or the chat message list.** Both carry drag,
-  FLIP, streaming and auto-scroll; virtualising them is its own Todo with its own
-  verification. `content-visibility` is the low-risk substitute this round.
-- Replacing `react-syntax-highlighter`, `@xterm`, `@xyflow`, or `@dagrejs/dagre` with
-  lighter dependencies.
-- HTTP/2 / TLS on the gateway; router-level data loaders; any form of SSR.
-- Reworking `chat-messages.tsx` — its rows are already memoised; touching it here is a
-  refactor of code the bug is not in.
-- The 336-file language-chunk tail from `PrismAsyncLight`: those load on demand and do
-  not sit on any critical path.
-- Anything under `~/.jinn`, and any process on port 7777 or 7788.
+## Manual verification
 
----
+Sandbox only — **never 7777, never 7788, never `~/.jinn`**. Use
+`jinn-sandbox.sh up qa-ICI-658 --build --seed` on 7778+, confirm its `config.yaml` port before
+starting, drive it with `agent-browser`, and `destroy` it even if the run fails.
 
-## Risks
+Two browser profiles against the same sandbox for AC 1 (a second profile, not a second tab —
+localStorage is per-profile and that is the whole point of the ticket). Screenshot the sidebar
+Pinned section at 1440×900 and 390×844, light and dark, per taste §2 — the section is existing
+UI and must look identical to before; the ticket changes where pins live, not how they look.
 
-- **New wire contract.** The batch endpoints are additive and the single-item routes
-  stay, so an old web build against a new gateway keeps working. Do not delete either
-  single-item route.
-- **Lazy editor changes focus timing.** The edit-mode test must assert focus lands in
-  the editor after the chunk resolves, or body editing regresses silently on slow links.
-- **Compression cache is memory.** Bound it (count and total bytes) and key on mtime so
-  a rebuilt `dist/web` is never served stale.
+## Out of scope
+
+- The tab-level `pinned` flag in `hooks/use-chat-tabs.ts` (`localStorage["jinn-chat-tabs"]`).
+  Same word, different feature: VS Code-style preview-tab pinning, per-device by design.
+- Every other sidebar localStorage key (`jinn-read-sessions`, `jinn-sidebar-collapsed`,
+  `jinn-sidebar-expanded`, `jinn-sidebar-older-expanded`, `jinn-sidebar-focus-mode`). If
+  syncing those is wanted, it is a follow-up Todo.
+- Any change to how the Pinned section looks, sorts, or which sessions float into it
+  (`shouldFloatPinned`'s cron exemption stays exactly as it is).
+- Per-user pin scoping. Pins are per-instance, which is what "same pins on all my devices on
+  all browsers of the same instance" asks for.
+
+## Noted, not fixed
+
+`PLAN.md` is tracked at the repo root and each build overwrites the previous ticket's plan —
+this worktree started with ICI-648's. Adjacent to the ticket, so it is reported rather than
+fixed (taste §4). Worth a follow-up: the build pipeline should write plans to an ignored path.

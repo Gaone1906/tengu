@@ -64,6 +64,9 @@ export function useQueryInvalidation() {
       const p = payload as Record<string, unknown> | undefined
 
       switch (event) {
+        case 'pins:changed':
+          qc.invalidateQueries({ queryKey: queryKeys.pins })
+          return
         case 'notes:changed':
           qc.invalidateQueries({ queryKey: queryKeys.notes.all })
           if (typeof p?.path === 'string' && p.path) {
