@@ -8,6 +8,13 @@ export function resolveJinnHome(): string {
   return path.resolve(path.join(os.homedir(), `.${instance}`));
 }
 
+/** Resolve Claude Code's config dir at call time; CLAUDE_CONFIG_DIR moves credentials,
+ *  transcripts, skills and .claude.json together, so every consumer must agree on it. */
+export function resolveClaudeConfigDir(): string {
+  if (process.env.CLAUDE_CONFIG_DIR) return path.resolve(process.env.CLAUDE_CONFIG_DIR);
+  return path.resolve(path.join(os.homedir(), ".claude"));
+}
+
 /**
  * Resolve the instance NAME (not the home path) for user-facing hints such as
  * the `jinn -i <name> pair` command. Derives from an explicit JINN_INSTANCE,

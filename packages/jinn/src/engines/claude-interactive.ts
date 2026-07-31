@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import * as pty from "node-pty";
 import type { InterruptibleEngine, EngineRunOpts, EngineResult, EngineRateLimitInfo, StreamDelta, TurnProgress } from "../shared/types.js";
 import { logger } from "../shared/logger.js";
@@ -19,6 +18,7 @@ import { extractActivityReceiptId } from "../shared/activity-receipts.js";
 import { costOfUsage } from "../shared/model-pricing.js";
 import { writeMcpConfigFile } from "../mcp/resolver.js";
 import { parsePermissionPrompt, chooseApproval, keystrokesToSelect } from "./claude-permission-prompt.js";
+import { resolveClaudeConfigDir } from "../shared/home.js";
 
 export type { PtyControlEvent } from "./pty-view-engine.js";
 
@@ -124,7 +124,7 @@ function lastTurnContextTokens(transcriptPath: string): number | undefined {
 export function findTranscriptForSession(
   claudeSessionId: string,
   homeDir: string = JINN_HOME,
-  projectsDir: string = path.join(os.homedir(), ".claude", "projects"),
+  projectsDir: string = path.join(resolveClaudeConfigDir(), "projects"),
 ): string | undefined {
   if (!claudeSessionId) return undefined;
   const slug = homeDir.replace(/[/.]/g, "-");

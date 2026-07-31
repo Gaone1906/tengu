@@ -3,6 +3,7 @@ import path from "node:path";
 import os from "node:os";
 import { spawnSync } from "node:child_process";
 import { JINN_HOME, SKILLS_DIR } from "../shared/paths.js";
+import { resolveClaudeConfigDir } from "../shared/home.js";
 
 const GREEN = "\x1b[32m";
 const YELLOW = "\x1b[33m";
@@ -14,7 +15,7 @@ export const SKILLS_JSON = path.join(JINN_HOME, "skills.json");
 
 /** Well-known directories where `npx skills add -g` may install skills. */
 const GLOBAL_SKILL_DIRS = [
-  path.join(os.homedir(), ".claude", "skills"),
+  path.join(resolveClaudeConfigDir(), "skills"),
   path.join(os.homedir(), ".agents", "skills"),
   path.join(os.homedir(), ".codex", "skills"),
 ];

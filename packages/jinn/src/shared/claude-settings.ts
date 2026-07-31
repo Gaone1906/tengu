@@ -1,5 +1,14 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { resolveClaudeConfigDir } from "./home.js";
+
+/** Claude Code's global config: beside the config dir by default, inside it once
+ *  CLAUDE_CONFIG_DIR is set. */
+export function claudeJsonPath(): string {
+  if (process.env.CLAUDE_CONFIG_DIR) return path.join(resolveClaudeConfigDir(), ".claude.json");
+  return path.join(os.homedir(), ".claude.json");
+}
 
 export interface SessionSettingsOpts {
   sessionId: string;
@@ -117,10 +126,10 @@ export function cleanupSessionSettings(dir: string, sessionId: string): void {
  * version) every work turn hangs forever before reaching the API. Pre-seeding
  * these flags at gateway boot answers the dialogs up front. See upstream issue #66.
  */
-export function seedTrust(claudeJsonPath: string, projectDir: string): void {
+export function seedTrust(claudeJsonFile: string, projectDir: string): void {
   const realDir = fs.realpathSync(projectDir);
   let data: any = {};
-  try { data = JSON.parse(fs.readFileSync(claudeJsonPath, "utf-8")); } catch { /* new file */ }
+  try { data = JSON.parse(fs.readFileSync(claudeJsonFile, "utf-8")); } catch { /* new file */ }
   data.projects ??= {};
   const proj = (data.projects[realDir] ??= {});
   const alreadySeeded =
@@ -131,9 +140,9 @@ export function seedTrust(claudeJsonPath: string, projectDir: string): void {
   if (alreadySeeded) return;
   // About to modify the user's real ~/.claude.json — keep a one-time backup of the
   // pre-Jinn original (no timestamped proliferation; first write wins).
-  const backupPath = `${claudeJsonPath}.jinn-backup`;
-  if (fs.existsSync(claudeJsonPath) && !fs.existsSync(backupPath)) {
-    try { fs.copyFileSync(claudeJsonPath, backupPath, fs.constants.COPYFILE_EXCL); } catch { /* best effort */ }
+  const backupPath = `${claudeJsonFile}.jinn-backup`;
+  if (fs.existsSync(claudeJsonFile) && !fs.existsSync(backupPath)) {
+    try { fs.copyFileSync(claudeJsonFile, backupPath, fs.constants.COPYFILE_EXCL); } catch { /* best effort */ }
   }
   // Global onboarding: dismisses the Bypass Permissions consent
   // (hasCompletedOnboarding) and the Claude in Chrome (beta) intro
@@ -144,11 +153,11 @@ export function seedTrust(claudeJsonPath: string, projectDir: string): void {
   proj.hasTrustDialogAccepted = true;
   proj.hasCompletedProjectOnboarding = true;
   proj.allowedTools ??= [];
-  const tmp = `${claudeJsonPath}.tmp`;
+  const tmp = `${claudeJsonFile}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
-  fs.renameSync(tmp, claudeJsonPath);
+  fs.renameSync(tmp, claudeJsonFile);
   // Defensive: ensure the final file has 0o600 even if the target pre-existed
   // with a more permissive mode (rename preserves the destination inode's perms
   // on some platforms / filesystems is not guaranteed — be explicit).
-  fs.chmodSync(claudeJsonPath, 0o600);
+  fs.chmodSync(claudeJsonFile, 0o600);
 }

@@ -1,8 +1,8 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { spawn, execFile } from "node:child_process";
 import type { ModelInfo } from "./types.js";
+import { resolveClaudeConfigDir } from "./home.js";
 
 export const CLAUDE_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
 export const CLAUDE_ALIAS_IDS = ["opus", "sonnet", "fable"] as const;
@@ -255,10 +255,10 @@ export function claudeTokenFromCredentialsJson(raw: string): string | undefined 
   }
 }
 
-function tokenFromCredentialsFile(home: string): string | undefined {
+function tokenFromCredentialsFile(configDir: string): string | undefined {
   try {
     return claudeTokenFromCredentialsJson(
-      fs.readFileSync(path.join(home, ".claude", ".credentials.json"), "utf-8"),
+      fs.readFileSync(path.join(configDir, ".credentials.json"), "utf-8"),
     );
   } catch {
     return undefined;
@@ -309,7 +309,10 @@ export async function readClaudeOAuthToken(
     if (token) return token;
   }
 
-  return tokenFromCredentialsFile(options.home ?? os.homedir());
+  // options.home is a test seam for the pre-CLAUDE_CONFIG_DIR layout.
+  return tokenFromCredentialsFile(
+    options.home ? path.join(options.home, ".claude") : resolveClaudeConfigDir(),
+  );
 }
 
 export async function discoverClaudeModels(options: {

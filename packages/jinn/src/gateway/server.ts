@@ -1,7 +1,6 @@
 import http from "node:http";
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -47,7 +46,7 @@ import { requestApproval, setTodoApprovalDecisionListener } from "../work-items/
 import { linkSession } from "../work-items/store.js";
 import { parseTodoApprovalRef } from "../workflows/todo-approval-ref.js";
 import { workflowTodoApprovals, workflowTodoLifecycle } from "./workflow-todo-surface.js";
-import { seedTrust, cleanupSessionSettings } from "../shared/claude-settings.js";
+import { seedTrust, cleanupSessionSettings, claudeJsonPath } from "../shared/claude-settings.js";
 import { GATEWAY_INFO_FILE, HOOK_RELAY_SCRIPT, JINN_HOME, CLAUDE_SETTINGS_DIR } from "../shared/paths.js";
 import { enforceOwnerOnlyDirectory, pathIsOwnerOnly } from "../shared/owner-only.js";
 import { handleApiRequest, isSameOriginBrowserRequest, resumePendingWebQueueItems, type ApiContext } from "./api.js";
@@ -657,7 +656,7 @@ export async function startGateway(
 
   // Seed trust for the Jinn project dir so interactive Claude doesn't prompt.
   try {
-    seedTrust(path.join(os.homedir(), ".claude.json"), JINN_HOME);
+    seedTrust(claudeJsonPath(), JINN_HOME);
   } catch (err) {
     logger.warn(`Failed to seed Claude trust: ${err instanceof Error ? err.message : err}`);
   }

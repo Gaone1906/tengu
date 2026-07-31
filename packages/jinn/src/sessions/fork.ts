@@ -15,6 +15,7 @@ import { logger } from "../shared/logger.js";
 import { resolveBin } from "../shared/resolve-bin.js";
 import type { InteractiveClaudeEngine } from "../engines/claude-interactive.js";
 import { HermesRpc } from "../engines/hermes-jsonrpc.js";
+import { resolveClaudeConfigDir } from "../shared/home.js";
 
 export interface ForkResult {
   engineSessionId: string;
@@ -168,7 +169,7 @@ async function forkClaudeSessionInteractive(
  */
 export function claudeProjectDir(cwd: string): string {
   const key = cwd.replace(/[^a-zA-Z0-9]/g, "-");
-  return path.join(os.homedir(), ".claude", "projects", key);
+  return path.join(resolveClaudeConfigDir(), "projects", key);
 }
 
 /** Async sleep — yields the event loop instead of busy-spinning. */

@@ -1,10 +1,30 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { buildSessionSettings, writeSessionSettings, sessionSettingsPath, seedTrust } from "../claude-settings.js";
+import { buildSessionSettings, writeSessionSettings, sessionSettingsPath, seedTrust, claudeJsonPath } from "../claude-settings.js";
 
 describe("claude-settings", () => {
+  describe("claudeJsonPath", () => {
+    // Seeding a file the CLI does not read leaves the PTY blocked on the consent
+    // dialogs, so this has to track CLAUDE_CONFIG_DIR.
+    const original = process.env.CLAUDE_CONFIG_DIR;
+    afterEach(() => {
+      if (original === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = original;
+    });
+
+    it("follows CLAUDE_CONFIG_DIR when set", () => {
+      process.env.CLAUDE_CONFIG_DIR = path.join("/somewhere", ".claude");
+      expect(claudeJsonPath()).toBe(path.join("/somewhere", ".claude", ".claude.json"));
+    });
+
+    it("falls back to the home directory when unset", () => {
+      delete process.env.CLAUDE_CONFIG_DIR;
+      expect(claudeJsonPath()).toBe(path.join(os.homedir(), ".claude.json"));
+    });
+  });
+
   it("buildSessionSettings registers Stop/SessionStart/StopFailure hooks pointing at the relay with the session id", () => {
     const s = buildSessionSettings({ sessionId: "jinn-abc", relayScript: "/h/relay.mjs", statusLineDir: "/tmp/limits", appendSystemPrompt: "SYS" });
     const stop = s.hooks.Stop[0].hooks[0];
