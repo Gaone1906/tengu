@@ -1,6 +1,6 @@
 import { logger } from "../shared/logger.js";
-import { deliverClaimedSessionDelivery, notifyOperatorChannel } from "../sessions/callbacks.js";
-import { claimSessionDelivery, DIRECT_GROUP, isPortalAgentSession, listSessionsForGroup } from "../sessions/registry.js";
+import { deliverClaimedSessionDelivery } from "../sessions/callbacks.js";
+import { claimSessionDelivery, listSessionsForGroup } from "../sessions/registry.js";
 import { currentApproval, listApprovals } from "../work-items/approval-rows.js";
 import { addComment } from "../work-items/comments.js";
 import { getWorkItem, isBlockDeclared, WORKFLOW_RUN_ACTOR, type ApprovalTargetKind, type WorkItemStatus } from "../work-items/store.js";
@@ -26,7 +26,7 @@ import type {
  * Four obligations:
  *   - reflect the run's lifecycle onto the Todo's status
  *   - record WHY a run settled failed
- *   - tell the routed approver when the run parks on their decision
+ *   - wake the routed employee when the run parks on their decision
  *   - send the work round again when that approver rejects WITH feedback
  *
  * Completion is deliberately absent. A run reaching its success End does NOT
@@ -199,48 +199,40 @@ function gateRequest(request: string): string {
  * carries the ROUTED approver, resolved when the gate was mirrored, so this only
  * has to turn that into a session:
  *
- *   - an employee → that employee's most recent live session
- *   - the virtual COO root → the portal agent session, the top-level chat the
- *     operator actually talks to. This is the common case: a gate authored
- *     without an explicit approver routes to the root, and in a gateway whose COO
- *     is deliberately not an org employee that root belongs to nobody.
+ * Employee-routed gates wake that employee's most recent live session. Gates
+ * routed to the virtual root, and gates reserved for the operator, stay on the
+ * Todo board without waking a chat.
  *
  * An errored session is skipped the same way a parent callback skips one.
  */
-function approverSession(target: string | null, kind: ApprovalTargetKind | null | undefined) {
-  const group = kind === "employee" && target ? target : DIRECT_GROUP;
-  return listSessionsForGroup(group, 5, 0)
-    .find((candidate) => candidate.status !== "error"
-      && (group !== DIRECT_GROUP || isPortalAgentSession(candidate)));
+function approverSession(
+  target: string | null,
+  kind: ApprovalTargetKind | null | undefined,
+  operatorOnly: boolean,
+) {
+  if (operatorOnly || kind !== "employee" || !target) return undefined;
+  return listSessionsForGroup(target, 5, 0)
+    .find((candidate) => candidate.status !== "error");
 }
 
 /**
- * A parked gate has to reach a person. The gate is already mirrored onto the Todo
- * (so it is decidable and visible), but a mirror nobody is told about is how a
- * merge approval sat idle for eleven hours.
- *
- * Falls back to the operator's configured notification channel when there is no
- * session to wake at all. `claimSessionDelivery` is keyed on the gate's
- * correlation ref, so a re-mirror on a later recovery sweep is a no-op rather
- * than a second ping.
+ * A parked gate is already mirrored onto the Todo, where it remains visible and
+ * decidable. Employee-routed gates also wake that employee's live session.
+ * `claimSessionDelivery` is keyed on the gate's correlation ref, so a re-mirror
+ * on a later recovery sweep is a no-op rather than a second ping.
  */
 function notifyParked(input: {
   todoId: string; workflowId: string; runId: string; nodeId: string; request: string; ref: string;
 }): void {
   const approval = currentApproval(input.todoId);
+  const session = approverSession(
+    approval?.target ?? null,
+    approval?.targetKind,
+    approval?.operatorOnly ?? false,
+  );
+  if (!session) return;
+
   const decision = gateRequest(input.request);
-  const session = approverSession(approval?.target ?? null, approval?.targetKind);
-
-  if (!session) {
-    notifyOperatorChannel(
-      `⏸️ Workflow \`${input.workflowId}\` is parked on a decision for Todo ${input.todoId}.\n`
-      + `Gate: ${decision}\n`
-      + `Run: ${input.runId} (node \`${input.nodeId}\`)\n`
-      + `Decide it on the Todo — the run resumes from your decision.`,
-    );
-    return;
-  }
-
   const message =
     `⏸️ Workflow \`${input.workflowId}\` is parked waiting on YOUR decision.\n\n`
     + `Todo: ${input.todoId}\n`
@@ -272,7 +264,7 @@ function notifyParked(input: {
 /** The lifecycle half of the surface (status, failure record, revision loop). */
 export const workflowTodoLifecycle: WorkflowTodoLifecycle = { reflect, recordFailure, requestRevision };
 
-/** The approval half: `request` mirrors the gate, `notifyParked` tells its approver. */
+/** The approval half: `request` mirrors the gate, `notifyParked` wakes a routed employee. */
 export function workflowTodoApprovals(
   request: WorkflowTodoApprovalMirror["request"],
 ): WorkflowTodoApprovalMirror {

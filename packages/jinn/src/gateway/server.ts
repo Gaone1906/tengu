@@ -1026,8 +1026,8 @@ export async function startGateway(
     executor: new WorkflowSessionExecutor(sessionManager, (id) => { const session = getSession(id); if (!session) return null;
       const finalText = [...getMessages(id)].reverse().find((message) => message.role === "assistant")?.content; return { session, ...(finalText ? { finalText } : {}) }; }),
     employees: () => employeeRegistry, models: () => getModelRegistry(currentConfig),
-    // A parked gate on a Todo-bound run is decided from Todos, not Workflows —
-    // and its approver is told, so a gate cannot sit unnoticed.
+    // A parked gate on a Todo-bound run is decided from Todos, not Workflows.
+    // Employee-routed gates also wake that employee's live session.
     todoApprovals: workflowTodoApprovals(({ todoId, request, ref, options, approver }) => {
       requestApproval(todoId, { request, ref, ...(options ? { options } : {}), ...(approver ? { target: approver } : {}), actor: "workflow" });
     }),

@@ -47,8 +47,8 @@ export type WorkflowRunReflection = "executing" | "in_review" | "blocked";
 
 export interface WorkflowTodoApprovalMirror {
   request(input: { todoId: string; request: string; ref: string; options?: string[]; approver?: string }): void;
-  /** Tell the routed approver that a run has parked on their decision. Called
-   *  once, on the transition into parked. */
+  /** Wake the routed employee when a run parks on their decision. Called once,
+   *  on the transition into parked. Root and operator-only gates stay on Todos. */
   notifyParked(input: {
     todoId: string; workflowId: string; runId: string; nodeId: string; request: string; ref: string;
   }): void;
@@ -358,11 +358,10 @@ export class WorkflowRunner {
   }
 
   /** Mirror a parked gate onto the run's bound Todo (Gap 2: the operator picks
-   *  and approves from Todos), then tell the routed approver it is waiting — a
-   *  gate nobody is told about is the same as no gate, and one sat idle for
-   *  eleven hours. Best-effort — neither a mirror nor a notification failure may
-   *  fail a run whose gate is already parked and decidable through the workflow
-   *  API. Reached only from the transition INTO parked, so the notification
+   *  and approves from Todos), then wake its routed employee when it has one.
+   *  Best-effort — neither a mirror nor a notification failure may fail a run
+   *  whose gate is already parked and decidable through the workflow API.
+   *  Reached only from the transition INTO parked, so an employee notification
    *  fires once per gate rather than on every recovery sweep. */
   private mirrorApproval(run: WorkflowRunDetail, node: ApprovalNode, approver: string | undefined): void {
     const todoId = run.trigger.todoId;
