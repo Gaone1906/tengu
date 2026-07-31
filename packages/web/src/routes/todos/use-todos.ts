@@ -7,9 +7,9 @@ import {
   type WorkItemDetailWire,
   type WorkItemOpenDetailWire,
   type WorkItemLabelWire,
-  type WorkItemStatusWire,
 } from "@/lib/api"
-import { queryKeys } from "@/lib/query-keys"
+import { queryKeys, TODO_WRITE_KEY } from "@/lib/query-keys"
+import { todoStatusMutationOptions } from "./todo-status-mutation"
 
 /* GRS-021d/027 + design-todos §7 → slice 6 — the shared Todos data layer.
  * The board owns its own per-column infinite queries (board/use-board.ts);
@@ -100,6 +100,7 @@ export interface DecideArgs {
 export function useDecideApproval() {
   const qc = useQueryClient()
   return useMutation({
+    mutationKey: TODO_WRITE_KEY,
     mutationFn: ({ id, decision, note, choice }: DecideArgs) => api.decideWorkItemApproval(id, decision, note, choice),
     onSettled: () => {
       void qc.invalidateQueries({ queryKey: ["work-items"] })
@@ -112,12 +113,8 @@ export function useDecideApproval() {
  *  stays the authority and refuses anything else readably. */
 export function useSetWorkItemStatus() {
   const qc = useQueryClient()
-  return useMutation({
-    mutationFn: ({ id, status, note }: { id: string; status: WorkItemStatusWire; note?: string }) =>
-      api.setWorkItemStatus(id, status, note),
-    onSettled: () => {
-      void qc.invalidateQueries({ queryKey: ["work-items"] })
-      void qc.invalidateQueries({ queryKey: ["work-item"] })
-    },
-  })
+  return useMutation(todoStatusMutationOptions(
+    qc,
+    ({ id, status, note }) => api.setWorkItemStatus(id, status, note),
+  ))
 }

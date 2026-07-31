@@ -135,15 +135,24 @@ export default function TodoBoardPage() {
   }, [])
 
   /** Effective per-status card lists: server data + optimistic moves/ranks. */
-  const itemsByStatus = useMemo(() => {
+  const { itemsByStatus, countByStatus } = useMemo(() => {
     const out: Partial<Record<WorkItemStatusWire, WorkItemCompactWire[]>> = {}
+    const counts: Partial<Record<WorkItemStatusWire, number>> = {}
     const allStatuses = [...PIPELINE_STATUSES, ...EXCEPTION_STATUSES, ...CLOSED_STATUSES]
     const withRank = (item: WorkItemCompactWire): WorkItemCompactWire => {
       const rank = rankOverrides.get(item.id)
       return rank === undefined ? item : { ...item, rank }
     }
     for (const status of allStatuses) {
-      const base = (data.columns[status]?.items ?? [])
+      const seen = new Set<string>()
+      const sourceStatuses = [status, ...allStatuses.filter((candidate) => candidate !== status)]
+      const base = sourceStatuses
+        .flatMap((sourceStatus) => data.columns[sourceStatus]?.items ?? [])
+        .filter((item) => {
+          if (item.status !== status || seen.has(item.id)) return false
+          seen.add(item.id)
+          return true
+        })
         .filter((item) => {
           const move = moves.get(item.id)
           return !move || move.status === status
@@ -160,11 +169,16 @@ export default function TodoBoardPage() {
       const source = allStatuses.flatMap((s) => data.columns[s]?.items ?? []).find((item) => item.id === id)
       if (!source || source.status === move.status) continue
       const list = out[move.status] ?? []
+      if (list.some((item) => item.id === id)) continue
       const index = Math.min(Math.max(move.index, 0), list.length)
       list.splice(index, 0, { ...withRank(source), status: move.status })
       out[move.status] = list
     }
-    return out
+    for (const status of allStatuses) {
+      const column = data.columns[status]
+      counts[status] = Math.max(0, (column?.total ?? 0) + (out[status]?.length ?? 0) - (column?.items.length ?? 0))
+    }
+    return { itemsByStatus: out, countByStatus: counts }
   }, [data.columns, moves, rankOverrides, filters.due, now])
 
   // Drop an optimistic move once the server agrees (poll/refetch landed).
@@ -449,8 +463,8 @@ export default function TodoBoardPage() {
     : board.kind === "attention" ? "Attention"
     : board.kind === "everything" ? "Everything"
     : departmentTitle(board.slug)
-  const blockedTotal = data.columns.blocked?.total ?? 0
-  const escalatedTotal = data.columns.escalated?.total ?? 0
+  const blockedTotal = countByStatus.blocked ?? 0
+  const escalatedTotal = countByStatus.escalated ?? 0
   const attentionSegmentItems = useMemo(
     () =>
       [...(itemsByStatus.blocked ?? []), ...(itemsByStatus.escalated ?? []),
@@ -468,14 +482,14 @@ export default function TodoBoardPage() {
   const visibleStatuses: WorkItemStatusWire[] = useMemo(() => {
     const exceptions = EXCEPTION_STATUSES.filter(
       (status) =>
-        (data.columns[status]?.total ?? 0) > 0
+        (countByStatus[status] ?? 0) > 0
         || (itemsByStatus[status]?.length ?? 0) > 0
         // States mock §6: an empty column doesn't render — EXCEPT the column
         // a drag could legally land in, which materializes for the drop.
         || (drag !== null && drag.legal.has(status)),
     )
     return [...PIPELINE_STATUSES, ...exceptions]
-  }, [data.columns, itemsByStatus, drag])
+  }, [countByStatus, itemsByStatus, drag])
 
   // Filtered-empty (states mock §6): zero visible items with filters/search
   // set always offers the way back. An unfiltered empty board celebrates
@@ -522,7 +536,7 @@ export default function TodoBoardPage() {
     const items = itemsByStatus[status] ?? []
     // Under the client-side due window the server total no longer describes
     // what's visible — the header count follows the filtered list.
-    const count = filters.due ? items.length : column?.total ?? 0
+    const count = filters.due ? items.length : countByStatus[status] ?? 0
     const quickAdd =
       status === "backlog"
         ? () => setCreating({ department: board.kind === "department" ? board.slug : undefined })
@@ -537,7 +551,7 @@ export default function TodoBoardPage() {
         orderKey={items.map((item) => `${item.id}:${cardLayoutKey(item, enrichmentById.get(item.id))}`).join(",")}
         onQuickAdd={quickAdd}
         hasMore={column?.hasMore ?? false}
-        remaining={Math.max(0, (column?.total ?? 0) - items.length)}
+        remaining={Math.max(0, count - items.length)}
         loadMore={column?.loadMore ?? (() => {})}
         loadingMore={column?.loadingMore ?? false}
         drag={drag}

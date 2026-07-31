@@ -1,3 +1,5 @@
+export const TODO_WRITE_KEY = ['todo-write'] as const
+
 export const queryKeys = {
   sessions: {
     all: ['sessions'] as const,

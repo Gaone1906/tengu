@@ -2,12 +2,15 @@ import type { ReactNode } from "react"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { act, renderHook } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { TODO_WRITE_KEY } from "@/lib/query-keys"
 import { useQueryInvalidation } from "../use-query-invalidation"
 
 let listener: ((event: string, payload: unknown) => void) | undefined
+let connectionSeq = 1
 
 vi.mock("@/hooks/use-gateway", () => ({
   useGateway: () => ({
+    connectionSeq,
     subscribe: (next: (event: string, payload: unknown) => void) => {
       listener = next
       return () => { listener = undefined }
@@ -21,8 +24,8 @@ function setup() {
   const wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={client}>{children}</QueryClientProvider>
   )
-  renderHook(() => useQueryInvalidation(), { wrapper })
-  return { client, invalidate }
+  const hook = renderHook(() => useQueryInvalidation(), { wrapper })
+  return { client, invalidate, rerender: hook.rerender }
 }
 
 function calledWithKey(invalidate: ReturnType<typeof vi.spyOn>, key: readonly unknown[]): boolean {
@@ -50,7 +53,10 @@ describe("Todo linked-session invalidation", () => {
 })
 
 describe("Todo live reconciliation (ICI-570)", () => {
-  beforeEach(() => vi.useFakeTimers())
+  beforeEach(() => {
+    connectionSeq = 1
+    vi.useFakeTimers()
+  })
   afterEach(() => vi.useRealTimers())
 
   it("a todo event WITH a value still reconciles list membership after quiet", async () => {
@@ -92,19 +98,48 @@ describe("Todo live reconciliation (ICI-570)", () => {
     expect(listCalls).toHaveLength(1)
   })
 
-  it("defers the todo refetch while a mutation is in flight, then reconciles", async () => {
+  it("flushes a continuous event stream within the maximum wait", async () => {
+    const { invalidate } = setup()
+
+    for (let elapsed = 0; elapsed < 3_000; elapsed += 200) {
+      act(() => listener?.("company:changed", {
+        entity: "todo", action: "status-transitioned", id: "JIN-2", version: elapsed / 200 + 1,
+      }))
+      await act(async () => vi.advanceTimersByTimeAsync(200))
+    }
+
+    expect(calledWithKey(invalidate, ["work-items"])).toBe(true)
+  })
+
+  it("defers only for keyed todo writes, not unrelated mutations", async () => {
     const { client, invalidate } = setup()
-    let settle: (() => void) | undefined
-    const gate = new Promise<void>((resolve) => { settle = resolve })
-    const mutation = client.getMutationCache().build(client, { mutationFn: () => gate })
-    const running = mutation.execute(undefined)
+    let settleUnrelated: (() => void) | undefined
+    const unrelatedGate = new Promise<void>((resolve) => { settleUnrelated = resolve })
+    const unrelated = client.getMutationCache().build(client, { mutationFn: () => unrelatedGate })
+    const unrelatedRunning = unrelated.execute(undefined)
 
     act(() => listener?.("company:changed", { entity: "todo", action: "status-transitioned", id: "JIN-3", version: 8 }))
     await act(async () => vi.advanceTimersByTimeAsync(1_000))
+    expect(calledWithKey(invalidate, ["work-items"])).toBe(true)
+
+    settleUnrelated?.()
+    await act(async () => { await unrelatedRunning })
+    invalidate.mockClear()
+
+    let settleTodo: (() => void) | undefined
+    const todoGate = new Promise<void>((resolve) => { settleTodo = resolve })
+    const todoWrite = client.getMutationCache().build(client, {
+      mutationKey: TODO_WRITE_KEY,
+      mutationFn: () => todoGate,
+    })
+    const todoRunning = todoWrite.execute(undefined)
+
+    act(() => listener?.("company:changed", { entity: "todo", action: "status-transitioned", id: "JIN-3", version: 9 }))
+    await act(async () => vi.advanceTimersByTimeAsync(1_000))
     expect(calledWithKey(invalidate, ["work-items"])).toBe(false)
 
-    settle?.()
-    await act(async () => { await running })
+    settleTodo?.()
+    await act(async () => { await todoRunning })
     await act(async () => vi.advanceTimersByTimeAsync(1_000))
     expect(calledWithKey(invalidate, ["work-items"])).toBe(true)
   })
@@ -113,7 +148,10 @@ describe("Todo live reconciliation (ICI-570)", () => {
     const { client, invalidate } = setup()
     let settle: (() => void) | undefined
     const gate = new Promise<void>((resolve) => { settle = resolve })
-    const mutation = client.getMutationCache().build(client, { mutationFn: () => gate })
+    const mutation = client.getMutationCache().build(client, {
+      mutationKey: TODO_WRITE_KEY,
+      mutationFn: () => gate,
+    })
     const running = mutation.execute(undefined)
 
     act(() => {
@@ -126,6 +164,18 @@ describe("Todo live reconciliation (ICI-570)", () => {
 
     settle?.()
     await act(async () => { await running })
+    await act(async () => vi.advanceTimersByTimeAsync(1_000))
+    expect(calledWithKey(invalidate, ["work-items"])).toBe(true)
+  })
+
+  it("reconciles todos after a connection sequence bump, but not on mount", async () => {
+    const { invalidate, rerender } = setup()
+
+    await act(async () => vi.advanceTimersByTimeAsync(1_000))
+    expect(calledWithKey(invalidate, ["work-items"])).toBe(false)
+
+    connectionSeq = 2
+    rerender()
     await act(async () => vi.advanceTimersByTimeAsync(1_000))
     expect(calledWithKey(invalidate, ["work-items"])).toBe(true)
   })

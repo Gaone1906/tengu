@@ -8,6 +8,8 @@ import {
   type WorkItemTreeWire,
 } from "@/lib/api"
 import { dateBounds, type TodoFilters } from "@/lib/todos"
+import { TODO_WRITE_KEY } from "@/lib/query-keys"
+import { todoStatusMutationOptions } from "../todo-status-mutation"
 import type { BoardId } from "./board-route"
 import { boardKey } from "./board-route"
 
@@ -212,20 +214,17 @@ export function useBoardTrees(ids: string[]) {
  *  pre-checked legality; a runtime refusal surfaces the gateway's words. */
 export function useBoardTransition() {
   const qc = useQueryClient()
-  return useMutation({
-    mutationFn: ({ id, status }: { id: string; status: WorkItemStatusWire; note?: string }) =>
-      api.setWorkItemStatus(id, status),
-    onSettled: () => {
-      void qc.invalidateQueries({ queryKey: ["work-items"] })
-      void qc.invalidateQueries({ queryKey: ["work-item"] })
-    },
-  })
+  return useMutation(todoStatusMutationOptions(
+    qc,
+    ({ id, status }) => api.setWorkItemStatus(id, status),
+  ))
 }
 
 /** Within-column drop = a rank edit through the metadata pen (CAS-guarded). */
 export function useBoardRank() {
   const qc = useQueryClient()
   return useMutation({
+    mutationKey: TODO_WRITE_KEY,
     mutationFn: ({ id, rank, expectedVersion }: { id: string; rank: number; expectedVersion: number }) =>
       api.updateWorkItem(id, {
         patch: { rank },
@@ -242,6 +241,7 @@ export function useBoardRank() {
 export function useCreateSubTask() {
   const qc = useQueryClient()
   return useMutation({
+    mutationKey: TODO_WRITE_KEY,
     mutationFn: ({ parentId, title }: { parentId: string; title: string }) =>
       api.createWorkItem({ title, parentId }),
     onSettled: (_data, _error, { parentId }) => {
