@@ -176,14 +176,15 @@ describe("the task page", () => {
 
     expect(screen.getByTestId("task-page-skeleton")).toBeTruthy()
     expect(screen.queryByTestId("task-banner-skeleton")).toBeNull()
-    expect(screen.getByTestId("task-details-toggle")).toBeTruthy()
+    expect(screen.queryByTestId("task-details-toggle")).toBeNull()
     expect(screen.getByTestId("task-activity")).toBeTruthy()
 
     await act(async () => {
       resolveDetail(detailOf(full("PLA-12")))
     })
     await waitFor(() => expect(screen.queryByTestId("task-page-skeleton")).toBeNull())
-    expect(screen.getByTestId("task-details-toggle")).toBeTruthy()
+    expect(screen.queryByTestId("task-details-toggle")).toBeNull()
+    expect(screen.getByTestId("task-body")).toBeTruthy()
     expect(screen.getByTestId("task-activity")).toBeTruthy()
   })
 
@@ -278,7 +279,7 @@ describe("the task page", () => {
     expect(getWorkItemTree).toHaveBeenCalledWith("PLA-12")
   })
 
-  it("moves the key properties into header chips and folds the document behind Details", async () => {
+  it("renders the document and persistent properties on first paint without a Details toggle", async () => {
     const item = full("PLA-12", {
       assignee: "mason",
       priority: 3,
@@ -320,17 +321,13 @@ describe("the task page", () => {
     expect(chips.textContent).toContain("mason")
     expect(chips.textContent).toContain("build")
 
-    const toggle = screen.getByTestId("task-details-toggle")
-    const content = screen.getByTestId("task-details-content") as HTMLDivElement
-    await waitFor(() =>
-      expect(toggle.textContent).toContain("Acceptance 1/2 · 1 sub-task · 1 attachment · body 4 words"),
-    )
-    expect(toggle.getAttribute("aria-expanded")).toBe("false")
-    expect(content.hidden).toBe(true)
+    expect(screen.queryByTestId("task-details-toggle")).toBeNull()
+    expect(screen.getByTestId("task-body")).toBeTruthy()
+    expect(screen.getByTestId("task-acceptance")).toBeTruthy()
+    expect(screen.getByTestId("task-subtasks")).toBeTruthy()
+    expect(screen.getByTestId("task-relations")).toBeTruthy()
+    expect(screen.getByTestId("task-attachments")).toBeTruthy()
     expect(screen.getByTestId("task-props-rail")).toBeTruthy()
-    fireEvent.click(toggle)
-    expect(toggle.getAttribute("aria-expanded")).toBe("true")
-    expect(content.hidden).toBe(false)
   })
 
   it("banner precedence: escalated wins over a pending approval", async () => {
@@ -518,5 +515,16 @@ describe("the task page", () => {
     expect(screen.getByTestId("composer-attach").getAttribute("aria-label")).toBe("Attach")
     expect(screen.getByTestId("composer-send").getAttribute("aria-label")).toBe("Send")
     expect(screen.queryByTestId("task-composer")).toBeNull()
+    for (const testId of [
+      "rail-status",
+      "rail-priority",
+      "rail-assignee",
+      "rail-labels",
+      "rail-department",
+      "rail-due",
+      "rail-created-by",
+      "rail-verify",
+      "rail-spend",
+    ]) expect(screen.getByTestId(testId)).toBeTruthy()
   })
 })

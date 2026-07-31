@@ -29,12 +29,16 @@ import { FilterBar } from "../filter-bar"
 import { TodoFilterSheet } from "../todo-filter-sheet"
 import { NeedsYouView } from "../needs-you-view"
 import { NewTodoDialog } from "../new-todo-dialog"
+import { TodoList } from "../list/todo-list"
+import { TodosViewToggle } from "../todos-view-toggle"
+import { loadTodoViewPreference, saveTodoViewPreference, type TodoView } from "../todos-view-pref"
 import { BoardCard, cardLayoutKey, rollupOf, type CardEnrichment } from "./card"
 import { BoardColumn, DragSlot } from "./column"
 import { ClosedColumnGroup, ClosedColumnHeader, ClosedRail } from "./closed-rail"
 import { BoardSwitcher, departmentTitle } from "./board-switcher"
 import {
   boardDetailIds,
+  BOARD_STATUS_ORDER,
   CLOSED_STATUSES,
   EXCEPTION_STATUSES,
   PIPELINE_STATUSES,
@@ -104,6 +108,7 @@ export default function TodoBoardPage() {
   const key = boardKey(board)
   const navigationType = useNavigationType()
   const navigate = useNavigate()
+  const [view, setView] = useState<TodoView>(loadTodoViewPreference)
   const [searchParams, setSearchParams] = useSearchParams()
   const filters = useMemo(() => {
     const f = filtersFromSearchParams(searchParams)
@@ -377,15 +382,20 @@ export default function TodoBoardPage() {
   )
 
   // ── Scroll cache (per board, restored on POP) ───────────────────────────────
-  const scrollRef = useRef<HTMLDivElement>(null)
-  const onScroll = useCallback(() => {
-    const el = scrollRef.current
+  const boardScrollRef = useRef<HTMLDivElement>(null)
+  const listScrollRef = useRef<HTMLDivElement>(null)
+  const onBoardScroll = useCallback(() => {
+    const el = boardScrollRef.current
+    if (el) rememberBoardScroll(key, el.scrollTop)
+  }, [key])
+  const onListScroll = useCallback(() => {
+    const el = listScrollRef.current
     if (el) rememberBoardScroll(key, el.scrollTop)
   }, [key])
   useEffect(() => {
-    const el = scrollRef.current
-    if (!el) return
-    el.scrollTop = navigationType === "POP" ? recallBoardScroll(key) : 0
+    const scrollTop = navigationType === "POP" ? recallBoardScroll(key) : 0
+    if (boardScrollRef.current) boardScrollRef.current.scrollTop = scrollTop
+    if (listScrollRef.current) listScrollRef.current.scrollTop = scrollTop
   }, [key, navigationType])
 
   // ── Page chrome state ───────────────────────────────────────────────────────
@@ -393,6 +403,10 @@ export default function TodoBoardPage() {
   const [closedOpen, setClosedOpen] = useState(false)
   const [segment, setSegment] = useState<MobileSegment>("active")
   const [mobileFilterOpen, setMobileFilterOpen] = useState(false)
+  const chooseView = useCallback((next: TodoView) => {
+    setView(next)
+    saveTodoViewPreference(next)
+  }, [])
   useEffect(() => {
     setClosedOpen(false)
     setSegment("active")
@@ -501,6 +515,18 @@ export default function TodoBoardPage() {
   )
   const filterCount = activeFilterCount(filters) + (filters.q ? 1 : 0)
   const filteredEmpty = !data.isLoading && visibleOpenCount === 0 && filterCount > 0
+  const listColumns = useMemo(() => {
+    const columns = {} as typeof data.columns
+    for (const status of BOARD_STATUS_ORDER) {
+      const items = itemsByStatus[status] ?? []
+      columns[status] = {
+        ...data.columns[status],
+        items,
+        total: filters.due ? items.length : data.columns[status].total,
+      }
+    }
+    return columns
+  }, [data.columns, itemsByStatus, filters.due])
   const clearAllFilters = useCallback(() => {
     const params = new URLSearchParams()
     setSearchParams(params, { replace: false })
@@ -570,7 +596,10 @@ export default function TodoBoardPage() {
         <header className="flex-none px-5 pt-6 max-[700px]:pt-[calc(24px+var(--safe-top,0px))] md:px-10 md:pt-8">
           <div className="flex items-start gap-4">
             <div className="min-w-0">
-              <BoardSwitcher board={board} title={title} departments={departments.data} attentionCount={needsYou.length} />
+              <div className="flex flex-wrap items-center gap-3">
+                <BoardSwitcher board={board} title={title} departments={departments.data} attentionCount={needsYou.length} />
+                {!isAttention && <TodosViewToggle view={view} onChange={chooseView} />}
+              </div>
               <div className="mt-1 flex items-center gap-2 text-[13px] text-[var(--text-tertiary)]">
                 {deptSummary && (
                   <>
@@ -640,7 +669,7 @@ export default function TodoBoardPage() {
               opens the filter sheet (the mobile filtering entry point,
               Stage-A review F5). */}
           {!isAttention && mobile && (
-            <div className="mt-4 flex gap-2 overflow-x-auto" role="tablist" aria-label="Board segments">
+            <div hidden={view !== "board"} className="mt-4 flex gap-2 overflow-x-auto" role="tablist" aria-label="Board segments">
               {(["active", "attention", "closed"] as const).map((seg) => {
                 const count = seg === "active" ? data.openTotal : seg === "attention" ? blockedTotal + escalatedTotal : closedTotal
                 const label = seg === "active" ? "Active" : seg === "attention" ? "Attention" : "Closed"
@@ -683,8 +712,8 @@ export default function TodoBoardPage() {
         {/* ── Content ── */}
         {isAttention ? (
           <div
-            ref={scrollRef}
-            onScroll={onScroll}
+            ref={boardScrollRef}
+            onScroll={onBoardScroll}
             data-testid="todo-board-scroll"
             data-scrollable
             className="min-h-0 flex-1 overflow-y-auto px-5 pb-20 pt-5 md:px-10"
@@ -709,9 +738,45 @@ export default function TodoBoardPage() {
             </div>
           </div>
         ) : (
+          <>
           <div
-            ref={scrollRef}
-            onScroll={onScroll}
+            ref={listScrollRef}
+            onScroll={onListScroll}
+            hidden={view !== "list"}
+            data-testid="todo-list-scroll"
+            data-scrollable
+            className="min-h-0 flex-1 overflow-y-auto"
+          >
+            {data.isError ? (
+              <BoardErrorCard error={data.error} testId="todo-list-error" />
+            ) : data.isLoading ? (
+              <div className="px-3 pt-5 md:px-10"><GroupSkeleton /></div>
+            ) : filteredEmpty ? (
+              <FilteredEmptyCard
+                count={filterCount}
+                onClear={clearAllFilters}
+                testId="todo-list-filtered-empty"
+                clearTestId="todo-list-clear-filters"
+              />
+            ) : (
+              <TodoList
+                columns={listColumns}
+                needsAttention={needsYou}
+                byName={byName}
+                trees={trees.data}
+                now={now}
+                onOpen={onOpen}
+                onQuickAdd={(askAssignee) => setCreating({
+                  department: board.kind === "department" ? board.slug : undefined,
+                  askAssignee: askAssignee || undefined,
+                })}
+              />
+            )}
+          </div>
+          <div
+            ref={boardScrollRef}
+            onScroll={onBoardScroll}
+            hidden={view !== "board"}
             data-testid="todo-board-scroll"
             data-scrollable
             className="min-h-0 flex-1 overflow-auto"
@@ -833,6 +898,7 @@ export default function TodoBoardPage() {
             </div>
             )}
           </div>
+          </>
         )}
       </div>
 
@@ -878,7 +944,12 @@ export default function TodoBoardPage() {
         <NewTodoDialog
           onClose={() => setCreating(null)}
           onCreated={() => setCreating(null)}
-          defaults={{ department: creating.department, askAssignee: creating.askAssignee, employees: org.data?.employees ?? [] }}
+          defaults={{
+            department: creating.department,
+            askAssignee: creating.askAssignee,
+            employees: org.data?.employees ?? [],
+            departments: departments.data ?? [],
+          }}
         />
       )}
 
@@ -943,11 +1014,11 @@ function GroupSkeleton() {
   )
 }
 
-function BoardErrorCard({ error }: { error: unknown }) {
+function BoardErrorCard({ error, testId = "board-error" }: { error: unknown; testId?: string }) {
   return (
     <div className="px-10 pt-5 max-[700px]:px-0 max-[700px]:pt-2">
       <div
-        data-testid="board-error"
+        data-testid={testId}
         className="max-w-[560px] rounded-[var(--radius-lg)] bg-[var(--fill-quaternary)] p-4 text-[length:var(--text-subheadline)] text-[var(--system-red)]"
       >
         {operatorSafeTodoError(error, "Couldn't load this board")}
@@ -957,13 +1028,23 @@ function BoardErrorCard({ error }: { error: unknown }) {
 }
 
 /** Filtered-empty always offers the way back (states mock §6). */
-function FilteredEmptyCard({ count, onClear }: { count: number; onClear: () => void }) {
+function FilteredEmptyCard({
+  count,
+  onClear,
+  testId = "board-filtered-empty",
+  clearTestId = "board-clear-filters",
+}: {
+  count: number
+  onClear: () => void
+  testId?: string
+  clearTestId?: string
+}) {
   const caption =
     count === 1 ? "One filter is set on this board."
     : count === 2 ? "Two filters are set on this board."
     : `${count} filters are set on this board.`
   return (
-    <div className="flex justify-center px-6 pb-10 pt-14" data-testid="board-filtered-empty">
+    <div className="flex justify-center px-6 pb-10 pt-14" data-testid={testId}>
       <div className="flex w-[330px] flex-col items-center rounded-[var(--radius-xl)] bg-[var(--bg-secondary)] p-[36px_24px] text-center shadow-[var(--shadow-card)]">
         <div
           className="grid size-16 place-items-center rounded-[22px] bg-[var(--fill-tertiary)] text-[var(--text-tertiary)]"
@@ -976,7 +1057,7 @@ function FilteredEmptyCard({ count, onClear }: { count: number; onClear: () => v
         <p className="mt-1.5 text-[14px] leading-[1.5] text-[var(--text-tertiary)]">{caption}</p>
         <button
           type="button"
-          data-testid="board-clear-filters"
+          data-testid={clearTestId}
           onClick={onClear}
           className="focus-ring mt-3 rounded-full px-2.5 py-1 text-[13px] font-semibold text-[var(--accent)] outline-none hover:bg-[var(--accent-fill)]"
         >

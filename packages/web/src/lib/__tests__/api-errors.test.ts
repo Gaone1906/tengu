@@ -11,6 +11,38 @@ const { api, ApiError, TodoApiError } = await import("../api")
 describe("typed API errors", () => {
   beforeEach(() => authFetch.mockReset())
 
+  it("posts every rich-create field exactly once", async () => {
+    authFetch.mockResolvedValue(new Response(JSON.stringify({
+      workItem: { id: "OPS-7", title: "Ship the ledger" },
+    }), { status: 201, headers: { "Content-Type": "application/json" } }))
+
+    await api.createWorkItem({
+      title: "Ship the ledger",
+      body: "Keep the board intact.",
+      acceptance: "List and board both work.",
+      department: "operations",
+      priority: 3,
+      dueAt: "2026-08-12T12:00:00.000Z",
+      parentId: "OPS-2",
+      labels: ["lbl-design", "lbl-release"],
+    })
+
+    expect(authFetch).toHaveBeenCalledTimes(1)
+    const [path, fetchInit] = authFetch.mock.calls[0] as [string, RequestInit]
+    expect(path).toBe("/api/work-items")
+    expect(fetchInit.method).toBe("POST")
+    expect(JSON.parse(String(fetchInit.body))).toEqual({
+      title: "Ship the ledger",
+      body: "Keep the board intact.",
+      acceptance: "List and board both work.",
+      department: "operations",
+      priority: 3,
+      dueAt: "2026-08-12T12:00:00.000Z",
+      parentId: "OPS-2",
+      labels: ["lbl-design", "lbl-release"],
+    })
+  })
+
   it("retains HTTP status and an optional machine code without making diagnostics UI copy", async () => {
     authFetch.mockResolvedValue(new Response(JSON.stringify({
       code: "WORK_ITEM_VERSION_CONFLICT",

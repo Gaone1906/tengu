@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useLocation, useNavigate, useParams } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { ChevronDown } from "lucide-react"
 import {
   api,
   ApiError,
@@ -32,22 +31,19 @@ import { PropsRail } from "./props-rail"
 import { ChipCluster } from "./chip-cluster"
 import { useTaskPickers } from "./use-task-pickers"
 import { BodyEditor } from "./body-editor"
-import { AcceptanceChecklist, parseAcceptance } from "./acceptance"
+import { AcceptanceChecklist } from "./acceptance"
 import { SubTasksSection } from "./subtasks"
 import { RelationsSection } from "./relations"
 import { AttachmentsSection } from "./attachments"
 import { ActivitySection } from "./activity"
 
-/* Variant A keeps the Todo's live conversation on the page and folds its
- * document sections behind one Details row. Core working properties stay in
- * the header; the full editor and less-frequent properties remain one tap
- * away. The URL is still the Todo, and back restores the board's scroll. */
+/* Variant A reads like a work document: the editable spine is always present,
+ * with a persistent property rail on wide screens and the same properties
+ * following the document on mobile. The URL is still the Todo, and back
+ * restores the list/board scroll position. */
 
 const MOBILE_QUERY = "(max-width: 700px)"
 
-function wordCount(text: string | null): number {
-  return text?.trim() ? text.trim().split(/\s+/).length : 0
-}
 function useIsTaskMobile(): boolean {
   const [mobile, setMobile] = useState(
     () => typeof window !== "undefined" && (window.matchMedia?.(MOBILE_QUERY).matches ?? false),
@@ -298,21 +294,6 @@ export default function TaskPage() {
   )
 
   const working = detail ? workingElapsed(detail) : null
-  const [detailsOpen, setDetailsOpen] = useState(false)
-  const detailSummary = useMemo(() => {
-    if (!item) return ""
-    const acceptance = parseAcceptance(item.acceptance)
-    const checked = acceptance.filter((line) => line.checked).length
-    const subTasks = itemNode?.children?.length ?? 0
-    const attachments = (attachmentsQuery.data ?? []).filter((attachment) => attachment.commentId === null).length
-    const bodyWords = wordCount(item.body)
-    return [
-      acceptance.length > 0 ? `Acceptance ${checked}/${acceptance.length}` : null,
-      `${subTasks} sub-task${subTasks === 1 ? "" : "s"}`,
-      `${attachments} attachment${attachments === 1 ? "" : "s"}`,
-      `body ${bodyWords} word${bodyWords === 1 ? "" : "s"}`,
-    ].filter(Boolean).join(" · ")
-  }, [item, itemNode, attachmentsQuery.data])
 
   // ── Not found / loading ───────────────────────────────────────────────────
   if (!id) {
@@ -407,53 +388,55 @@ export default function TaskPage() {
             className={
               mobile
                 ? "flex flex-col px-4 pb-[calc(96px+var(--safe-bottom,0px))] pt-1.5"
-                : "w-full max-w-[920px] px-10 pb-8 pt-2"
+                : "grid w-full max-w-[920px] grid-cols-1 gap-x-9 px-10 pb-8 pt-2 lg:grid-cols-[minmax(0,1fr)_260px]"
             }
           >
-            <div className="min-w-0">
-              {detail && (
+            {detail && (
+              <div className={mobile ? "" : "lg:col-span-2"}>
                 <TaskBanner
-                  detail={detail}
-                  byName={byName}
-                  focusReason={!!routeState.focusBannerReason}
-                  busy={setStatus.isPending || decide.isPending}
-                  onCommitReason={commitBannerReason}
-                  onApprove={(choice) => runDecision("approve", undefined, choice)}
-                  onReject={(note) => runDecision("reject", note || undefined)}
-                  actions={
-                    detail.workItem.status === "blocked" ? (
-                      <button
-                        type="button"
-                        data-testid="task-banner-unblock"
-                        onClick={() => pickers.setOpenPicker("status")}
-                        className="focus-ring min-h-8 rounded-full bg-[var(--fill-tertiary)] px-3 text-[12.5px] font-semibold text-[var(--text-secondary)] outline-none hover:bg-[var(--fill-secondary)]"
-                      >
-                        Unblock…
-                      </button>
-                    ) : detail.workItem.status === "escalated" ? (
-                      <>
+                    detail={detail}
+                    byName={byName}
+                    focusReason={!!routeState.focusBannerReason}
+                    busy={setStatus.isPending || decide.isPending}
+                    onCommitReason={commitBannerReason}
+                    onApprove={(choice) => runDecision("approve", undefined, choice)}
+                    onReject={(note) => runDecision("reject", note || undefined)}
+                    actions={
+                      detail.workItem.status === "blocked" ? (
                         <button
                           type="button"
-                          data-testid="task-banner-route"
+                          data-testid="task-banner-unblock"
                           onClick={() => pickers.setOpenPicker("status")}
                           className="focus-ring min-h-8 rounded-full bg-[var(--fill-tertiary)] px-3 text-[12.5px] font-semibold text-[var(--text-secondary)] outline-none hover:bg-[var(--fill-secondary)]"
                         >
-                          Route…
+                          Unblock…
                         </button>
-                        <button
-                          type="button"
-                          data-testid="task-banner-reassign"
-                          onClick={() => pickers.setOpenPicker("assignee")}
-                          className="focus-ring min-h-8 rounded-full px-3 text-[12.5px] font-semibold text-[var(--text-tertiary)] outline-none hover:bg-[var(--fill-tertiary)]"
-                        >
-                          Reassign…
-                        </button>
-                      </>
-                    ) : undefined
-                  }
-                />
-              )}
+                      ) : detail.workItem.status === "escalated" ? (
+                        <>
+                          <button
+                            type="button"
+                            data-testid="task-banner-route"
+                            onClick={() => pickers.setOpenPicker("status")}
+                            className="focus-ring min-h-8 rounded-full bg-[var(--fill-tertiary)] px-3 text-[12.5px] font-semibold text-[var(--text-secondary)] outline-none hover:bg-[var(--fill-secondary)]"
+                          >
+                            Route…
+                          </button>
+                          <button
+                            type="button"
+                            data-testid="task-banner-reassign"
+                            onClick={() => pickers.setOpenPicker("assignee")}
+                            className="focus-ring min-h-8 rounded-full px-3 text-[12.5px] font-semibold text-[var(--text-tertiary)] outline-none hover:bg-[var(--fill-tertiary)]"
+                          >
+                            Reassign…
+                          </button>
+                        </>
+                      ) : undefined
+                    }
+                  />
+              </div>
+            )}
 
+            <main className="min-w-0">
               {mobile && (
                 <div
                   className="mb-1 text-[12px] tracking-[.04em] text-[var(--text-tertiary)]"
@@ -475,101 +458,78 @@ export default function TaskPage() {
                   byName={byName}
                   mobile={mobile}
                   working={hasLiveSession ? working : null}
-                  onOpenPicker={(key) => {
-                    if (!mobile) setDetailsOpen(true)
-                    pickers.setOpenPicker(key)
-                  }}
+                  onOpenPicker={pickers.setOpenPicker}
                 />
               )}
 
-              <button
-                type="button"
-                data-testid="task-details-toggle"
-                aria-expanded={detailsOpen}
-                aria-controls="task-details-content"
-                onClick={() => setDetailsOpen((open) => !open)}
-                className="focus-ring mt-4 flex min-h-10 w-full items-center gap-2.5 rounded-[var(--radius-lg)] bg-[var(--fill-quaternary)] px-3.5 text-left text-[13px] text-[var(--text-secondary)] outline-none hover:bg-[var(--fill-tertiary)]"
+              <div
+                className="-mx-2 mt-7 rounded-[10px] px-2 py-1.5 transition-colors hover:bg-[var(--fill-quaternary)] focus-within:bg-[var(--fill-quaternary)]"
+                data-testid="task-body"
               >
-                <span className="font-semibold">Details</span>
-                <span className="min-w-0 flex-1 truncate text-[var(--text-tertiary)]">{detailSummary}</span>
-                <ChevronDown
-                  size={13}
-                  strokeWidth={2}
-                  aria-hidden
-                  className={`flex-none text-[var(--text-quaternary)] transition-transform duration-150 ${detailsOpen ? "rotate-180" : ""}`}
-                />
-              </button>
-
-              <div id="task-details-content" data-testid="task-details-content" hidden={!detailsOpen}>
-                {detail && (
-                  <div className={`mt-6 ${mobile ? "" : "max-w-[320px]"}`}>
-                    <PropsRail
-                      detail={detail}
-                      byName={byName}
-                      departments={departments.data}
-                      rowFor={pickers.rowFor}
-                    />
-                  </div>
-                )}
-
-                <div
-                  className="-mx-2 mt-6 rounded-[10px] px-2 py-1.5 transition-colors hover:bg-[var(--fill-quaternary)] focus-within:bg-[var(--fill-quaternary)]"
-                  data-testid="task-body"
-                >
-                  {item && (
-                    <BodyEditor
-                      body={item.body}
-                      editable
-                      isDark={isDark}
-                      onCommit={(markdown) => pickers.patchField({ body: markdown })}
-                    />
-                  )}
-                </div>
-
                 {item && (
-                  <section className="mt-2">
-                    <div
-                      className="mb-3 mt-8 text-[11px] font-semibold uppercase tracking-[.15em] text-[var(--text-secondary)]"
-                      style={{ fontFamily: "var(--font-code)" }}
-                    >
-                      Acceptance
-                    </div>
-                    <AcceptanceChecklist
-                      acceptance={item.acceptance}
-                      editable
-                      onCommit={(next) => pickers.patchField({ acceptance: next })}
-                    />
-                  </section>
-                )}
-
-                {item && (
-                  <>
-                    <SubTasksSection
-                      node={itemNode}
-                      parentDepth={item.depth ?? 0}
-                      employees={org.data?.employees ?? []}
-                      byName={byName}
-                      mobile={mobile}
-                      onOpenChild={openTodo}
-                      onChildStatus={(childId, status) => childStatus.mutate({ childId, status })}
-                      onChildAssign={(childId, assignee) => childAssign.mutate({ childId, assignee })}
-                      onAddSubTask={(title) => addSubTask.mutate(title)}
-                    />
-                    <RelationsSection
-                      id={item.id}
-                      relations={detail?.relations ?? []}
-                      onAdd={(srcId, kind, dstId) => addRelation.mutate({ srcId, kind, dstId })}
-                      onRemove={(relation) => removeRelation.mutate(relation)}
-                    />
-                    <AttachmentsSection
-                      attachments={attachmentsQuery.data ?? []}
-                      byName={byName}
-                      onUpload={(files) => uploadAttachments.mutate(files)}
-                      onRemove={(attachment) => removeAttachment.mutate(attachment)}
-                    />
-                  </>
+                  <BodyEditor
+                    body={item.body}
+                    editable
+                    isDark={isDark}
+                    onCommit={(markdown) => pickers.patchField({ body: markdown })}
+                  />
                 )}
               </div>
+
+              {item && (
+                <section className="mt-2">
+                  <div
+                    className="mb-3 mt-8 text-[11px] font-semibold uppercase tracking-[.15em] text-[var(--text-secondary)]"
+                    style={{ fontFamily: "var(--font-code)" }}
+                  >
+                    Acceptance
+                  </div>
+                  <AcceptanceChecklist
+                    acceptance={item.acceptance}
+                    editable
+                    onCommit={(next) => pickers.patchField({ acceptance: next })}
+                  />
+                </section>
+              )}
+
+              {item && (
+                <>
+                  <SubTasksSection
+                    node={itemNode}
+                    parentDepth={item.depth ?? 0}
+                    employees={org.data?.employees ?? []}
+                    byName={byName}
+                    mobile={mobile}
+                    onOpenChild={openTodo}
+                    onChildStatus={(childId, status) => childStatus.mutate({ childId, status })}
+                    onChildAssign={(childId, assignee) => childAssign.mutate({ childId, assignee })}
+                    onAddSubTask={(nextTitle) => addSubTask.mutate(nextTitle)}
+                  />
+                  <RelationsSection
+                    id={item.id}
+                    relations={detail?.relations ?? []}
+                    onAdd={(srcId, kind, dstId) => addRelation.mutate({ srcId, kind, dstId })}
+                    onRemove={(relation) => removeRelation.mutate(relation)}
+                  />
+                  <AttachmentsSection
+                    attachments={attachmentsQuery.data ?? []}
+                    byName={byName}
+                    onUpload={(files) => uploadAttachments.mutate(files)}
+                    onRemove={(attachment) => removeAttachment.mutate(attachment)}
+                  />
+                </>
+              )}
+
+              {mobile && detail && (
+                <div className="mt-8 border-t border-[var(--separator)] pt-5">
+                  <PropsRail
+                    detail={detail}
+                    byName={byName}
+                    departments={departments.data}
+                    rowFor={pickers.rowFor}
+                  />
+                </div>
+              )}
 
               {detail && (
                 <ActivitySection
@@ -580,7 +540,18 @@ export default function TaskPage() {
                   announce={announce}
                 />
               )}
-            </div>
+            </main>
+
+            {!mobile && detail && (
+              <aside className="min-w-0 pt-1 lg:sticky lg:top-3 lg:self-start">
+                <PropsRail
+                  detail={detail}
+                  byName={byName}
+                  departments={departments.data}
+                  rowFor={pickers.rowFor}
+                />
+              </aside>
+            )}
           </div>
         </div>
       </div>
@@ -623,10 +594,11 @@ function TaskPageSkeleton({ mobile, bannerExpected }: { mobile: boolean; bannerE
         <span className={`h-full w-[116px] rounded-full ${pulse}`} />
         <span className={`h-full w-[84px] rounded-full ${pulse}`} />
       </div>
-      <div
-        data-testid="task-details-toggle"
-        className={`mt-4 h-10 w-full rounded-[var(--radius-lg)] ${pulse}`}
-      />
+      <div data-testid="task-document-skeleton" className="mt-7 space-y-3">
+        <div className={`h-3 w-full rounded-md ${pulse}`} />
+        <div className={`h-3 w-[88%] rounded-md ${pulse}`} />
+        <div className={`h-3 w-[72%] rounded-md ${pulse}`} />
+      </div>
       <div data-testid="task-activity" className="pt-3">
         <div className={`h-4 w-20 rounded-md ${pulse}`} />
         <div className={`mt-3 h-[82px] w-full rounded-[var(--radius-lg)] ${pulse}`} />

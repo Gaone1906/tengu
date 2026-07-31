@@ -1147,6 +1147,8 @@ export const api = {
     assignee?: string
     priority?: number
     dueAt?: string
+    acceptance?: string
+    labels?: string[]
   }) =>
     post<{ workItem: WorkItemFullWire }>("/api/work-items", input),
   /** Todos v2 slice 6: roster-validated assignment (backlog → assigned). */
