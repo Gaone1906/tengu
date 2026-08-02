@@ -38,8 +38,8 @@ function fixture(index: number): ActivityEventInput {
 }
 
 // A wall-clock benchmark, and its budgets are calibrated on POSIX CI. Measured
-// on Windows: seeding the 100k-row corpus takes ~80s against a 60s hook budget,
-// and once that is raised the filtered query lands at 343ms against a 300ms
+// on Windows: seeding the 100k-row corpus takes ~80s, and the filtered query
+// lands at 343ms against a 300ms
 // budget. Both are the platform, not a regression — sqlite durability behaviour
 // plus Defender watching the temp directory.
 //
@@ -64,7 +64,7 @@ describe.skipIf(process.platform === "win32").sequential("activity query perform
         appendActivityEvent(fixture(index), { database, idFactory: () => idFor(index) });
       }
     })();
-  }, 60_000);
+  }, 120_000);
 
   afterAll(() => {
     database.close();
