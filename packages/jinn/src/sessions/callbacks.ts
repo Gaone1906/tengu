@@ -22,6 +22,7 @@ import type { SessionDelivery, SessionDeliveryPayload } from "../shared/types.js
 
 export const CALLBACK_DELIVERY_RETRY_DELAYS_MS = [1_000, 5_000, 30_000] as const;
 export const CALLBACK_DELIVERY_MAX_ATTEMPTS = CALLBACK_DELIVERY_RETRY_DELAYS_MS.length + 1;
+export const CALLBACK_PREVIEW_MAX_CHARS = 4_000;
 const CALLBACK_DELIVERY_ATTEMPT_LEASE_MS = 60_000;
 
 let callbackRetryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -417,12 +418,20 @@ async function _sendNotification(
     }
   } else {
     const raw = (result.result || "").trim() || "(no output)";
-    const llmPreview = raw.length > 500 ? raw.slice(0, 500) + "…" : raw;
-    message =
-      `📩 Employee "${employeeName}" replied in child session ${childId}.\n\n` +
-      `Reply preview:\n${llmPreview}\n\n` +
-      `To read the full reply: read_session { sessionId: "${childId}", last: N } · ` +
-      `to follow up: send_to_session { sessionId: "${childId}", message: "<message>" }`;
+    if (raw.length > CALLBACK_PREVIEW_MAX_CHARS) {
+      const inlineReply = raw.slice(0, CALLBACK_PREVIEW_MAX_CHARS) + "…";
+      message =
+        `📩 Employee "${employeeName}" replied in child session ${childId}.\n\n` +
+        `Reply (clipped to first ${CALLBACK_PREVIEW_MAX_CHARS.toLocaleString("en-US")} of ${raw.length.toLocaleString("en-US")} characters):\n${inlineReply}\n\n` +
+        `The full reply is intact in child session ${childId}; nothing was lost. ` +
+        `Read it with read_session { sessionId: "${childId}", last: N } rather than asking the child to resend, shorten, or compress it.`;
+    } else {
+      message =
+        `📩 Employee "${employeeName}" replied in child session ${childId}.\n\n` +
+        `Reply:\n${raw}\n\n` +
+        `To read the reply in context: read_session { sessionId: "${childId}", last: N } · ` +
+        `to follow up: send_to_session { sessionId: "${childId}", message: "<message>" }`;
+    }
     displayMessage = `📩 ${employeeName} replied\n${_clean(raw, 220)}`;
     if (isTerminal) {
       notificationMeta = childNotificationMeta("child-reply", childSession, raw);

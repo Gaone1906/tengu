@@ -423,21 +423,53 @@ describe("notifyParentSession", () => {
     expect(typeof body.block.block.payload.repliedAt).toBe("number");
   });
 
-  it("caps the LLM preview at 500 chars and keeps the display preview shorter", async () => {
-    const longResult = "x".repeat(600);
+  it("delivers a 600-character reply whole to the parent engine", async () => {
+    const result = "x".repeat(600);
     const child = makeSession();
 
-    notifyParentSession(child, { result: longResult });
+    notifyParentSession(child, { result });
     await new Promise((r) => setTimeout(r, 50));
 
     expect(fetchSpy).toHaveBeenCalledOnce();
     const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
-    // LLM preview: 500 chars + ellipsis, never the 501st
-    expect(body.message).toContain("x".repeat(500) + "…");
-    expect(body.message).not.toContain("x".repeat(501));
-    // Display banner is a tighter, truncated version
-    expect(body.displayMessage.length).toBeLessThan(body.message.length);
-    expect(body.displayMessage).toContain("…");
+    expect(body.message).toContain(`Reply:\n${result}\n\n`);
+    expect(body.message).not.toContain("preview");
+    expect(body.message).not.toContain("clipped");
+    expect(body.message).not.toContain("…");
+  });
+
+  it("delivers an exact 4,000-character reply without clipping or preview framing", async () => {
+    const result = `${"x".repeat(3_999)}z`;
+    const child = makeSession();
+
+    notifyParentSession(child, { result });
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body.message).toContain(`Reply:\n${result}\n\n`);
+    expect(body.message).not.toContain("preview");
+    expect(body.message).not.toContain("clipped");
+    expect(body.message).not.toContain("…");
+  });
+
+  it("clips replies over 4,000 characters with an honest recovery instruction", async () => {
+    const result = `${"x".repeat(4_000)}z`;
+    const child = makeSession();
+
+    notifyParentSession(child, { result });
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body.message).toContain(
+      `Reply (clipped to first 4,000 of 4,001 characters):\n${"x".repeat(4_000)}…\n\n`,
+    );
+    expect(body.message).not.toContain(result);
+    expect(body.message).toContain("The full reply is intact in child session child-001; nothing was lost.");
+    expect(body.message).toContain(
+      'Read it with read_session { sessionId: "child-001", last: N } rather than asking the child to resend, shorten, or compress it.',
+    );
   });
 
   it("caps durable full callback messages at 16k without changing the 220-char display preview", async () => {
@@ -742,8 +774,8 @@ describe("notifyParentSession — talk parent (voice-friendly message)", () => {
     const raw = "Some result";
     const expectedMessage =
       `📩 Employee "${employeeName}" replied in child session ${childId}.\n\n` +
-      `Reply preview:\n${raw}\n\n` +
-      `To read the full reply: read_session { sessionId: "${childId}", last: N } · ` +
+      `Reply:\n${raw}\n\n` +
+      `To read the reply in context: read_session { sessionId: "${childId}", last: N } · ` +
       `to follow up: send_to_session { sessionId: "${childId}", message: "<message>" }`;
     expect(body.message).toBe(expectedMessage);
     expect(body.message).not.toContain("/api/sessions");
