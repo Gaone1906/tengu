@@ -1,140 +1,196 @@
-# ICI-660 — Todo detail: live-use feedback round
+# ICI-666 — `jinn-simplify`, the ultra workflow
 
-Base: `main` @ `b6f4bd30838dd006969be114886e36fe40941faa`
-Branch: `build/ICI-660-detail-polish`
+Base: `main` @ `492cbc18dcc7fc883f8bcae1dcc4bac1bccf46dc`
+Branch: `build/ICI-666-simplify-workflow`
 
-The list/board/create/detail redesign already merged (`b6f4bd30`). The operator then
-used it live and filed three defects (comment `wic_04a6c376b9a3`, 2026-07-31, with
-screenshot `Screenshot 2026-07-31 at 15.52.08.png`). This round fixes exactly those
-three, on top of merged `main`.
+## What the operator asked for
 
----
+A second build-style pipeline, deliberately expensive, running on Claude models (Opus 5
+and Fable 5). It is armed by enabling it and runs hourly while enabled — the on/off switch
+is "do I have spare tokens this week". Each run picks **one** area of the Jinn project to
+improve, writes **hard, mechanically checkable constraints before touching any code** so
+the result is a *simplification* rather than another layer, and runs PLAN → IMPLEMENT →
+VERIFY like `jinn-build`. It asks for **no approval**. When a run succeeds it opens a
+**pull request** with a detailed summary and leaves its Todo in `in_review`.
 
-## 1. Desktop detail page dumps everything on the left
+## Where the deliverable lives — read this before reviewing the diff
 
-> "Todo detail page on desktop shows everything in left hand side. The whole right
-> hand side is empty. see screenshot."
+A Workflow in Jinn is **company state, not repository code**. `jinn-build` itself does not
+exist anywhere under `packages/**`; it lives in the Workflow store and is authored through
+`create_workflow` / `update_workflow`. `jinn-simplify` is authored the same way.
 
-**Cause.** `task-page.tsx:391` builds the document grid as
-`w-full max-w-[920px] … lg:grid-cols-[minmax(0,1fr)_260px]` with no horizontal
-centring, and `crumb-bar.tsx` pads `px-10` across the full width. On any viewport
-wider than ~920px + sidebar the page hugs the left edge and everything right of the
-property rail is dead space. The screenshot shows it at ~3440px: content ends around
-x≈950, the remaining ~2500px is empty. The skeleton container at `task-page.tsx:356`
-has the same defect and must move with it.
+So the acceptance criteria below are checked against the **live definition**
+(`get_workflow { workflowId: "jinn-simplify" }`), not against a file. The branch diff is
+intentionally `PLAN.md` only — that file is already tracked on `main` and is this
+pipeline's existing convention.
 
-**Fix.** One centred content container shared by the crumb bar and the document grid,
-so the page keeps a single spine (design law: *one content spine per page*) and the
-gutters are symmetric. Widen the cap so the rail is not crammed against the reading
-column: document column + `gap-x-9` + 260px rail inside roughly `max-w-[1080px]`,
-`mx-auto`. Mobile (`< 700px`) is untouched — already a single column.
+Explicitly rejected: committing the definition as JSON under `packages/**` plus an
+installer script. It would be a second source of truth for something the store already
+owns, it would ship a definition full of one operator's local paths to strangers, and
+inventing a new repo convention for a single file is exactly the over-engineering this
+workflow is being built to fight.
 
-The crumb bar must move with the grid; leaving it full-width while the document
-centres would break the spine and is not an acceptable outcome.
+## The graph
 
-Files: `packages/web/src/routes/todos/task-page/task-page.tsx` (grid :391, skeleton
-:356), `packages/web/src/routes/todos/task-page/crumb-bar.tsx` (its `px-10` becomes
-the shared container's).
+Trigger `schedule`, cron `0 * * * *`, timezone `Europe/Sofia`. Created **disabled**.
 
-## 2. The ID should copy when clicked
+```
+trigger ─ survey ─ worth-doing? ─(no)─ nothing-found (end)
+                        │
+                       (yes)
+                        │
+                    constrain
+                        │
+                   implement-1 ─ verify-1 ─ verdict-1 ─(ship)──┐
+                        ┌──────────(rework)──────┘             │
+                   implement-2 ─ verify-2 ─ verdict-2 ─(ship)──┤
+                                               (rework)        │
+                                                  │        shippable
+                                              handback         │
+                                                  │         deliver
+                                            stopped (end)      │
+                                                          delivered (end)
+```
 
-> "On click of id in the detail page should copy it."
+No approval node anywhere. Mirrors `jinn-build` minus the variant gate and the merge gate.
 
-Today the ID is inert: a `<span>` in the desktop crumb (`crumb-bar.tsx:96-101`) and a
-plain `<div>` on mobile (`task-page.tsx:441-447`). Copying is buried in the ⋯ menu
-(`crumb-bar.tsx:131-137`).
+### Node roles, employees and models
 
-**Fix.** Both ID renderings become buttons that copy the bare ID (`ICI-660`, not the
-URL — the link button beside them already does URLs) and show a short visible
-confirmation. Keep the ⋯ "Copy ID" item: it is the menu path and removing it was not
-asked for.
+| Node | Employee | Engine / model / effort | Job |
+| --- | --- | --- | --- |
+| `survey` | `jinn-dev` | claude / **opus** / high | Pick exactly ONE target. Create the Todo. |
+| `constrain` | `jinn-verifier` | claude / **fable** / high | Turn it into a budget the implementer cannot argue with. |
+| `implement-1` | `jinn-dev` | claude / **opus** / high | Build inside the budget. |
+| `verify-1` | `jinn-verifier` | claude / **fable** / high | Independent review plus the budget check. |
+| `implement-2` | `jinn-dev` | claude / **opus** / high | Fix round-1 Blockers and Majors only. |
+| `verify-2` | `jinn-verifier` | claude / **fable** / high | Scope-locked final check. |
+| `deliver` | `jinn-dev` | claude / **opus** / high | Push, open the PR, move the Todo to `in_review`. |
+| `handback` | `jinn-verifier` | claude / **fable** / low | Honest failure note, Todo → `escalated`. |
 
-Files: `crumb-bar.tsx`, `task-page.tsx`.
+Alternating Opus and Fable across the propose/check pairs is deliberate: the model that
+writes the budget is not the model that spends it, and the model that writes the code is
+not the model that judges it.
 
-## 3. The image preview is a dead end
+### The Todo
 
-> "on click and open of screenshot preview should allow me to easily click out and
-> close the preview or allow me to go back and forth with some arrow buttons or
-> keyboard arrows for quick access & preview. it should also allow me to zoom in on
-> the images."
+A schedule-triggered run has no Todo of its own, so `survey` creates one
+(`create_work_item`, label `simplify`) and emits `todoId`. Every later node addresses that
+Todo, which also makes the Todo ledger this workflow's memory.
 
-`AttachmentLightbox` (`attachment-preview.tsx:104-155`) shows one image with close +
-download. Three gaps:
+### Not repeating itself, and not piling up
 
-- **Click-out.** `DialogContent` is a `min(1100px, 100vw-96px)` box; a click beside the
-  image lands inside that box and does nothing. Only the thin true backdrop closes.
-- **No navigation.** `useAttachmentPreview` holds a single `active` attachment with no
-  notion of the set it came from.
-- **No zoom.**
+`survey` reads the existing `simplify` Todos first and must:
 
-**Fix.**
-- The lightbox surface fills the viewport; a pointer press anywhere that is not the
-  image, the toolbar, or an arrow closes it. Esc keeps working; focus returns to the
-  tile that opened it.
-- `open()` takes the previewable set alongside the attachment. Gallery scope is the
-  group you opened from: the item-level image grid (`attachments.tsx`) or that one
-  comment's chips (`activity.tsx` `AttachmentChips`) — already separate hook
-  instances, so this is honest rather than an invented cross-page gallery.
-- ‹ › buttons plus ← → keys move within the set, wrapping at the ends, absent when the
-  set has one image. Navigating resets zoom.
-- Zoom: a toolbar control and double-click on the image toggle fit ↔ zoomed;
-  `+` / `-` / `0` on the keyboard; drag to pan while zoomed; a click on the image while
-  zoomed pans rather than closing. Wheel and pinch zoom are **out of scope**.
-- Tap targets ≥34px at 390px (Jinn Taste §2), tokens only, both themes.
+- pick an area no open or recently closed `simplify` Todo already covers;
+- emit `worth: no` and end the run cleanly when it cannot find one worth the money — an
+  hourly job that always finds something will manufacture work;
+- emit `worth: no` when two or more `simplify` Todos are already `executing`, capping
+  concurrency at two overlapping runs on one checkout.
 
-Files: `attachment-preview.tsx` (hook + lightbox), `attachments.tsx` and `activity.tsx`
-(pass their set to `open`).
+### What `survey` is looking for
 
----
+The operator named three flavours, and `survey` picks exactly one target from them:
+
+1. **Over-engineering to delete** — abstractions with one caller, configuration nobody
+   sets, indirection that costs more to read than it saves.
+2. **Blended concerns** — enumerate the core pieces (Todos, Workflows, Triggers, Sessions,
+   Employees, Engines, Connectors, Cron, Knowledge, gateway HTTP, web UI) and find two that
+   share code, storage, or vocabulary where they should be separate. The operator's own
+   example is Todos versus Workflows.
+3. **Something that does not work** — a dead path, a silently swallowed failure, prose the
+   code has already falsified.
+
+### The constraints — the actual point of the workflow
+
+`constrain` emits the budget as data, and every field is something a shell command can
+settle. Defaults it must justify departing from:
+
+- `netLineDelta` ≤ 0 — a simplification removes at least as much as it adds.
+- `maxFilesTouched` — a small integer, stated.
+- `maxNewFiles` — 0, unless splitting an oversized file is the whole task.
+- `maxFileLines` — no file may end the change longer than this, and no touched file may
+  grow at all.
+- `noNewDependencies` — `package.json` and the lockfile untouched.
+- `noNewConfigOptions`, `noNewPublicExports` — no new surface for a case nobody has.
+- `noSingleCallerAbstraction` — no helper, interface, or option introduced with fewer than
+  two real callers.
+- Behaviour preserved: `pnpm typecheck`, `pnpm test`, `pnpm build` green, and no test
+  deleted unless the thing it tested was deleted.
+
+`constrain` also emits `budgetCommand`: a literal shell command printing the measured
+numbers, so `verify-1` settles the budget by running it rather than by having an opinion.
+
+### Delivery
+
+`deliver` pushes the branch to `origin` and runs `gh pr create` with a summary stating the
+area, why it was over-engineered, the budget, and the measured result against that budget.
+It then sets the Todo to `in_review`. It does not merge, and there is no approval gate
+anywhere in the graph — that is what the operator asked for. The PR is public; that is the
+operator's explicit instruction, recorded here so it is a decision rather than a surprise.
+
+Every phase inherits `jinn-build`'s production-safety block verbatim (never port 7777,
+never `~/.jinn`, never a gateway without a throwaway `JINN_HOME` and a non-prod port, never
+kill a process it did not start, isolated `AGENT_BROWSER_PROFILE`) and its worktree
+discipline, with paths `~/Projects/.worktrees/jinn-simplify-<todoId>` and branch
+`simplify/<todoId>-<slug>` so concurrent runs cannot collide.
 
 ## Acceptance criteria
 
-1. At 1440×900 the detail page's content is horizontally centred: the left gutter and
-   the right gutter outside the property rail are within 8px of each other, and the
-   crumb bar's first glyph shares its x with the title. Proved by screenshot at
-   1440×900 **and** 1920×1080.
-2. At 390×844 the detail page layout is unchanged from `main` — single column, no
-   centring container, no new horizontal scroll.
-3. Clicking the ID in the desktop crumb bar writes exactly `ICI-660` (bare ID, no URL,
-   no whitespace) to the clipboard and shows a visible confirmation; clicking the
-   mobile ID line does the same. The ⋯ menu's "Copy ID" still works.
-4. With ≥2 previewable images in the item-level grid: opening one and pressing `→`
-   shows the next; `←` from the first wraps to the last; the ‹ › buttons do the same.
-   With exactly one image the arrows are absent.
-5. A pointer press on empty space beside the image closes the preview; a pointer press
-   on the image itself does not. Esc closes. Focus returns to the tile that opened it.
-6. Zoom: the toolbar control and double-click both toggle zoomed state; `+`/`-`/`0`
-   change it; while zoomed the image can be dragged; navigating to another image
-   returns to fit.
-7. A comment's chips form their own gallery — arrows move only within that comment's
-   attachments, never into the item-level set.
-8. `pnpm typecheck`, `pnpm test`, `pnpm lint`, `pnpm build` all green, with every
-   existing `task-page.test.tsx` and `task-sections.test.tsx` case still passing.
-9. Screenshot matrix on an isolated sandbox (port ≥7778, never 7777/7788): detail page
-   and open lightbox, at 1440×900 and 390×844, light and dark.
+1. `get_workflow { workflowId: "jinn-simplify" }` returns a definition whose only trigger
+   node is `kind: "schedule"` with `cron: "0 * * * *"`, and whose `enabled` is `false`.
+2. The definition contains **zero** nodes of type `approval`.
+3. Every `employee` node sets `engine: claude`, and the set of models across those nodes is
+   exactly `{opus, fable}` — both present, nothing else.
+4. The definition contains employee nodes for the phases `survey`, `constrain`,
+   `implement-1`, `verify-1`, `implement-2`, `verify-2`, `deliver` and `handback`, wired so
+   that a `rework` verdict in round 1 reaches `implement-2`, a `rework` verdict in round 2
+   reaches `handback` and never a third implementation round, and a `ship` verdict in
+   either round reaches `deliver`.
+5. `survey`'s declared output includes `todoId` and `worth`, and a condition node routes
+   `worth != yes` to an `end` node without reaching `constrain`. The `survey` prompt
+   instructs it to create the Todo with the `simplify` label and to skip areas already
+   covered by existing `simplify` Todos.
+6. `constrain`'s declared output includes `netLineDelta`, `maxFilesTouched`, `maxNewFiles`,
+   `maxFileLines`, `budgetCommand` and `acceptance`, and `implement-1`, `implement-2`,
+   `verify-1` and `verify-2` each interpolate the constraint fields into their prompts.
+7. `verify-1`'s prompt requires it to run `budgetCommand`, quote the real output, and
+   return `rework` when the measured result exceeds the budget — a budget breach is a
+   Blocker, not a note.
+8. `deliver`'s prompt pushes the branch, opens a PR with `gh pr create`, and sets the Todo
+   to `in_review`; `handback`'s sets it to `escalated`. Neither ever sets `done`.
+9. Every employee node's prompt contains the production-safety block: no port 7777, no
+   `~/.jinn`, no gateway without a throwaway `JINN_HOME` and a non-production port, and no
+   killing a process it did not start.
+10. The definition saves with zero validation issues, and the run history for
+    `jinn-simplify` is empty — it must not have been enabled or fired during this ticket.
 
-## Tests
+## Verification
 
-- `packages/web/src/routes/todos/__tests__/task-sections.test.tsx` — lightbox: arrow
-  key and button navigation with wrap; arrows absent for a single image; click-outside
-  closes and click-on-image does not; zoom toggle and reset-on-navigate; comment
-  gallery isolated from the item gallery.
-- `packages/web/src/routes/todos/__tests__/task-page.test.tsx` — ID click copies the
-  bare ID, desktop and mobile (stub `navigator.clipboard`).
-- Layout centring is a browser/screenshot check, not a vitest assertion — jsdom has no
-  layout. AC1 and AC2 are proved by measured screenshots.
+Criteria 1–9 are read directly off `get_workflow { workflowId: "jinn-simplify" }`; each is
+a property of the returned JSON, so the check is mechanical rather than a matter of taste.
+Criterion 10 is `list_workflow_runs { workflowId: "jinn-simplify" }` returning nothing.
+
+No repo tests are added, because no repo code changes. `pnpm typecheck`, `pnpm test` and
+`pnpm build` are still run on the branch to prove the `PLAN.md`-only diff broke nothing.
 
 ## Out of scope
 
-- Any gateway or API change. Web-only.
-- List and board surfaces, the create dialog, the Attention inbox.
-- Wheel/pinch zoom, a cross-section "every image on this Todo" gallery, slideshow,
-  rotate, attachment reordering.
-- Refactoring `task-page.tsx` beyond the container change.
+- Enabling the workflow. It ships disabled; arming it is the operator's call and is the
+  "I have free tokens" switch.
+- Running it end to end. Its first real run spends Claude money and opens a PR; a live
+  rehearsal is not something this ticket buys.
+- Any change under `packages/**`. No gateway, schema, or web change is needed — schedule
+  triggers, the `opus`/`fable` aliases, and Todo creation from a phase session all exist.
+- Changing `jinn-build`. The two pipelines stay separate.
+- Retiring or editing any other workflow.
 
-## Notes
+## Risks worth stating
 
-- `PLAN.md` at the repo root is the pipeline's scratch file and currently holds
-  ICI-658's plan on `main`; overwriting it is the convention, not a product change.
-- Safety: never port 7777 or 7788, never `~/.jinn`; sandbox on ≥7778 via the
-  `jinn-sandbox` skill and destroy it even if the run fails.
+- **Hourly and expensive by design.** The guards are that it ships disabled, that `survey`
+  can decline a run, and that it refuses a third concurrent run. There is no spend cap in
+  the graph itself; if the operator wants one, that is a follow-up.
+- **It opens public PRs without asking.** Explicitly requested. Worth re-reading once the
+  first PR appears.
+- **Concurrent runs share one checkout.** Per-Todo worktrees and the concurrency check hold
+  this to two, but `main` moving underneath a long run is still possible; the PR surfaces
+  the conflict rather than hiding it.
