@@ -1,0 +1,344 @@
+{
+  "schemaVersion": 1,
+  "id": "jinn-simplify",
+  "title": "Jinn Simplify",
+  "description": "Hourly, deliberately high-effort simplification pipeline for Jinn. Surveys one worthwhile target, fixes a mechanical budget before code, allows two bounded implementation rounds, gates delivery on CI, and never asks for approval.",
+  "revision": 1,
+  "enabled": false,
+  "nodes": [
+    {
+      "id": "trigger",
+      "type": "trigger",
+      "name": "Hourly while armed",
+      "config": {
+        "kind": "schedule",
+        "cron": "0 * * * *",
+        "timezone": "Europe/Sofia"
+      }
+    },
+    {
+      "id": "survey",
+      "type": "employee",
+      "name": "SURVEY",
+      "config": {
+        "employee": { "source": "fixed", "value": "jinn-dev" },
+        "prompt": "SURVEY PHASE — find one simplification worth an expensive run. Do not change code.\n\nWork against the current Jinn repository at `~/Projects/jinn` and inspect real code before deciding.\n\nFirst use `gh pr list --state open --json headRefName` to count open PRs whose head branch begins `simplify/`. The queue ceiling is 5 open `simplify/*` PRs. If the count is 5 or greater, decline immediately with `worth: no`, report the count in evidence, and do not create a Todo.\n\nThen query existing Todos carrying the `simplify` label across open states and recently closed work. Skip every area already covered by an existing `simplify` Todo; do not rename the same idea to evade that check. If two or more `simplify` Todos are already executing, decline this run.\n\nEnumerate the relevant core pieces — Todos, Workflows, Triggers, Sessions, Employees, Engines, Connectors, Cron, Knowledge, gateway HTTP, and web UI — then select exactly ONE evidence-backed target from:\n1. over-engineering that can be deleted;\n2. blended concerns that should be separated, especially vocabulary or storage confused across core pieces;\n3. a real dead path, swallowed failure, or behaviour that no longer matches its prose.\n\nPrefer deletion and clearer ownership. Do not manufacture work merely because the schedule fired. If no target is clearly worth the token cost, submit `worth: no` and do not create a Todo.\n\nWhen and only when the target is worthwhile:\n- call `create_work_item` with a specific title, evidence and intended outcome, and `labels: [\"simplify\"]`;\n- move that Todo to `executing` so the ledger reflects active work;\n- return its canonical ID as `todoId` and return `worth: yes`.\n\nDo not write code, create a branch, or create a worktree in this phase.\n\n## Production safety — absolute\n- NEVER use port 7777 or touch `~/.jinn`.\n- NEVER start or run a gateway without BOTH an explicit throwaway `JINN_HOME` and an explicit non-production port. Port 7788 is also forbidden.\n- Before starting a throwaway daemon, inspect its config and confirm its port is neither 7777 nor 7788.\n- NEVER kill a process you did not start.\n- The public repository must stay generic: no real names, project or client names, emails, keys, Slack IDs, or personal absolute paths.\n\n## Browser isolation\nBefore any browser command, export `AGENT_BROWSER_PROFILE` to a unique disposable directory under `~/.agent-browser/profiles/jinn-simplify-<run-id>-<phase>`.\nUse `agent-browser` only; never raw headless Chrome and never drive Playwright by hand. Delete the disposable profile directory when browser work ends.",
+        "engine": { "source": "fixed", "value": "claude" },
+        "model": { "source": "fixed", "value": "opus" },
+        "effort": { "source": "fixed", "value": "high" },
+        "output": {
+          "fields": {
+            "worth": { "type": "string", "required": true, "description": "Exactly `yes` when one target is worth pursuing; otherwise `no`." },
+            "todoId": { "type": "string", "required": false, "description": "Canonical ID of the created simplify Todo. Omit when worth is no." },
+            "target": { "type": "string", "required": true, "description": "The one selected code area, or a concise reason the run was declined." },
+            "evidence": { "type": "string", "required": true, "description": "Concrete files, callers, failures, queue count, or vocabulary proving the choice." },
+            "summary": { "type": "string", "required": true, "description": "One-sentence survey result." }
+          },
+          "allowAdditionalFields": false
+        },
+        "retry": { "attempts": 3, "delaySeconds": 60, "backoff": "exponential" },
+        "timeoutMinutes": 90
+      }
+    },
+    {
+      "id": "worth-doing",
+      "type": "condition",
+      "name": "Worth doing?",
+      "config": {
+        "cases": [
+          {
+            "port": "skip",
+            "label": "Not worth the spend",
+            "all": [
+              {
+                "left": { "source": "node", "nodeId": "survey", "path": "fields.worth" },
+                "operator": "not-equals",
+                "right": { "source": "fixed", "value": "yes" }
+              }
+            ]
+          }
+        ],
+        "defaultPort": "proceed"
+      }
+    },
+    {
+      "id": "constrain",
+      "type": "employee",
+      "name": "CONSTRAIN",
+      "config": {
+        "employee": { "source": "fixed", "value": "jinn-verifier" },
+        "prompt": "CONSTRAIN PHASE — freeze a mechanical simplification budget before code changes.\n\nTodo: {{ node.survey.fields.todoId }}\nTarget: {{ node.survey.fields.target }}\nEvidence: {{ node.survey.fields.evidence }}\n\nRead the Todo, the shared Jinn taste rules through the company knowledge tools, and the implicated repository code. Turn the target into a small, testable plan. The model that writes this budget will not implement it.\n\nRun `git fetch origin` first. Resolve the fetched remote tip with `git rev-parse origin/main` and emit that exact full SHA as `baseHead`. Create an isolated worktree at `~/Projects/.worktrees/jinn-simplify-{{ node.survey.fields.todoId }}` on branch `simplify/{{ node.survey.fields.todoId }}-<short-slug>` from that captured `origin/main` SHA. Never cut the worktree from local `main`. Never reuse, delete, reset, clean, or repurpose an unrelated worktree. Write `PLAN.md` there before any product-code edit.\n\nDeclare all budget fields. Defaults require explicit evidence to relax:\n- `netLineDelta` must be 0 or negative.\n- `maxFilesTouched` must be a small integer.\n- `maxNewFiles` must be 0 unless splitting an oversized file is the task.\n- `maxFileLines` is an absolute post-change cap; no touched file may grow.\n- no new dependencies, config options, public exports, or single-caller abstractions.\n- preserve behaviour with `pnpm typecheck`, `pnpm test`, and `pnpm build`; delete a test only when the behaviour it covered is deleted.\n\nEmit `budgetCommand` as one literal, non-destructive shell command the verifiers can run from the worktree. It must print the real net line delta, touched-file count, new-file count, and maximum line count among touched files against the captured base SHA. Do not use placeholders in the emitted command.\n\nEmit `acceptance` as a numbered, mechanical checklist including the qualitative constraints above. The plan and output must agree.\n\nDo not edit product code. Stop honestly if isolation or a checkable budget cannot be established.\n\n## Production safety — absolute\n- NEVER use port 7777 or touch `~/.jinn`.\n- NEVER start or run a gateway without BOTH an explicit throwaway `JINN_HOME` and an explicit non-production port. Port 7788 is also forbidden.\n- Before starting a throwaway daemon, inspect its config and confirm its port is neither 7777 nor 7788.\n- NEVER kill a process you did not start.\n- The public repository must stay generic: no real names, project or client names, emails, keys, Slack IDs, or personal absolute paths.\n\n## Browser isolation\nBefore any browser command, export `AGENT_BROWSER_PROFILE` to a unique disposable directory under `~/.agent-browser/profiles/jinn-simplify-<run-id>-<phase>`.\nUse `agent-browser` only; never raw headless Chrome and never drive Playwright by hand. Delete the disposable profile directory when browser work ends.",
+        "engine": { "source": "fixed", "value": "claude" },
+        "model": { "source": "fixed", "value": "fable" },
+        "effort": { "source": "fixed", "value": "high" },
+        "output": {
+          "fields": {
+            "worktree": { "type": "string", "required": true, "description": "Absolute path of the isolated worktree." },
+            "branch": { "type": "string", "required": true, "description": "Branch created for this simplify Todo." },
+            "baseHead": { "type": "string", "required": true, "description": "Full SHA of fetched origin/main used as the worktree base." },
+            "planPath": { "type": "string", "required": true, "description": "Absolute path of PLAN.md in the worktree." },
+            "netLineDelta": { "type": "number", "required": true, "description": "Maximum allowed net added-minus-removed line delta." },
+            "maxFilesTouched": { "type": "number", "required": true, "description": "Maximum number of changed files." },
+            "maxNewFiles": { "type": "number", "required": true, "description": "Maximum number of newly added files." },
+            "maxFileLines": { "type": "number", "required": true, "description": "Maximum final line count of any touched file." },
+            "budgetCommand": { "type": "string", "required": true, "description": "Literal shell command that prints every measured budget number." },
+            "acceptance": { "type": "string", "required": true, "description": "Numbered acceptance criteria and qualitative simplification constraints." },
+            "summary": { "type": "string", "required": true, "description": "One-sentence constrained plan." }
+          },
+          "allowAdditionalFields": false
+        },
+        "retry": { "attempts": 3, "delaySeconds": 60, "backoff": "exponential" },
+        "timeoutMinutes": 120
+      }
+    },
+    {
+      "id": "implement-1",
+      "type": "employee",
+      "name": "IMPLEMENT (round 1)",
+      "config": {
+        "employee": { "source": "fixed", "value": "jinn-dev" },
+        "prompt": "IMPLEMENT PHASE — round 1.\n\nTodo {{ node.survey.fields.todoId }}. Work only in `{{ node.constrain.fields.worktree }}` on branch `{{ node.constrain.fields.branch }}` from base `{{ node.constrain.fields.baseHead }}`. Follow `{{ node.constrain.fields.planPath }}`.\n\nThe fixed constraint contract is:\n- netLineDelta: {{ node.constrain.fields.netLineDelta }}\n- maxFilesTouched: {{ node.constrain.fields.maxFilesTouched }}\n- maxNewFiles: {{ node.constrain.fields.maxNewFiles }}\n- maxFileLines: {{ node.constrain.fields.maxFileLines }}\n- budgetCommand: {{ node.constrain.fields.budgetCommand }}\n- acceptance: {{ node.constrain.fields.acceptance }}\n\nTreat every constraint as a requirement. TDD where branching logic or behaviour changes: write the failing test, watch the expected failure, make the smallest honest change, then watch it pass. Glue does not need ceremony.\n\nSimplify the selected target and nothing adjacent. Prefer deleting indirection over introducing another layer. Do not add a dependency, config option, public export, or abstraction with fewer than two real callers.\n\nBefore committing, run the emitted `budgetCommand` and the repo gates: `pnpm typecheck`, `pnpm test`, `pnpm build`. Emit `budgetClaim: within` when every number is within the contract. Emit `budgetClaim: contract-defect` only when the acceptance criteria themselves necessarily compel the measured overage; identify the compelled file or line arithmetic in `budgetOutput`. Never use `contract-defect` to excuse optional scope. Stage only scoped files, privacy-scan the staged diff, and commit on the named branch. Do not push or open a PR.",
+        "engine": { "source": "fixed", "value": "claude" },
+        "model": { "source": "fixed", "value": "opus" },
+        "effort": { "source": "fixed", "value": "high" },
+        "output": {
+          "fields": {
+            "head": { "type": "string", "required": true, "description": "Full SHA of the implementation commit." },
+            "changedFiles": { "type": "string", "required": true, "description": "Concise list of changed files." },
+            "tests": { "type": "string", "required": true, "description": "Commands run with result totals." },
+            "budgetClaim": { "type": "string", "required": true, "description": "Exactly `within` or `contract-defect`." },
+            "budgetOutput": { "type": "string", "required": true, "description": "Real output of budgetCommand and any compelled-overage arithmetic." },
+            "summary": { "type": "string", "required": true, "description": "One sentence describing the simplification." }
+          },
+          "allowAdditionalFields": false
+        },
+        "retry": { "attempts": 3, "delaySeconds": 60, "backoff": "exponential" },
+        "timeoutMinutes": 180
+      }
+    },
+    {
+      "id": "verify-1",
+      "type": "employee",
+      "name": "VERIFY (round 1)",
+      "config": {
+        "employee": { "source": "fixed", "value": "jinn-verifier" },
+        "prompt": "VERIFY PHASE — round 1. Independent and read-only; you did not write this change.\n\nTodo {{ node.survey.fields.todoId }}. Inspect `{{ node.constrain.fields.worktree }}` from base `{{ node.constrain.fields.baseHead }}` through head `{{ node.implement-1.fields.head }}`.\n\nThe fixed constraint contract is:\n- netLineDelta: {{ node.constrain.fields.netLineDelta }}\n- maxFilesTouched: {{ node.constrain.fields.maxFilesTouched }}\n- maxNewFiles: {{ node.constrain.fields.maxNewFiles }}\n- maxFileLines: {{ node.constrain.fields.maxFileLines }}\n- budgetCommand: {{ node.constrain.fields.budgetCommand }}\n- acceptance: {{ node.constrain.fields.acceptance }}\n\nImplementer budget claim: {{ node.implement-1.fields.budgetClaim }}\nImplementer budget evidence: {{ node.implement-1.fields.budgetOutput }}\n\nRead the shared Jinn taste rules through company knowledge, the Todo, plan, diff, and tests. Judge only stated acceptance and those taste rules. Cap blocking findings at five.\n\nRun the exact emitted `budgetCommand` yourself and quote its real output verbatim in `budgetOutput`. Set `budgetVerdict: within` when every measured number is within budget. If a measurement exceeds budget, set `budgetVerdict: contract-defect` only when you independently reproduce that the stated acceptance criteria necessarily compel the exact extra file or line and no compliant within-budget implementation exists. A reproduced contract defect is not a Blocker and may ship. Any unexplained overage, optional scope, or implementer claim you cannot independently reproduce is `budgetVerdict: breach`, is a Blocker, and requires `verdict: rework`. Never return `ship` with `budgetVerdict: breach`.\n\nRun `pnpm typecheck`, `pnpm test`, and `pnpm build` yourself after the commit and quote their real result tails. Return `ship` only when Blockers=0, Majors=0, and budgetVerdict is `within` or independently reproduced `contract-defect`; otherwise return `rework`. Do not modify code or the Todo status.",
+        "engine": { "source": "fixed", "value": "claude" },
+        "model": { "source": "fixed", "value": "fable" },
+        "effort": { "source": "fixed", "value": "high" },
+        "output": {
+          "fields": {
+            "verdict": { "type": "string", "required": true, "description": "Exactly `ship` or `rework`." },
+            "budgetVerdict": { "type": "string", "required": true, "description": "Exactly `within`, `breach`, or `contract-defect`." },
+            "counts": { "type": "string", "required": true, "description": "Blockers=N; Majors=N; Minors=N." },
+            "findings": { "type": "string", "required": true, "description": "Actionable findings with acceptance or taste citations, or `none`." },
+            "gates": { "type": "string", "required": true, "description": "Gate results personally run, with real tails." },
+            "budgetOutput": { "type": "string", "required": true, "description": "Verbatim budgetCommand output and contract-defect reproduction, if any." }
+          },
+          "allowAdditionalFields": false
+        },
+        "retry": { "attempts": 3, "delaySeconds": 60, "backoff": "exponential" },
+        "timeoutMinutes": 180
+      }
+    },
+    {
+      "id": "verdict-1",
+      "type": "condition",
+      "name": "Round 1 verdict",
+      "config": {
+        "cases": [
+          {
+            "port": "ship",
+            "label": "Ship",
+            "all": [
+              {
+                "left": { "source": "node", "nodeId": "verify-1", "path": "fields.verdict" },
+                "operator": "equals",
+                "right": { "source": "fixed", "value": "ship" }
+              }
+            ]
+          }
+        ],
+        "defaultPort": "rework"
+      }
+    },
+    {
+      "id": "implement-2",
+      "type": "employee",
+      "name": "IMPLEMENT (round 2)",
+      "config": {
+        "employee": { "source": "fixed", "value": "jinn-dev" },
+        "prompt": "IMPLEMENT PHASE — round 2 of 2. This is the final implementation round.\n\nTodo {{ node.survey.fields.todoId }}. Continue only in `{{ node.constrain.fields.worktree }}` on `{{ node.constrain.fields.branch }}`.\n\nThe fixed constraint contract is:\n- netLineDelta: {{ node.constrain.fields.netLineDelta }}\n- maxFilesTouched: {{ node.constrain.fields.maxFilesTouched }}\n- maxNewFiles: {{ node.constrain.fields.maxNewFiles }}\n- maxFileLines: {{ node.constrain.fields.maxFileLines }}\n- budgetCommand: {{ node.constrain.fields.budgetCommand }}\n- acceptance: {{ node.constrain.fields.acceptance }}\n\nRound-1 findings:\n{{ node.verify-1.fields.findings }}\n\nAddress only round-1 Blockers and Majors, plus regressions in lines you touch. Do not broaden the task or invent a new abstraction. If a finding has no acceptance or taste basis, document the dispute instead of changing unrelated code.\n\nUse a failing regression test first for each real behavioural defect. Run the exact `budgetCommand` after the final edit. Emit `budgetClaim: within` when every number is within the contract. Emit `budgetClaim: contract-defect` only when the acceptance criteria necessarily compel the measured overage; identify the compelled file or line arithmetic in `budgetOutput`. Never use it for optional scope. Run `pnpm typecheck`, `pnpm test`, and `pnpm build`, stage only scoped files, privacy-scan, and commit. Do not push or open a PR. There is no third implementation round.",
+        "engine": { "source": "fixed", "value": "claude" },
+        "model": { "source": "fixed", "value": "opus" },
+        "effort": { "source": "fixed", "value": "high" },
+        "output": {
+          "fields": {
+            "head": { "type": "string", "required": true, "description": "Full SHA after round-2 corrections." },
+            "addressed": { "type": "string", "required": true, "description": "Each round-1 finding and its resolution or bounded dispute." },
+            "tests": { "type": "string", "required": true, "description": "Commands run with result totals." },
+            "budgetClaim": { "type": "string", "required": true, "description": "Exactly `within` or `contract-defect`." },
+            "budgetOutput": { "type": "string", "required": true, "description": "Real output of budgetCommand and any compelled-overage arithmetic." },
+            "summary": { "type": "string", "required": true, "description": "One sentence describing round-2 changes." }
+          },
+          "allowAdditionalFields": false
+        },
+        "retry": { "attempts": 3, "delaySeconds": 60, "backoff": "exponential" },
+        "timeoutMinutes": 180
+      }
+    },
+    {
+      "id": "verify-2",
+      "type": "employee",
+      "name": "VERIFY (round 2)",
+      "config": {
+        "employee": { "source": "fixed", "value": "jinn-verifier" },
+        "prompt": "VERIFY PHASE — round 2, final and scope-locked. Independent and read-only.\n\nTodo {{ node.survey.fields.todoId }}. Inspect `{{ node.constrain.fields.worktree }}` from base `{{ node.constrain.fields.baseHead }}` through head `{{ node.implement-2.fields.head }}`.\n\nThe fixed constraint contract is:\n- netLineDelta: {{ node.constrain.fields.netLineDelta }}\n- maxFilesTouched: {{ node.constrain.fields.maxFilesTouched }}\n- maxNewFiles: {{ node.constrain.fields.maxNewFiles }}\n- maxFileLines: {{ node.constrain.fields.maxFileLines }}\n- budgetCommand: {{ node.constrain.fields.budgetCommand }}\n- acceptance: {{ node.constrain.fields.acceptance }}\n\nRound-1 findings:\n{{ node.verify-1.fields.findings }}\n\nImplementer response:\n{{ node.implement-2.fields.addressed }}\nImplementer budget claim: {{ node.implement-2.fields.budgetClaim }}\nImplementer budget evidence: {{ node.implement-2.fields.budgetOutput }}\n\nCheck only whether round-1 Blockers and Majors are resolved or correctly disputed, regressions in round-2 lines, the fixed budget, and the repo gates. New observations against already-passed code are follow-ups and cannot block this round.\n\nRun the exact `budgetCommand` yourself and quote its real output. Set `budgetVerdict: within` when every measured number is within budget. If a measurement exceeds budget, set `budgetVerdict: contract-defect` only when you independently reproduce that the stated acceptance criteria necessarily compel the exact extra file or line and no compliant within-budget implementation exists. A reproduced contract defect is not a Blocker and may ship. Any unexplained overage, optional scope, or implementer claim you cannot independently reproduce is `budgetVerdict: breach`, is a Blocker, and requires `verdict: rework`. Never return `ship` with `budgetVerdict: breach`.\n\nRun `pnpm typecheck`, `pnpm test`, and `pnpm build` yourself. Return `ship` only with zero unresolved Blockers and Majors and budgetVerdict `within` or independently reproduced `contract-defect`. Otherwise return `rework`; the graph will hand the work back and will not start a third implementation round. Do not change code or Todo status.",
+        "engine": { "source": "fixed", "value": "claude" },
+        "model": { "source": "fixed", "value": "fable" },
+        "effort": { "source": "fixed", "value": "high" },
+        "output": {
+          "fields": {
+            "verdict": { "type": "string", "required": true, "description": "Exactly `ship` or `rework`." },
+            "budgetVerdict": { "type": "string", "required": true, "description": "Exactly `within`, `breach`, or `contract-defect`." },
+            "counts": { "type": "string", "required": true, "description": "Blockers=N; Majors=N; Minors=N." },
+            "findings": { "type": "string", "required": true, "description": "Unresolved round-1 findings or round-2 regressions, or `none`." },
+            "gates": { "type": "string", "required": true, "description": "Gate results personally run, with real tails." },
+            "budgetOutput": { "type": "string", "required": true, "description": "Verbatim budgetCommand output and contract-defect reproduction, if any." }
+          },
+          "allowAdditionalFields": false
+        },
+        "retry": { "attempts": 3, "delaySeconds": 60, "backoff": "exponential" },
+        "timeoutMinutes": 180
+      }
+    },
+    {
+      "id": "verdict-2",
+      "type": "condition",
+      "name": "Round 2 verdict",
+      "config": {
+        "cases": [
+          {
+            "port": "ship",
+            "label": "Ship",
+            "all": [
+              {
+                "left": { "source": "node", "nodeId": "verify-2", "path": "fields.verdict" },
+                "operator": "equals",
+                "right": { "source": "fixed", "value": "ship" }
+              }
+            ]
+          }
+        ],
+        "defaultPort": "rework"
+      }
+    },
+    {
+      "id": "shippable",
+      "type": "merge",
+      "name": "Passed verification",
+      "config": { "mode": "wait-all" }
+    },
+    {
+      "id": "deliver",
+      "type": "employee",
+      "name": "DELIVER",
+      "config": {
+        "employee": { "source": "fixed", "value": "jinn-dev" },
+        "prompt": "DELIVER PHASE — publish verified work for operator review. Do not merge.\n\nTodo {{ node.survey.fields.todoId }}. Worktree `{{ node.constrain.fields.worktree }}`. Branch `{{ node.constrain.fields.branch }}`. Plan `{{ node.constrain.fields.planPath }}`.\n\nRe-run the exact `{{ node.constrain.fields.budgetCommand }}` plus `pnpm typecheck`, `pnpm test`, and `pnpm build`. Stop if the branch moved beyond the verified head or any local check fails.\n\nPush the branch with `git push -u origin {{ node.constrain.fields.branch }}`. Open the pull request as a draft with `gh pr create --draft --base main --head {{ node.constrain.fields.branch }}`. The PR body must give the selected area, evidence of over-engineering or blended concerns, the fixed constraint budget, the reconciled measured budget output including any verified contract defect, what was deleted or clarified, and the test results.\n\nAfter the PR exists, wait for the complete CI result with `gh pr checks --watch`. If any job is red, re-run each red job once and only once, then wait for the complete CI result again. If every job is green after the initial run or the single re-run, mark the PR ready, set `checksStatus: green`, move the Todo to `in_review`, and add a concise Todo comment with the PR URL and measured budget.\n\nIf a job fails again, the failure is reproducible: leave or convert the PR to draft, set `checksStatus: reproducible-failure`, move the Todo to `escalated`, and add the failing job plus its final evidence to both the PR and Todo. Do not present a reproducibly red PR as ready. Do not merge or close the Todo.\n\n## Production safety — absolute\n- NEVER use port 7777 or touch `~/.jinn`.\n- NEVER start or run a gateway without BOTH an explicit throwaway `JINN_HOME` and an explicit non-production port. Port 7788 is also forbidden.\n- Before starting a throwaway daemon, inspect its config and confirm its port is neither 7777 nor 7788.\n- NEVER kill a process you did not start.\n- The public repository must stay generic: no real names, project or client names, emails, keys, Slack IDs, or personal absolute paths.",
+        "engine": { "source": "fixed", "value": "claude" },
+        "model": { "source": "fixed", "value": "opus" },
+        "effort": { "source": "fixed", "value": "high" },
+        "output": {
+          "fields": {
+            "prUrl": { "type": "string", "required": true, "description": "URL returned by gh pr create." },
+            "head": { "type": "string", "required": true, "description": "Full SHA that was pushed." },
+            "checksStatus": { "type": "string", "required": true, "description": "Exactly `green` or `reproducible-failure`." },
+            "summary": { "type": "string", "required": true, "description": "One-sentence delivery result." }
+          },
+          "allowAdditionalFields": false
+        },
+        "retry": { "attempts": 3, "delaySeconds": 60, "backoff": "exponential" },
+        "timeoutMinutes": 180
+      }
+    },
+    {
+      "id": "handback",
+      "type": "employee",
+      "name": "HAND BACK",
+      "config": {
+        "employee": { "source": "fixed", "value": "jinn-verifier" },
+        "prompt": "HAND BACK — two implementation rounds did not converge. Do not fix code and do not start another round.\n\nTodo {{ node.survey.fields.todoId }}. Branch `{{ node.constrain.fields.branch }}` remains in `{{ node.constrain.fields.worktree }}`.\n\nUnresolved findings:\n{{ node.verify-2.fields.findings }}\nFinal budget verdict: {{ node.verify-2.fields.budgetVerdict }}\n\nFirst call `update_work_item` for the Todo with status `escalated`. Then add one concise Todo comment stating what was attempted, what remains blocked, the real budget status, and the single decision that would unblock the operator. Leave the branch and worktree intact. Do not push, open a PR, merge, or close the Todo.\n\n## Production safety — absolute\n- NEVER use port 7777 or touch `~/.jinn`.\n- NEVER start or run a gateway without BOTH an explicit throwaway `JINN_HOME` and an explicit non-production port. Port 7788 is also forbidden.\n- Before starting a throwaway daemon, inspect its config and confirm its port is neither 7777 nor 7788.\n- NEVER kill a process you did not start.\n- The public repository must stay generic: no real names, project or client names, emails, keys, Slack IDs, or personal absolute paths.",
+        "engine": { "source": "fixed", "value": "claude" },
+        "model": { "source": "fixed", "value": "fable" },
+        "effort": { "source": "fixed", "value": "low" },
+        "output": {
+          "fields": {
+            "summary": { "type": "string", "required": true, "description": "One sentence explaining where the simplification stopped." }
+          },
+          "allowAdditionalFields": false
+        },
+        "retry": { "attempts": 3, "delaySeconds": 60, "backoff": "exponential" },
+        "timeoutMinutes": 30
+      }
+    },
+    {
+      "id": "nothing-found",
+      "type": "end",
+      "name": "Nothing worth the spend",
+      "config": { "result": "success", "message": "No uncovered simplification was worth an expensive run." }
+    },
+    {
+      "id": "delivered",
+      "type": "end",
+      "name": "Pull request opened",
+      "config": { "result": "success", "message": "Verified simplification was checked by CI and left as ready or escalated as a draft." }
+    },
+    {
+      "id": "stopped",
+      "type": "end",
+      "name": "Stopped after two rounds",
+      "config": { "result": "failure", "message": "Two implementation rounds did not converge; work was escalated." }
+    }
+  ],
+  "edges": [
+    { "id": "e01", "from": { "nodeId": "trigger", "port": "success" }, "to": { "nodeId": "survey", "port": "input" } },
+    { "id": "e02", "from": { "nodeId": "survey", "port": "success" }, "to": { "nodeId": "worth-doing", "port": "input" } },
+    { "id": "e03", "from": { "nodeId": "worth-doing", "port": "skip" }, "to": { "nodeId": "nothing-found", "port": "input" } },
+    { "id": "e04", "from": { "nodeId": "worth-doing", "port": "proceed" }, "to": { "nodeId": "constrain", "port": "input" } },
+    { "id": "e05", "from": { "nodeId": "constrain", "port": "success" }, "to": { "nodeId": "implement-1", "port": "input" } },
+    { "id": "e06", "from": { "nodeId": "implement-1", "port": "success" }, "to": { "nodeId": "verify-1", "port": "input" } },
+    { "id": "e07", "from": { "nodeId": "verify-1", "port": "success" }, "to": { "nodeId": "verdict-1", "port": "input" } },
+    { "id": "e08", "from": { "nodeId": "verdict-1", "port": "rework" }, "to": { "nodeId": "implement-2", "port": "input" } },
+    { "id": "e09", "from": { "nodeId": "implement-2", "port": "success" }, "to": { "nodeId": "verify-2", "port": "input" } },
+    { "id": "e10", "from": { "nodeId": "verify-2", "port": "success" }, "to": { "nodeId": "verdict-2", "port": "input" } },
+    { "id": "e11", "from": { "nodeId": "verdict-1", "port": "ship" }, "to": { "nodeId": "shippable", "port": "input" } },
+    { "id": "e12", "from": { "nodeId": "verdict-2", "port": "ship" }, "to": { "nodeId": "shippable", "port": "input" } },
+    { "id": "e13", "from": { "nodeId": "verdict-2", "port": "rework" }, "to": { "nodeId": "handback", "port": "input" } },
+    { "id": "e14", "from": { "nodeId": "shippable", "port": "success" }, "to": { "nodeId": "deliver", "port": "input" } },
+    { "id": "e15", "from": { "nodeId": "deliver", "port": "success" }, "to": { "nodeId": "delivered", "port": "input" } },
+    { "id": "e16", "from": { "nodeId": "handback", "port": "success" }, "to": { "nodeId": "stopped", "port": "input" } }
+  ],
+  "ui": {
+    "positions": {
+      "trigger": { "x": 40, "y": 300 },
+      "survey": { "x": 260, "y": 300 },
+      "worth-doing": { "x": 480, "y": 300 },
+      "nothing-found": { "x": 700, "y": 80 },
+      "constrain": { "x": 700, "y": 300 },
+      "implement-1": { "x": 920, "y": 300 },
+      "verify-1": { "x": 1140, "y": 300 },
+      "verdict-1": { "x": 1360, "y": 300 },
+      "implement-2": { "x": 1360, "y": 500 },
+      "verify-2": { "x": 1580, "y": 500 },
+      "verdict-2": { "x": 1800, "y": 500 },
+      "shippable": { "x": 2020, "y": 300 },
+      "deliver": { "x": 2240, "y": 300 },
+      "delivered": { "x": 2460, "y": 300 },
+      "handback": { "x": 2020, "y": 660 },
+      "stopped": { "x": 2240, "y": 660 }
+    }
+  },
+  "createdAt": "2026-08-02T00:00:00.000Z",
+  "updatedAt": "2026-08-02T00:00:00.000Z"
+}
