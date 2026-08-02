@@ -118,11 +118,11 @@ beforeAll(async () => {
   store = await import("../../work-items/store.js");
   reconcile = await import("../../work-items/reconcile.js");
   managerModule = await import("../../sessions/manager.js");
-  registry.initDb();
+  (await import("../../shared/db.js")).initDb();
 });
 
-beforeEach(() => {
-  const db = registry.initDb();
+beforeEach(async () => {
+  const db = (await import("../../shared/db.js")).initDb();
   db.exec("DELETE FROM work_item_events; DELETE FROM queue_items; DELETE FROM messages; DELETE FROM sessions; DELETE FROM work_items;");
 });
 

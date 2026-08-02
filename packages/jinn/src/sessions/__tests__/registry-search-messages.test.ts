@@ -8,13 +8,15 @@ import Database from "better-sqlite3";
 // resolved from JINN_HOME at module load).
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-fts-"));
 process.env.JINN_HOME = tmp;
+const migrateModule = await import("../migrate.js");
+const dbModule = await import("../../shared/db.js");
 
 type Reg = typeof import("../registry.js");
 let reg: Reg;
 
 let seq = 0;
 function mkSession(reg: Reg, id: string): void {
-  const db = reg.initDb();
+  const db = dbModule.initDb();
   db.prepare(
     "INSERT INTO sessions (id, engine, source, source_ref, status, created_at, last_activity) VALUES (?, 'claude', 'web', ?, 'idle', 't', 't')",
   ).run(id, `web:${id}`);
@@ -22,7 +24,7 @@ function mkSession(reg: Reg, id: string): void {
 // Insert a message with an explicit timestamp so newest-first ordering is
 // deterministic (insertMessage uses Date.now(), which collides within a ms).
 function mkMessage(reg: Reg, sessionId: string, role: string, content: string, ts: number): void {
-  const db = reg.initDb();
+  const db = dbModule.initDb();
   db.prepare(
     "INSERT INTO messages (id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)",
   ).run(`m${seq++}`, sessionId, role, content, ts);
@@ -30,7 +32,7 @@ function mkMessage(reg: Reg, sessionId: string, role: string, content: string, t
 
 beforeAll(async () => {
   reg = await import("../registry.js");
-  reg.initDb();
+  dbModule.initDb();
 });
 
 describe("searchMessages (FTS5)", () => {
@@ -154,7 +156,7 @@ describe("FTS backfill of pre-existing rows", () => {
     ins.run("c", "leg", "notification", "narwhal notification", 3);
     ins.run("d", "leg", "tool", "narwhal tool", 4);
 
-    reg.migrateFtsSchema(db);
+    migrateModule.migrateFtsSchema(db);
     reg.backfillFtsSync(db);
 
     const hits = matchRows(db, "narwhal");
@@ -168,7 +170,7 @@ describe("FTS backfill of pre-existing rows", () => {
     const ins = db.prepare("INSERT INTO messages (id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)");
     for (let i = 0; i < 25; i++) ins.run(`r${i}`, "leg", i % 2 ? "assistant" : "user", `gerbil row ${i}`, i);
 
-    reg.migrateFtsSchema(db);
+    migrateModule.migrateFtsSchema(db);
     // chunkSize=4 forces multiple resumable chunks
     reg.backfillFtsSync(db, 4);
     expect(matchRows(db, "gerbil").length).toBe(25);
@@ -187,7 +189,7 @@ describe("FTS backfill of pre-existing rows", () => {
     const db = legacyDb();
     db.prepare("INSERT INTO messages (id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)")
       .run("x", "leg", "assistant", "doomed axolotl note", 1);
-    reg.migrateFtsSchema(db);
+    migrateModule.migrateFtsSchema(db);
     reg.backfillFtsSync(db);
     expect(matchRows(db, "axolotl").length).toBe(1);
 
@@ -203,7 +205,7 @@ describe("FTS backfill of pre-existing rows", () => {
     ins.run("async-update", "leg", "assistant", "old async hedgehog note", 1);
     ins.run("async-delete", "leg", "assistant", "deleted async hedgehog note", 2);
 
-    reg.migrateFtsSchema(db);
+    migrateModule.migrateFtsSchema(db);
 
     // The gateway may serve writes before a yielded backfill reaches these legacy
     // rowids. Trigger maintenance must therefore tolerate both mutations without
@@ -244,7 +246,7 @@ describe("FTS backfill of pre-existing rows", () => {
     db.prepare("INSERT INTO messages (id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)")
       .run("pre", "leg", "assistant", "preexisting okapi", 1);
 
-    reg.migrateFtsSchema(db); // snapshots fts_backfill_max at the single pre-existing row
+    migrateModule.migrateFtsSchema(db); // snapshots fts_backfill_max at the single pre-existing row
 
     // a row inserted after migration is indexed by the AI trigger…
     db.prepare("INSERT INTO messages (id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)")
@@ -289,7 +291,7 @@ describe("production finalization path", () => {
 // process once the flag is set.
 describe("FTS degrade — fail-safe", () => {
   it("disableFtsForProcess drops infrastructure and searchMessages returns []", () => {
-    const database = reg.initDb();
+    const database = dbModule.initDb();
     // Simulate what initDb() does when backfillFtsSync throws mid-drain.
     reg.disableFtsForProcess(database, new Error("simulated disk error during backfill"));
 
@@ -303,7 +305,7 @@ describe("FTS degrade — fail-safe", () => {
   it("deleteSession does not throw in degraded mode (AD trigger absent)", () => {
     // Directly insert a session + assistant message (bypassing the trigger-dropped
     // state — the INSERT into messages won't fire FTS AI trigger since it's gone).
-    const database = reg.initDb();
+    const database = dbModule.initDb();
     database
       .prepare(
         "INSERT INTO sessions (id, engine, source, source_ref, status, created_at, last_activity) VALUES ('s-dg-del','claude','web','web:s-dg-del','idle','t','t')",
@@ -322,7 +324,7 @@ describe("FTS degrade — fail-safe", () => {
   });
 
   it("updatePartialMessage does not throw in degraded mode (AU trigger absent)", () => {
-    const database = reg.initDb();
+    const database = dbModule.initDb();
     database
       .prepare(
         "INSERT INTO sessions (id, engine, source, source_ref, status, created_at, last_activity) VALUES ('s-dg-upd','claude','web','web:s-dg-upd','running','t','t')",
@@ -350,7 +352,7 @@ describe("FTS degrade — fail-safe", () => {
     ins.run("r2", "leg-recovery", "assistant", "recovery mongoose answer found", 2);
 
     // First "boot": create FTS + backfill.
-    reg.migrateFtsSchema(db);
+    migrateModule.migrateFtsSchema(db);
     reg.backfillFtsSync(db);
     const hitsBefore = db
       .prepare(
@@ -370,7 +372,7 @@ describe("FTS degrade — fail-safe", () => {
     db.prepare("DELETE FROM meta WHERE key IN ('fts_backfill_done','fts_backfill_rowid','fts_backfill_max')").run();
 
     // "Next boot" recovery: migrateFtsSchema sees no watermark → recreates everything.
-    reg.migrateFtsSchema(db);
+    migrateModule.migrateFtsSchema(db);
     reg.backfillFtsSync(db);
 
     const hitsAfter = db

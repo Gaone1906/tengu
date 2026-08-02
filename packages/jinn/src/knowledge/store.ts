@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { JINN_HOME } from "../shared/paths.js";
-import { stripControlChars, hasControlBytes } from "../sessions/registry.js";
+import { stripControlChars, hasControlBytes } from "../shared/sanitize.js";
 
 /**
  * GRS-020b — deterministic search over the company's institutional knowledge

@@ -25,7 +25,7 @@ function insertSession(id: string, engine = "claude"): void {
 beforeAll(async () => {
   store = await import("../store.js");
   reg = await import("../../sessions/registry.js");
-  db = reg.initDb();
+  db = (await import("../../shared/db.js")).initDb();
 });
 
 describe("work-item store — schema", () => {

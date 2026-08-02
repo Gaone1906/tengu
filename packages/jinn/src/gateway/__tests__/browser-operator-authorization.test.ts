@@ -174,7 +174,7 @@ async function createSessionViaHttp(headers: Record<string, string>): Promise<{ 
 beforeAll(async () => {
   api = await import("../api.js");
   registry = await import("../../sessions/registry.js");
-  registry.initDb();
+  (await import("../../shared/db.js")).initDb();
   config = {
     gateway: { host: "127.0.0.1", authDisabled: true },
     engines: { default: "codex", codex: {}, claude: {} },
@@ -225,7 +225,7 @@ afterAll(async () => {
   await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   // Close the database before removing its directory: Windows refuses to unlink
   // a file with an open handle, so the sqlite connection has to go first.
-  registry.__closeDbForTest();
+  (await import("../../shared/db.js")).__closeDbForTest();
   removeTempDir(testHome);
 });
 

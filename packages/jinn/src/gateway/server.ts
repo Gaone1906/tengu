@@ -20,7 +20,8 @@ import {
   refreshPiModels,
 } from "../shared/models.js";
 import { configureLogger, logger } from "../shared/logger.js";
-import { initDb, scheduleFtsBackfill, recoverStaleSessions, recoverStaleWorkflowAttemptSessions, recoverStaleQueueItems, clearAllPartialMessages, consumeRestartAcknowledgements, getInterruptedSessions, listSessions, updateSession, getSession, getMessages, getSessionSpend, RESTART_ACK_META_KEY } from "../sessions/registry.js";
+import { scheduleFtsBackfill, recoverStaleSessions, recoverStaleWorkflowAttemptSessions, recoverStaleQueueItems, clearAllPartialMessages, consumeRestartAcknowledgements, getInterruptedSessions, listSessions, updateSession, getSession, getMessages, getSessionSpend, RESTART_ACK_META_KEY } from "../sessions/registry.js";
+import { initDb } from "../shared/db.js";
 import { SessionManager, type RouteOptions } from "../sessions/manager.js";
 import { recoverSessionDeliveryStateOnStartup } from "../sessions/callbacks.js";
 import { InteractiveClaudeEngine } from "../engines/claude-interactive.js";

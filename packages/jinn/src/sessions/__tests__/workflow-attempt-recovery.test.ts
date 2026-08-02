@@ -7,6 +7,7 @@ import type { SessionManager } from "../manager.js";
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-workflow-attempt-recovery-"));
 process.env.JINN_HOME = home;
+const dbModule = await import("../../shared/db.js");
 
 type Registry = typeof import("../registry.js");
 type ExecutorModule = typeof import("../../workflows/session-executor.js");
@@ -41,15 +42,15 @@ function createPhaseSession(runId: string) {
 beforeAll(async () => {
   registry = await import("../registry.js");
   executorModule = await import("../../workflows/session-executor.js");
-  registry.initDb();
+  dbModule.initDb();
 });
 
 beforeEach(() => {
-  registry.initDb().exec("DELETE FROM messages; DELETE FROM queue_items; DELETE FROM sessions;");
+  dbModule.initDb().exec("DELETE FROM messages; DELETE FROM queue_items; DELETE FROM sessions;");
 });
 
 afterAll(() => {
-  registry.__closeDbForTest();
+  dbModule.__closeDbForTest();
   fs.rmSync(home, { recursive: true, force: true });
 });
 

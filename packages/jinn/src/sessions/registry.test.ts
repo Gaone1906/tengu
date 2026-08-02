@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 import Database from "better-sqlite3";
-import { migrateQueueItemsSchema, migrateSessionsSchema } from "./registry.js";
+import { migrateQueueItemsSchema, migrateSessionsSchema } from "./migrate.js";
 
 test("migrateSessionsSchema upgrades an old sessions table before session_key usage", () => {
   const db = new Database(":memory:");

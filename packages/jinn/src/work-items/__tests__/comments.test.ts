@@ -20,7 +20,7 @@ beforeAll(async () => {
   store = await import("../store.js");
   comments = await import("../comments.js");
   migrate = await import("../migrate.js");
-  (await import("../../sessions/registry.js")).initDb();
+  (await import("../../shared/db.js")).initDb();
 });
 
 describe("addComment", () => {

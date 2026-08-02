@@ -6,19 +6,20 @@ import path from "node:path";
 // Point the DB at a throwaway dir BEFORE importing the registry.
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-msg-page-"));
 process.env.JINN_HOME = tmp;
+const dbModule = await import("../../shared/db.js");
 
 type Reg = typeof import("../registry.js");
 let reg: Reg;
 
 function insertSession(id: string) {
-  const db = reg.initDb();
+  const db = dbModule.initDb();
   db.prepare(
     "INSERT INTO sessions (id, engine, source, source_ref, status, created_at, last_activity) VALUES (?, 'claude', 'web', ?, 'idle', 't', 't')",
   ).run(id, `web:${id}`);
 }
 
 function insertMessage(id: string, content: string, timestamp: number, seq: number | null = null) {
-  const db = reg.initDb();
+  const db = dbModule.initDb();
   db.prepare(
     "INSERT INTO messages (id, session_id, role, content, timestamp, seq) VALUES (?, 's-page', 'assistant', ?, ?, ?)",
   ).run(id, content, timestamp, seq);
@@ -26,7 +27,7 @@ function insertMessage(id: string, content: string, timestamp: number, seq: numb
 
 beforeAll(async () => {
   reg = await import("../registry.js");
-  reg.initDb();
+  dbModule.initDb();
   insertSession("s-page");
   insertMessage("m1", "one", 1000);
   insertMessage("m2", "two", 2000);

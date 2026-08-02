@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect } from "vitest";
 import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
@@ -6,16 +6,11 @@ import path from "node:path";
 // Throwaway DB before importing the registry (SESSIONS_DB resolves from JINN_HOME).
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-hotidx-"));
 process.env.JINN_HOME = tmp;
+const dbModule = await import("../../shared/db.js");
 
-type Reg = typeof import("../registry.js");
-let reg: Reg;
-
-beforeAll(async () => {
-  reg = await import("../registry.js");
-});
 
 function queryPlan(sql: string): string {
-  const db = reg.initDb();
+  const db = dbModule.initDb();
   const rows = db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all() as Array<{ detail: string }>;
   return rows.map((r) => r.detail).join("\n");
 }

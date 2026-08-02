@@ -1,4 +1,4 @@
-import { initDb } from '../sessions/registry.js';
+import { initDb } from '../shared/db.js';
 import { parseTodoId } from './id.js';
 import { appendWorkItemEvent, type WorkItemStatus } from './store.js';
 

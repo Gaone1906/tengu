@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { initDb } from '../sessions/registry.js';
+import { initDb } from '../shared/db.js';
 import { parseTodoId } from './id.js';
 import { appendWorkItemEvent } from './store.js';
 

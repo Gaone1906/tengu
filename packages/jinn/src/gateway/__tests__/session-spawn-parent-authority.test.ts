@@ -116,7 +116,7 @@ async function spawn(body: Record<string, unknown>, headers: Record<string, stri
 beforeAll(async () => {
   api = await import("../api.js");
   reg = await import("../../sessions/registry.js");
-  reg.initDb();
+  (await import("../../shared/db.js")).initDb();
 });
 
 describe("POST /api/sessions — a session caller is always the parent", () => {

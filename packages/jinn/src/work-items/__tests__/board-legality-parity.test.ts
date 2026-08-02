@@ -21,11 +21,9 @@ process.env.JINN_HOME = tmp;
 
 type Store = typeof import("../store.js");
 type Transitions = typeof import("../transitions.js");
-type Reg = typeof import("../../sessions/registry.js");
 
 let store: Store;
 let tr: Transitions;
-let reg: Reg;
 
 const FIXTURE_PATH = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -45,8 +43,7 @@ const fixture = JSON.parse(fs.readFileSync(FIXTURE_PATH, "utf8")) as EdgesFixtur
 beforeAll(async () => {
   store = await import("../store.js");
   tr = await import("../transitions.js");
-  reg = await import("../../sessions/registry.js");
-  reg.initDb();
+  (await import("../../shared/db.js")).initDb();
 });
 
 type Status = import("../store.js").WorkItemStatus;

@@ -25,7 +25,7 @@ beforeAll(async () => {
   files = await import("../../gateway/files.js");
   registry = await import("../../sessions/registry.js");
   identity = await import("../identity.js");
-  registry.initDb();
+  (await import("../../shared/db.js")).initDb();
   fileSession = registry.createSession({ engine: "codex", source: "web", sourceRef: "file-reader", employee: "file-reader" });
 });
 

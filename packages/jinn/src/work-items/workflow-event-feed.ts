@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { initDb } from '../sessions/registry.js';
+import { initDb } from '../shared/db.js';
 import type { WorkItemSource, WorkItemStatus } from './store.js';
 import { getWorkItemLabels } from './labels.js';
 import { isTodoId } from './id.js';

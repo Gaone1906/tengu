@@ -248,7 +248,7 @@ beforeAll(async () => {
   fs.mkdirSync(path.join(integrationHome, "knowledge"), { recursive: true });
   api = await import("../../gateway/api.js");
   registry = await import("../../sessions/registry.js");
-  registry.initDb();
+  (await import("../../shared/db.js")).initDb();
   callerSessionId = registry.createSession({
     engine: "codex",
     source: "web",

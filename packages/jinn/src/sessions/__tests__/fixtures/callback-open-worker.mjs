@@ -35,7 +35,7 @@ try {
     payload,
   });
   process.stdout.write(JSON.stringify({ commonId: common.delivery.id, distinctId: distinct.delivery.id }));
-  registry.__closeDbForTest();
+  (await import(new URL("../shared/db.js", pathToFileURL(registryPath).href).href)).__closeDbForTest();
 } catch (error) {
   process.stderr.write(error instanceof Error ? `${error.stack ?? error.message}\n` : `${String(error)}\n`);
   process.exitCode = 1;

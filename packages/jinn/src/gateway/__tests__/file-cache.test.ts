@@ -18,7 +18,7 @@ beforeAll(async () => {
   paths = await import("../../shared/paths.js");
   reg = await import("../../sessions/registry.js");
   files = await import("../files.js");
-  reg.initDb();
+  (await import("../../shared/db.js")).initDb();
 });
 
 describe("file cache helpers", () => {

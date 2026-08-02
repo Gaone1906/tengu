@@ -521,7 +521,7 @@ beforeAll(async () => {
   registry = await import("../../sessions/registry.js");
   store = await import("../../work-items/store.js");
   approvals = await import("../../work-items/approvals.js");
-  registry.initDb();
+  (await import("../../shared/db.js")).initDb();
 });
 
 describe("work-item tools — integration against the real API + store", () => {

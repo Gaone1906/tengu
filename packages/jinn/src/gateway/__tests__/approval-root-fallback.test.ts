@@ -128,7 +128,7 @@ beforeAll(async () => {
   approvals = await import("../../work-items/approvals.js");
   registry = await import("../../sessions/registry.js");
   approvalAuthority = await import("../approval-authority.js");
-  registry.initDb();
+  (await import("../../shared/db.js")).initDb();
 });
 
 describe("approval root resolution without an executive employee", () => {

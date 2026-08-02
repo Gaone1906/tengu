@@ -15,6 +15,7 @@ import { CALLER_SESSION_CAPABILITY_HEADER, CALLER_SESSION_HEADER, TOOL_CALL_HEAD
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-wi-route-"));
 process.env.JINN_HOME = tmp;
+const dbModule = await import("../../shared/db.js");
 fs.mkdirSync(path.join(tmp, "org"), { recursive: true });
 fs.writeFileSync(
   path.join(tmp, "org", "platform-worker.yaml"),
@@ -144,7 +145,7 @@ beforeAll(async () => {
   api = await import("../api.js");
   reg = await import("../../sessions/registry.js");
   store = await import("../../work-items/store.js");
-  reg.initDb();
+  dbModule.initDb();
 });
 
 describe("GET /api/work-items/:id/sessions", () => {
@@ -257,7 +258,7 @@ describe("GET /api/work-items and /api/search/work-items — pagination, totals,
       department: "route-filter-department",
       source: "connector",
     });
-    const db = reg.initDb();
+    const db = dbModule.initDb();
     db.prepare("UPDATE work_items SET updated_at = ? WHERE id = ?").run("2033-02-10T08:00:00.000Z", match.id);
     db.prepare("UPDATE work_items SET updated_at = ? WHERE id = ?").run("2033-02-11T08:00:00.000Z", bodyOnly.id);
     db.prepare("UPDATE work_items SET updated_at = ? WHERE id = ?").run("2033-03-01T08:00:00.000Z", outside.id);
@@ -1217,7 +1218,7 @@ describe("POST /api/work-items — provenance and approval routing fields", () =
     approvals.requestApproval(cooApproval.id, { request: "approve coo", target: "coo" });
     approvals.requestApproval(workerApproval.id, { request: "approve worker", target: "platform-worker" });
 
-    const db = reg.initDb();
+    const db = dbModule.initDb();
     db.prepare("UPDATE work_items SET updated_at = ? WHERE id = ?").run("2030-07-06T10:00:00.000Z", cooApproval.id);
     db.prepare("UPDATE work_items SET updated_at = ? WHERE id = ?").run("2030-07-06T12:00:00.000Z", cooBlocked.id);
     db.prepare("UPDATE work_items SET updated_at = ? WHERE id = ?").run("2030-07-06T13:00:00.000Z", workerApproval.id);

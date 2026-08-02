@@ -31,7 +31,7 @@ function insert(
 
 beforeAll(async () => {
   reg = await import("../registry.js");
-  const db = reg.initDb();
+  const db = (await import("../../shared/db.js")).initDb();
   // Alice: 12 chats, Bob: 3, direct: 6, cron: 20.
   let t = 0;
   const ts = () => `2026-01-01T00:00:${String(t++).padStart(2, "0")}.000Z`;
@@ -118,8 +118,8 @@ describe("getSessionGroupCounts", () => {
 // never spawns a phantom group that renders with the portal's own title.
 // Kept LAST so its inserts don't perturb the counts asserted above.
 describe("portal-slug sessions fold into the direct group", () => {
-  beforeAll(() => {
-    const db = reg.initDb();
+  beforeAll(async () => {
+    const db = (await import("../../shared/db.js")).initDb();
     let t = 0;
     const ts = () => `2026-02-01T00:00:${String(t++).padStart(2, "0")}.000Z`;
     // 2 lowercase + 1 mixed-case portal-slug rows = 3 phantom-prone sessions.

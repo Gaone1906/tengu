@@ -52,7 +52,7 @@ beforeAll(async () => {
   approvals = await import("../../work-items/approvals.js");
   registry = await import("../../sessions/registry.js");
   surface = await import("../workflow-todo-surface.js");
-  db = registry.initDb();
+  db = (await import("../../shared/db.js")).initDb();
 });
 
 beforeEach(() => {

@@ -194,7 +194,7 @@ beforeAll(async () => {
   registry = await import("../../sessions/registry.js");
   identity = await import("../../mcp/identity.js");
   paths = await import("../../shared/paths.js");
-  registry.initDb();
+  (await import("../../shared/db.js")).initDb();
   const fileDir = path.join(paths.FILES_DIR, fileId);
   fs.mkdirSync(fileDir, { recursive: true });
   fs.writeFileSync(path.join(fileDir, "visible.txt"), "visible managed file");

@@ -29,7 +29,7 @@ beforeAll(async () => {
   comments = await import("../comments.js");
   attachments = await import("../attachments.js");
   migrate = await import("../migrate.js");
-  db = (await import("../../sessions/registry.js")).initDb();
+  db = (await import("../../shared/db.js")).initDb();
 });
 
 function stage(content: Buffer | string): string {

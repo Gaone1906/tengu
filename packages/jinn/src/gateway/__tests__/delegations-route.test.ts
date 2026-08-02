@@ -45,6 +45,7 @@ vi.mock("../../work-items/store.js", async (importOriginal) => {
 // Isolated home for registry DB + org dir. Set BEFORE the dynamic api import.
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-delegations-route-"));
 process.env.JINN_HOME = tmpHome;
+const dbModule = await import("../../shared/db.js");
 
 // A real employee for the employee-path assertions (scanOrg requires name+persona).
 fs.mkdirSync(path.join(tmpHome, "org"), { recursive: true });
@@ -123,7 +124,7 @@ const engineStub = {
   run: async (opts: Record<string, unknown>) => {
     // Snapshot the DB link AT TURN START — the codex finding-1 pin: the work
     // item ↔ session link must already be durable when the worker runs.
-    const row = reg
+    const row = dbModule
       .initDb()
       .prepare("SELECT work_item_id FROM sessions WHERE id = ?")
       .get(String(opts.sessionId)) as { work_item_id: string | null } | undefined;
