@@ -1303,7 +1303,7 @@ export default function SettingsPage() {
 
                 <FieldRow label="When Claude Hits Usage Limit">
                   <SettingsSelect
-                    value={config.sessions?.rateLimitStrategy ?? "fallback"}
+                    value={config.sessions?.rateLimitStrategy ?? "wait"}
                     onChange={(v) =>
                       updateConfig(["sessions", "rateLimitStrategy"], v)
                     }
