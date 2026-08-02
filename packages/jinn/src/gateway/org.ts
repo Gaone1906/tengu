@@ -6,6 +6,11 @@ import { ORG_DIR } from "../shared/paths.js";
 import type { Employee, JinnConfig } from "../shared/types.js";
 import { logger } from "../shared/logger.js";
 import { getModelRegistry, effortLevelsForModel } from "../shared/models.js";
+import {
+  isSystemEmployeeName,
+  resolveSystemEmployees,
+  SYSTEM_EMPLOYEE_OVERRIDE_FIELDS,
+} from "./system-employees.js";
 
 function currentOrgDir(): string {
   const instance = process.env.JINN_INSTANCE || "jinn";
@@ -41,8 +46,10 @@ function walkEmployeeYamls<T>(
   return undefined;
 }
 
-export function scanOrg(): Map<string, Employee> {
-  const registry = new Map<string, Employee>();
+export function scanOrg(config?: JinnConfig): Map<string, Employee> {
+  const registry = new Map<string, Employee>(
+    resolveSystemEmployees(config).map((employee) => [employee.name, employee]),
+  );
   const orgDir = currentOrgDir();
 
   if (!fs.existsSync(orgDir)) return registry;
@@ -51,7 +58,7 @@ export function scanOrg(): Map<string, Employee> {
     try {
       const raw = fs.readFileSync(fullPath, "utf-8");
       const data = yaml.load(raw) as any;
-      if (data && data.name && data.persona) {
+      if (data && data.name) {
         // The operator/system sentinels and the session:<uuid> namespace are
         // author identities on Todo surfaces (comments, created_by). An
         // employee slug claiming one could impersonate — or act with the
@@ -64,6 +71,17 @@ export function scanOrg(): Map<string, Employee> {
           );
           return undefined;
         }
+        const builtIn = registry.get(name);
+        if (builtIn?.system) {
+          const employee = { ...builtIn };
+          if (typeof data.engine === "string" && data.engine.trim()) employee.engine = data.engine.trim();
+          if (typeof data.model === "string" && data.model.trim()) employee.model = data.model.trim();
+          if (typeof data.effortLevel === "string" && data.effortLevel.trim()) employee.effortLevel = data.effortLevel.trim();
+          if (typeof data.alwaysNotify === "boolean") employee.alwaysNotify = data.alwaysNotify;
+          registry.set(name, employee);
+          return undefined;
+        }
+        if (!data.persona) return undefined;
         const employee: Employee = {
           name: data.name,
           displayName: data.displayName || data.name,
@@ -187,6 +205,18 @@ export function validateEmployeeUpdate(
 
   if ("name" in body) {
     return { ok: false, error: "field 'name' is immutable and cannot be changed" };
+  }
+
+  if (current.system) {
+    const protectedFields = Object.keys(body).filter(
+      (key) => !(SYSTEM_EMPLOYEE_OVERRIDE_FIELDS as readonly string[]).includes(key),
+    );
+    if (protectedFields.length > 0) {
+      return {
+        ok: false,
+        error: `system employee field(s) cannot be changed: ${protectedFields.join(", ")}`,
+      };
+    }
   }
 
   const unknownKeys = Object.keys(body).filter(
@@ -320,15 +350,24 @@ export function updateEmployeeYaml(
   name: string,
   updates: EmployeeUpdate,
 ): boolean {
-  const filePath = findEmployeeYamlPath(name);
-  if (!filePath) return false;
+  let filePath = findEmployeeYamlPath(name);
+  const systemEmployee = isSystemEmployeeName(name);
+  if (!filePath && !systemEmployee) return false;
+
+  if (!filePath) {
+    const systemDir = path.join(currentOrgDir(), "system");
+    fs.mkdirSync(systemDir, { recursive: true });
+    filePath = path.join(systemDir, `${name}.yaml`);
+    fs.writeFileSync(filePath, yaml.dump({ name }, { lineWidth: -1 }), "utf-8");
+  }
 
   try {
     const raw = fs.readFileSync(filePath, "utf-8");
     const data = yaml.load(raw) as Record<string, unknown>;
     if (!data || typeof data !== "object") return false;
 
-    for (const key of WRITABLE_FIELDS) {
+    const fields = systemEmployee ? SYSTEM_EMPLOYEE_OVERRIDE_FIELDS : WRITABLE_FIELDS;
+    for (const key of fields) {
       const value = (updates as Record<string, unknown>)[key];
       if (value === null) {
         delete data[key];

@@ -149,6 +149,9 @@ export default function TaskPage() {
     staleTime: 10_000,
   })
   const hasLiveSession = (sessions ?? []).some((s) => LIVE_SESSION_STATES.has(s.status ?? ""))
+  const dispatcherSession = (sessions ?? []).find(
+    (session) => session.employee === "todo-dispatcher" && LIVE_SESSION_STATES.has(session.status ?? ""),
+  )
 
   // ── Transient refusal callout — always the gateway's words ────────────────
   const [callout, setCallout] = useState<string | null>(null)
@@ -193,16 +196,24 @@ export default function TaskPage() {
 
   // ── Section mutations (sub-tasks, relations, attachments) ────────────────
   const qc = useQueryClient()
-  const invalidateTree = useCallback(() => {
-    void qc.invalidateQueries({ queryKey: ["work-item-tree"] })
-    void qc.invalidateQueries({ queryKey: ["work-items"] })
-    if (id) void qc.invalidateQueries({ queryKey: ["work-item", id] })
-  }, [qc, id])
   const failWith = useCallback(
     (fallback: string) => (error: unknown) =>
       announce(operatorSafeTodoError(error, error instanceof ApiError ? error.message : fallback)),
     [announce],
   )
+  const dispatchTodo = useMutation({
+    mutationFn: () => api.dispatchTodo(id!),
+    onSuccess: async (result) => {
+      await qc.invalidateQueries({ queryKey: ["work-item-sessions", id ?? ""] })
+      announce(result.reused ? "Dispatcher is already working" : "Dispatcher started")
+    },
+    onError: failWith("Couldn't start the Dispatcher"),
+  })
+  const invalidateTree = useCallback(() => {
+    void qc.invalidateQueries({ queryKey: ["work-item-tree"] })
+    void qc.invalidateQueries({ queryKey: ["work-items"] })
+    if (id) void qc.invalidateQueries({ queryKey: ["work-item", id] })
+  }, [qc, id])
   const childStatus = useMutation({
     mutationFn: ({ childId, status }: { childId: string; status: WorkItemStatusWire }) =>
       api.setWorkItemStatus(childId, status),
@@ -544,6 +555,10 @@ export default function TaskPage() {
                     byName={byName}
                     departments={departments.data}
                     rowFor={pickers.rowFor}
+                    dispatcherSession={dispatcherSession}
+                    dispatchPending={dispatchTodo.isPending}
+                    onDispatch={() => dispatchTodo.mutate()}
+                    onOpenDispatcherSession={(sessionId) => navigate(`/?session=${encodeURIComponent(sessionId)}`)}
                   />
                 </div>
               )}
@@ -566,6 +581,10 @@ export default function TaskPage() {
                   byName={byName}
                   departments={departments.data}
                   rowFor={pickers.rowFor}
+                  dispatcherSession={dispatcherSession}
+                  dispatchPending={dispatchTodo.isPending}
+                  onDispatch={() => dispatchTodo.mutate()}
+                  onOpenDispatcherSession={(sessionId) => navigate(`/?session=${encodeURIComponent(sessionId)}`)}
                 />
               </aside>
             )}

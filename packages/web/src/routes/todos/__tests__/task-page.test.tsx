@@ -27,6 +27,7 @@ const decideWorkItemApproval = vi.fn()
 const listWorkItemAttachments = vi.fn()
 const listWorkItemComments = vi.fn()
 const listWorkItemSessions = vi.fn()
+const dispatchTodo = vi.fn()
 const getOrg = vi.fn()
 const writeClipboardText = vi.fn()
 
@@ -44,6 +45,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
       workItemAttachmentUrl: (id: string, attachmentId: string) =>
         `/api/work-items/${id}/attachments/${attachmentId}`,
       listWorkItemSessions: (...args: unknown[]) => listWorkItemSessions(...args),
+      dispatchTodo: (...args: unknown[]) => dispatchTodo(...args),
       getDepartments: vi.fn().mockResolvedValue({
         departments: [{ slug: "platform", prefix: "PLA", createdAt: "2026-07-01T00:00:00.000Z", todoCount: 4 }],
       }),
@@ -139,6 +141,7 @@ beforeEach(() => {
   listWorkItemAttachments.mockResolvedValue({ attachments: [] })
   listWorkItemComments.mockResolvedValue({ comments: [], total: 0 })
   listWorkItemSessions.mockResolvedValue([])
+  dispatchTodo.mockResolvedValue({ workItemId: "PLA-12", sessionId: "dispatcher-session", status: "running", reused: false })
   getOrg.mockResolvedValue({
     departments: ["platform"],
     employees: [],
@@ -361,6 +364,22 @@ describe("the task page", () => {
     expect(screen.getByTestId("task-relations")).toBeTruthy()
     expect(screen.getByTestId("task-attachments")).toBeTruthy()
     expect(screen.getByTestId("task-props-rail")).toBeTruthy()
+  })
+
+  it("starts the Dispatcher, shows its linked session, and removes the repeat action while live", async () => {
+    getWorkItem.mockResolvedValue(detailOf(full("PLA-12", { status: "backlog" })))
+    listWorkItemSessions
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([{ id: "dispatcher-session", employee: "todo-dispatcher", status: "running", title: "Dispatch PLA-12" }])
+    renderTask()
+
+    fireEvent.click(await screen.findByTestId("rail-dispatch"))
+
+    await waitFor(() => expect(dispatchTodo).toHaveBeenCalledWith("PLA-12"))
+    const linked = await screen.findByTestId("rail-dispatch-session")
+    expect(linked.textContent).toContain("Dispatcher working")
+    expect(linked.getAttribute("data-session-id")).toBe("dispatcher-session")
+    expect(screen.queryByTestId("rail-dispatch")).toBeNull()
   })
 
   it("banner precedence: escalated wins over a pending approval", async () => {

@@ -5,7 +5,18 @@ import type { Employee } from "@/lib/api"
 // ModelSelectorRow has its own tests + needs the model registry; stub it here so
 // this test focuses on the editor's own behavior (validation, diffing, save).
 vi.mock("@/components/chat/model-selector-row", () => ({
-  ModelSelectorRow: () => null,
+  ModelSelectorRow: ({ value, onChange }: {
+    value: { engine: string; model?: string; effortLevel?: string }
+    onChange: (next: { engine: string; model?: string; effortLevel?: string }) => void
+  }) => (
+    <button
+      type="button"
+      data-testid="model-selector"
+      onClick={() => onChange({ ...value, model: "gpt-5.5", effortLevel: "medium" })}
+    >
+      Change runtime
+    </button>
+  ),
 }))
 
 const updateEmployee = vi.fn()
@@ -80,5 +91,43 @@ describe("EmployeeEditor", () => {
     render(<EmployeeEditor employee={EMP} onCancel={onCancel} onSaved={() => {}} />)
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
     expect(onCancel).toHaveBeenCalled()
+  })
+
+  it("locks system identity fields while keeping runtime knobs editable", async () => {
+    const systemEmployee: Employee = {
+      ...EMP,
+      name: "todo-dispatcher",
+      displayName: "Todo Dispatcher",
+      department: "system",
+      rank: "senior",
+      engine: "codex",
+      model: "gpt-5.6-sol",
+      effortLevel: "high",
+      persona: "Choose the best employee and hand the Todo off.",
+      cliFlags: ["--system-flag"],
+      reportsTo: "operations-lead",
+      system: true,
+    }
+    updateEmployee.mockResolvedValue({
+      status: "ok",
+      employee: { ...systemEmployee, model: "gpt-5.5", effortLevel: "medium" },
+    })
+
+    render(<EmployeeEditor employee={systemEmployee} onCancel={() => {}} onSaved={() => {}} />)
+
+    expect(screen.getByText("System")).toBeTruthy()
+    expect(screen.getByTestId("system-readonly-rank").textContent).toBe("Senior")
+    expect(screen.getByTestId("system-readonly-department").textContent).toBe("system")
+    expect(screen.getByTestId("system-readonly-persona").textContent).toContain("Choose the best employee")
+    expect(screen.queryByDisplayValue("Choose the best employee and hand the Todo off.")).toBeNull()
+    expect(screen.queryByDisplayValue("--system-flag")).toBeNull()
+
+    fireEvent.click(screen.getByTestId("model-selector"))
+    fireEvent.click(saveBtn())
+
+    await waitFor(() => expect(updateEmployee).toHaveBeenCalledWith("todo-dispatcher", {
+      model: "gpt-5.5",
+      effortLevel: "medium",
+    }))
   })
 })

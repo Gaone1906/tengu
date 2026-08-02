@@ -510,6 +510,8 @@ export interface CronDelivery {
 
 export interface Employee {
   name: string;
+  /** Gateway-stamped built-in identity. Never sourced from employee YAML. */
+  system?: boolean;
   displayName: string;
   department: string;
   rank: "executive" | "manager" | "senior" | "employee";

@@ -62,6 +62,7 @@ export interface CreateWorkspaceResult {
 
 export interface Employee {
   name: string;
+  system?: boolean;
   displayName: string;
   department: string;
   rank: "executive" | "manager" | "senior" | "employee";
@@ -838,6 +839,7 @@ export interface ApprovalEscalationResultWire {
  *  only needs the id + a status glance; the rest is passthrough). */
 export interface LinkedSessionWire {
   id: string
+  employee?: string | null
   status?: string
   title?: string | null
   lastActivity?: string | null
@@ -1198,6 +1200,11 @@ export const api = {
   /** GRS-002: execution attempts linked to a Todo (the sheet's session link). */
   listWorkItemSessions: (id: string) =>
     get<LinkedSessionWire[]>(`/api/work-items/${encodeURIComponent(id)}/sessions`),
+  dispatchTodo: (id: string) =>
+    post<{ workItemId: string; sessionId: string; status: string; reused: boolean }>(
+      `/api/work-items/${encodeURIComponent(id)}/dispatch`,
+      {},
+    ),
   /** Todos v2 slice 2: the comment thread, chronological with limit/offset. */
   listWorkItemComments: (id: string, opts?: { limit?: number; offset?: number }) => {
     const params = new URLSearchParams()

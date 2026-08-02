@@ -134,6 +134,7 @@ import { detectRateLimit, rateLimitEngineLabel } from "../shared/rateLimit.js";
 import { collectEngineLimits } from "../shared/engine-limits.js";
 import { handleRateLimit } from "../sessions/rate-limit-handler.js";
 import { resolveEngineRunMcp } from "../sessions/engine-run-mcp.js";
+import { decideJinnAttachment } from "../mcp/attachment.js";
 import { getPendingInstanceMigration, type PendingInstanceMigration } from "../migrations/service.js";
 import { createMigrationSnapshot } from "../migrations/snapshot.js";
 import { getPackageVersion } from "../shared/version.js";
@@ -253,6 +254,7 @@ import {
 import { resolveApprovalDecisionAuthority, resolveApprovalRouteTarget, resolveRootApprovalTarget } from "./approval-authority.js";
 import { approvalIsOperatorOnly } from "./workflow-todo-binding.js";
 import { scanOrg } from "./org.js";
+import { TODO_DISPATCHER_NAME } from "./system-employees.js";
 import { resolveOrgHierarchy } from "./org-hierarchy.js";
 import { surfaceManagerVisibility } from "./manager-visibility.js";
 import { searchKnowledge, readKnowledgeFile } from "../knowledge/store.js";
@@ -4038,6 +4040,110 @@ export async function handleApiRequest(
       return json(res, serializeSessionList(linked, context));
     }
 
+    // POST /api/work-items/:id/dispatch — start the built-in Todo Dispatcher.
+    // The dispatcher is itself the durable thread for this Todo, so a live one
+    // is the idempotency receipt: repeat clicks return it instead of spawning.
+    params = matchRoute("/api/work-items/:id/dispatch", pathname);
+    if (method === "POST" && params) {
+      const caller = resolveWorkItemCaller(req, res, context);
+      if (!caller) return;
+      if (!requireTodoRouteId(res, params.id)) return;
+      const item = getWorkItem(params.id);
+      if (!item) return json(res, { error: `Todo ${params.id} not found` }, 404);
+      if (STICKY_STATUSES.has(item.status)) {
+        return json(res, { error: `Todo ${item.id} is ${item.status} and cannot be dispatched` }, 409);
+      }
+      if (caller.kind === "session") {
+        const authorized = authorizeWorkItemOwnerManagerOrRoot(caller, item, "dispatch");
+        if (!authorized.ok) return json(res, { error: authorized.error }, authorized.status);
+      }
+
+      const liveDispatcher = listSessionsByWorkItem(item.id).find(
+        (session) => session.employee === TODO_DISPATCHER_NAME
+          && (session.status === "running" || session.status === "waiting"),
+      );
+      if (liveDispatcher) {
+        return json(res, {
+          workItemId: item.id,
+          sessionId: liveDispatcher.id,
+          status: liveDispatcher.status,
+          reused: true,
+        });
+      }
+
+      const config = context.getConfig();
+      const dispatcher = scanOrg(config).get(TODO_DISPATCHER_NAME);
+      if (!dispatcher?.system) {
+        return serverError(res, "the built-in Todo Dispatcher is unavailable");
+      }
+      const attachment = decideJinnAttachment({
+        globalMcp: config.mcp,
+        employee: dispatcher,
+        engine: dispatcher.engine,
+      });
+      if (!attachment.attach) {
+        return json(res, {
+          error: `Todo Dispatcher cannot run on engine "${dispatcher.engine}" because it cannot attach the jinn toolset: ${attachment.reason}. Change the Dispatcher engine override or the mcp.gateway settings, then try again.`,
+        }, 409);
+      }
+
+      const engine = context.sessionManager.getEngine(dispatcher.engine);
+      if (!engine) {
+        return json(res, { error: `engine "${dispatcher.engine}" not available; change the Dispatcher engine override and try again` }, 502);
+      }
+
+      const prompt = [
+        `Dispatch Todo ${item.id}.`,
+        `Title: ${item.title}`,
+        item.body ? `Body:\n${item.body}` : "Body: (none)",
+        item.acceptance ? `Acceptance criteria:\n${item.acceptance}` : "Acceptance criteria: (none)",
+      ].join("\n\n");
+      const sessionKey = `todo-dispatcher:${item.id}:${crypto.randomUUID()}`;
+      const session = createSession({
+        engine: dispatcher.engine,
+        source: "web",
+        sourceRef: sessionKey,
+        connector: "web",
+        sessionKey,
+        replyContext: { source: "web" },
+        employee: dispatcher.name,
+        model: dispatcher.model,
+        effortLevel: dispatcher.effortLevel,
+        prompt,
+        title: `Dispatch ${item.id}`,
+        portalName: config.portal?.portalName,
+      });
+      insertMessage(session.id, "user", prompt);
+      try {
+        linkSession(item.id, session.id);
+      } catch (error) {
+        return serverError(
+          res,
+          `Todo Dispatcher was not started because its session could not be linked: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+
+      updateSession(session.id, { status: "running", lastActivity: new Date().toISOString() });
+      session.status = "running";
+      try {
+        reconcileWorkItem(item.id);
+      } catch (error) {
+        logger.warn(`Todo Dispatcher ${session.id} reconcile failed: ${error instanceof Error ? error.message : error}`);
+      }
+      const queueKey = session.sessionKey || session.sourceRef || session.id;
+      const queueItemId = enqueueQueueItem(session.id, queueKey, prompt);
+      context.emit("queue:updated", { sessionId: session.id, sessionKey: queueKey });
+      dispatchWebSessionRun(session, prompt, engine, config, context, { queueItemId });
+      emitTodoProjectionEvent(context, item.id, "dispatched");
+
+      return json(res, {
+        workItemId: item.id,
+        sessionId: session.id,
+        status: session.status,
+        reused: false,
+      }, 201);
+    }
+
     // GET /api/work-items/:id/tree — subtree with status totals + derived spend.
     params = matchRoute("/api/work-items/:id/tree", pathname);
     if (method === "GET" && params) {
@@ -4778,7 +4884,7 @@ export async function handleApiRequest(
       let orgRegistry: Map<string, Employee> | undefined;
       let delegateEmployee: Employee | undefined;
       if (employeeName) {
-        orgRegistry = scanOrg();
+        orgRegistry = scanOrg(config);
         delegateEmployee = orgRegistry.get(employeeName);
         if (!delegateEmployee) {
           return badRequest(res, `unknown employee "${employeeName}" — GET /api/org lists valid employees`);
@@ -4838,8 +4944,13 @@ export async function handleApiRequest(
               );
           if (!authorized.ok) return json(res, { error: authorized.error }, authorized.status);
         }
+        const dispatcherCallerId = delegationCaller.kind === "session"
+          && getSession(delegationCaller.callerId)?.employee === TODO_DISPATCHER_NAME
+          ? delegationCaller.callerId
+          : undefined;
         const liveAttempt = listSessionsByWorkItem(workItem.id).find((attempt) =>
-          attempt.status === "running" || attempt.status === "waiting",
+          (attempt.status === "running" || attempt.status === "waiting")
+          && attempt.id !== dispatcherCallerId,
         );
         if (liveAttempt) {
           return json(res, {
@@ -5753,15 +5864,16 @@ export async function handleApiRequest(
 
     // GET /api/org
     if (method === "GET" && pathname === "/api/org") {
-      if (!fs.existsSync(ORG_DIR)) return json(res, { departments: [], employees: [], hierarchy: { root: null, sorted: [], warnings: [] } });
-      const entries = fs.readdirSync(ORG_DIR, { withFileTypes: true });
+      const entries = fs.existsSync(ORG_DIR)
+        ? fs.readdirSync(ORG_DIR, { withFileTypes: true })
+        : [];
       const departments = entries
         .filter((e) => e.isDirectory())
         .map((e) => e.name);
 
       const { scanOrg } = await import("./org.js");
       const { resolveOrgHierarchy } = await import("./org-hierarchy.js");
-      const orgRegistry = scanOrg();
+      const orgRegistry = scanOrg(context.getConfig());
       const hierarchy = resolveOrgHierarchy(orgRegistry);
 
       const employees = hierarchy.sorted.map((name) => {
@@ -5795,7 +5907,7 @@ export async function handleApiRequest(
     if (method === "GET" && params) {
       const { scanOrg } = await import("./org.js");
       const { resolveOrgHierarchy } = await import("./org-hierarchy.js");
-      const orgRegistry = scanOrg();
+      const orgRegistry = scanOrg(context.getConfig());
       const emp = orgRegistry.get(params.name);
       if (!emp) return notFound(res);
 
@@ -5821,7 +5933,7 @@ export async function handleApiRequest(
         return badRequest(res, "update body must be a JSON object");
       }
       const { scanOrg, updateEmployeeYaml, validateEmployeeUpdate } = await import("./org.js");
-      const current = scanOrg().get(params.name);
+      const current = scanOrg(context.getConfig()).get(params.name);
       if (!current) return notFound(res);
 
       const result = validateEmployeeUpdate(context.getConfig(), current, body);
@@ -5835,7 +5947,7 @@ export async function handleApiRequest(
       context.reloadOrg?.();
       context.emit("org:updated", { employee: params.name });
 
-      const updated = scanOrg().get(params.name);
+      const updated = scanOrg(context.getConfig()).get(params.name);
       return json(res, { status: "ok", employee: updated ?? null });
     }
 
@@ -6849,7 +6961,7 @@ async function runWebSession(
   if (currentSession.employee) {
     const { findEmployee } = await import("./org.js");
     const { scanOrg } = await import("./org.js");
-    const registry = scanOrg();
+    const registry = scanOrg(config);
     employee = findEmployee(currentSession.employee, registry);
   }
 
@@ -6879,7 +6991,7 @@ async function runWebSession(
 
   const { scanOrg: scanOrgForHierarchy } = await import("./org.js");
   const { resolveOrgHierarchy } = await import("./org-hierarchy.js");
-  const orgHierarchy = resolveOrgHierarchy(scanOrgForHierarchy());
+  const orgHierarchy = resolveOrgHierarchy(scanOrgForHierarchy(config));
 
   // Declared in the function scope so the whole turn lifecycle — including any
   // rate-limit retry/fallback — reuses the same mcpConfigPath (parity with
