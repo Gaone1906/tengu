@@ -25,9 +25,9 @@ import { currentApproval, currentApprovalsByItem, type WorkItemApproval } from '
  * always none — the §1.3 anti-bottleneck principle: creates cannot attach one),
  * and the append-only `work_item_events` audit.
  *
- * Trust the DB, not just TS callers: status/priority/source/approval_state are
- * enforced by CHECK constraints and machine-minted idempotency by a partial
- * UNIQUE index (DDL in `migrate.ts`).
+ * Trust the DB, not just TS callers: status/priority/source are enforced by
+ * CHECK constraints and machine-minted idempotency by a partial UNIQUE index
+ * (DDL in `migrate.ts`).
  */
 
 export type WorkItemStatus =
@@ -230,7 +230,15 @@ function parseVerifyPolicy(raw: unknown): VerifyPolicy | null {
   }
 }
 
-function rowToWorkItem(row: Record<string, unknown>): WorkItem {
+/** A work_items row as stored: everything on a WorkItem EXCEPT the approval
+ *  facts, which live only in `work_item_approvals`. Producing a WorkItem
+ *  therefore requires `overlayApproval` — a read path that skips hydration
+ *  cannot silently serve all-null approvals, because it will not typecheck. */
+type WorkItemRowBase = Omit<WorkItem,
+  | 'approvalState' | 'approvalRequest' | 'approvalRef' | 'approvalOptions' | 'approvalChoice' | 'approvalOperatorOnly'
+  | 'approvalTarget' | 'approvalTargetKind' | 'approvalEscalatedAt' | 'approvalDecidedBy' | 'approvalDecidedAt'>;
+
+function rowToWorkItem(row: Record<string, unknown>): WorkItemRowBase {
   return {
     id: row.id as string,
     title: row.title as string,
@@ -252,18 +260,6 @@ function rowToWorkItem(row: Record<string, unknown>): WorkItem {
     verifyPolicy: parseVerifyPolicy(row.verify_policy),
     rounds: (row.rounds as number) ?? 0,
     budgetUsd: (row.budget_usd as number) ?? null,
-    approvalState: (row.approval_state as ApprovalState) ?? null,
-    approvalRequest: (row.approval_request as string) ?? null,
-    approvalRef: (row.approval_ref as string) ?? null,
-    // Frozen legacy columns never carried options; only the overlay sets them.
-    approvalOptions: null,
-    approvalChoice: null,
-    approvalOperatorOnly: false,
-    approvalTarget: (row.approval_target as string) ?? null,
-    approvalTargetKind: (row.approval_target_kind as ApprovalTargetKind) ?? null,
-    approvalEscalatedAt: (row.approval_escalated_at as string) ?? null,
-    approvalDecidedBy: (row.approval_decided_by as string) ?? null,
-    approvalDecidedAt: (row.approval_decided_at as string) ?? null,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
     closedAt: (row.closed_at as string) ?? null,
@@ -271,34 +267,31 @@ function rowToWorkItem(row: Record<string, unknown>): WorkItem {
 }
 
 /**
- * Slice-4 dual-read seam: the legacy `approval_*` columns are FROZEN (never
- * written after the backfill), so every WorkItem leaving this module overlays
- * them from the item's current `work_item_approvals` row. `rowToWorkItem` itself
- * still maps the raw columns — the overlay is applied explicitly at the read
- * functions (single reads hydrate per item; page/tree reads batch), which keeps
- * EVERY consumer (payloads, authority checks, activity cards, transitions'
- * returns) byte-identical to the pre-slice column-backed values.
+ * The ONLY producer of a WorkItem's approval fields: the item's current
+ * `work_item_approvals` row, or "no approval" when it has none. Applied
+ * explicitly at every read function (single reads hydrate per item; page/tree
+ * reads batch), which keeps EVERY consumer — payloads, authority checks,
+ * activity cards, transitions' returns — sourcing approvals from one place.
  */
-function overlayApproval(item: WorkItem, row: WorkItemApproval | undefined): WorkItem {
-  if (!row) return item;
+function overlayApproval(base: WorkItemRowBase, row: WorkItemApproval | undefined): WorkItem {
   return {
-    ...item,
-    approvalState: row.state,
-    approvalRequest: row.request,
-    approvalRef: row.ref,
-    approvalOptions: row.options,
-    approvalChoice: row.choice,
-    approvalOperatorOnly: row.operatorOnly,
-    approvalTarget: row.target,
-    approvalTargetKind: row.targetKind,
-    approvalEscalatedAt: row.escalatedAt,
-    approvalDecidedBy: row.decidedBy,
-    approvalDecidedAt: row.decidedAt,
+    ...base,
+    approvalState: row?.state ?? null,
+    approvalRequest: row?.request ?? null,
+    approvalRef: row?.ref ?? null,
+    approvalOptions: row?.options ?? null,
+    approvalChoice: row?.choice ?? null,
+    approvalOperatorOnly: row?.operatorOnly ?? false,
+    approvalTarget: row?.target ?? null,
+    approvalTargetKind: row?.targetKind ?? null,
+    approvalEscalatedAt: row?.escalatedAt ?? null,
+    approvalDecidedBy: row?.decidedBy ?? null,
+    approvalDecidedAt: row?.decidedAt ?? null,
   };
 }
 
-function hydrateApprovals(items: WorkItem[]): WorkItem[] {
-  if (items.length === 0) return items;
+function hydrateApprovals(items: WorkItemRowBase[]): WorkItem[] {
+  if (items.length === 0) return [];
   const currentByItem = currentApprovalsByItem(items.map((item) => item.id));
   return items.map((item) => overlayApproval(item, currentByItem.get(item.id)));
 }
@@ -550,7 +543,7 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
       .prepare('SELECT * FROM work_items WHERE source = ? AND source_ref = ?')
       .get(source, sourceRef) as Record<string, unknown> | undefined;
     // Overlay like every other WorkItem-producing read: a retried machine mint
-    // can hit an item that has since gained an approval (dual-read seam).
+    // can hit an item that has since gained an approval.
     return row ? overlayApproval(rowToWorkItem(row), currentApproval(row.id as string)) : undefined;
   };
 
@@ -733,8 +726,8 @@ function workItemWhere(filter: ListWorkItemsFilter): { sql: string; values: unkn
     values.push(filter.label, filter.label);
   }
   if (filter.needsAttentionFor) {
-    // Pending approvals live in work_item_approvals (slice 4) — the frozen
-    // approval_* columns are no longer consulted anywhere.
+    // Approvals live in work_item_approvals — their sole storage owner since
+    // PLA-48 dropped the shadow columns from work_items.
     conditions.push(
       "(EXISTS (SELECT 1 FROM work_item_approvals wap WHERE wap.work_item_id = work_items.id AND wap.state = 'pending' AND wap.target = ?) OR (assignee = ? AND status IN ('blocked', 'escalated')))",
     );

@@ -109,7 +109,7 @@ describe("v1 → v2 migration", () => {
   });
 });
 
-/* ── Todos v2 slice 4: work_item_approvals backfill + self-heal + verifier ──── */
+/* ── Todos v2 slice 4 + PLA-48: work_item_approvals as the sole owner ───────── */
 
 function freshV2(file: string): Database.Database {
   const fresh = new Database(file);
@@ -118,10 +118,13 @@ function freshV2(file: string): Database.Database {
   return fresh;
 }
 
-function seedItemWithColumns(
-  fresh: Database.Database,
-  approval: Record<string, string | null> | null,
-): string {
+function approvalColumns(db: Database.Database): string[] {
+  return (db.prepare("PRAGMA table_info(work_items)").all() as Array<{ name: string }>)
+    .map((column) => column.name).filter((name) => name.startsWith("approval_"));
+}
+
+/** Seed one item; `approval` (legacy-shape databases only) fills the shadow columns. */
+function seedItem(fresh: Database.Database, approval?: Record<string, string | null>): string {
   const base = "2026-07-01T00:00:00.000Z";
   const claim = migrate.allocateWorkItemId(fresh, base, "ACM");
   migrate.useWorkItemAllocationClaim(fresh, claim, () => {
@@ -134,65 +137,62 @@ function seedItemWithColumns(
     fresh.prepare(
       `UPDATE work_items SET approval_state = @state, approval_request = @request, approval_ref = @ref,
          approval_target = @target, approval_target_kind = @target_kind, approval_escalated_at = @escalated_at,
-         approval_decided_by = @decided_by, approval_decided_at = @decided_at
-       WHERE id = @id`,
+         approval_decided_by = @decided_by, approval_decided_at = @decided_at WHERE id = @id`,
     ).run({
-      state: null, request: null, ref: null, target: null, target_kind: null,
-      escalated_at: null, decided_by: null, decided_at: null,
-      ...approval,
-      id: claim.id,
+      state: null, request: null, ref: null, target: null, target_kind: null, escalated_at: null, decided_by: null, decided_at: null, ...approval, id: claim.id,
     });
   }
   return claim.id;
 }
 
-describe("work_item_approvals backfill", () => {
-  it("copies pending/decided/escalated column values into exactly one row per item, skips NULL items, and is idempotent", () => {
+describe("legacy approval columns heal into work_item_approvals", () => {
+  it("a fresh v2 database carries no approval_% column and verifies clean", () => {
+    const db = freshV2(path.join(tmp, "registry-no-approval-columns.db"));
+    expect(approvalColumns(db)).toEqual([]);
+    migrate.verifyCurrentWorkItemSchema(db);
+    db.close();
+  });
+
+  it("classifies a legacy-shape database as current, moves the values off-row, drops the columns, and re-runs as a no-op", () => {
     const file = path.join(tmp, "registry-backfill.db");
-    const db = freshV2(file);
-    const pendingId = seedItemWithColumns(db, {
-      state: "pending", request: "legacy pending gate", ref: "workflow-gate:old:run:g",
-      target: "coo", target_kind: "employee",
-    });
-    const decidedId = seedItemWithColumns(db, {
-      state: "approved", request: "legacy decided gate", target: "coo", target_kind: "employee",
-      escalated_at: "2026-07-02T00:00:00.000Z", decided_by: "operator", decided_at: "2026-07-03T00:00:00.000Z",
-    });
-    const plainId = seedItemWithColumns(db, null);
+    // A pre-PLA-48 home: work_items still carries the shadow approval_* columns,
+    // with the real indexes and triggers; the additive tables never shipped.
+    const legacy = new Database(file);
+    migrate.registerWorkItemIdentityFunctions(legacy);
+    for (const ddl of [migrate.WORK_ITEM_IDENTITY_TABLES_DDL, migrate.V2_APPROVAL_WORK_ITEMS_TABLE_DDL,
+      migrate.WORK_ITEMS_INDEX_DDL, migrate.WORK_ITEM_EVENTS_DDL, migrate.WORK_ITEM_EDIT_RECEIPTS_DDL,
+      migrate.WORK_ITEM_IDENTITY_TRIGGERS_DDL]) legacy.exec(ddl);
+    const pendingId = seedItem(legacy, { state: "pending", request: "legacy pending gate", ref: "workflow-gate:old:run:g", target: "coo", target_kind: "employee" });
+    const decidedId = seedItem(legacy, { state: "approved", request: "legacy decided gate", target: "coo", target_kind: "employee", escalated_at: "2026-07-02T00:00:00.000Z", decided_by: "operator", decided_at: "2026-07-03T00:00:00.000Z" });
+    const plainId = seedItem(legacy);
+    expect(approvalColumns(legacy).length).toBe(8);
+    legacy.close();
 
-    const first = migrate.backfillWorkItemApprovals(db);
-    expect(first).toBe(2);
+    expect(migrate.preflightWorkItemsDatabase(file)).toBe("current");
+    const db = new Database(file);
+    migrate.registerWorkItemIdentityFunctions(db);
+    expect(migrate.migrateWorkItemsSchema(db).rebuilt).toBe(false);
+    migrate.verifyCurrentWorkItemSchema(db);
+    expect(approvalColumns(db)).toEqual([]);
 
-    const rows = db
-      .prepare("SELECT * FROM work_item_approvals ORDER BY work_item_id")
-      .all() as Array<Record<string, unknown>>;
+    const rows = db.prepare("SELECT * FROM work_item_approvals ORDER BY work_item_id").all() as Array<Record<string, unknown>>;
     expect(rows.length).toBe(2);
-    const pendingRow = rows.find((r) => r.work_item_id === pendingId)!;
-    expect(pendingRow.state).toBe("pending");
-    expect(pendingRow.request).toBe("legacy pending gate");
-    expect(pendingRow.ref).toBe("workflow-gate:old:run:g");
-    expect(pendingRow.target).toBe("coo");
-    expect(pendingRow.target_kind).toBe("employee");
-    expect(pendingRow.requested_by).toBe("legacy");
-    expect(pendingRow.requested_at).toBeTruthy();
-    expect(pendingRow.decided_by).toBeNull();
-    const decidedRow = rows.find((r) => r.work_item_id === decidedId)!;
-    expect(decidedRow.state).toBe("approved");
-    expect(decidedRow.escalated_at).toBe("2026-07-02T00:00:00.000Z");
-    expect(decidedRow.decided_by).toBe("operator");
-    expect(decidedRow.decided_at).toBe("2026-07-03T00:00:00.000Z");
+    expect(rows.find((r) => r.work_item_id === pendingId)).toMatchObject({
+      state: "pending", request: "legacy pending gate", ref: "workflow-gate:old:run:g", target: "coo",
+      target_kind: "employee", requested_by: "legacy", requested_at: "2026-07-01T00:00:00.000Z", decided_by: null,
+    });
+    expect(rows.find((r) => r.work_item_id === decidedId)).toMatchObject({
+      state: "approved", escalated_at: "2026-07-02T00:00:00.000Z",
+      decided_by: "operator", decided_at: "2026-07-03T00:00:00.000Z",
+    });
     expect(rows.some((r) => r.work_item_id === plainId)).toBe(false);
 
-    // idempotent: a re-run inserts nothing and changes nothing
+    // a second boot inserts nothing and changes nothing
     const before = JSON.stringify(rows);
-    expect(migrate.backfillWorkItemApprovals(db)).toBe(0);
-    const after = JSON.stringify(db.prepare("SELECT * FROM work_item_approvals ORDER BY work_item_id").all());
-    expect(after).toBe(before);
-
-    // the frozen columns themselves are untouched by the backfill
-    const cols = db.prepare("SELECT approval_state FROM work_items WHERE id = ?").get(pendingId) as { approval_state: string };
-    expect(cols.approval_state).toBe("pending");
+    expect(migrate.migrateWorkItemsSchema(db).rebuilt).toBe(false);
+    expect(JSON.stringify(db.prepare("SELECT * FROM work_item_approvals ORDER BY work_item_id").all())).toBe(before);
     db.close();
+    expect(migrate.preflightWorkItemsDatabase(file)).toBe("current");
   });
 
   it("backfills during the v1 → v2 rebuild", () => {
@@ -213,15 +213,16 @@ describe("work_item_approvals backfill", () => {
     expect(row.state).toBe("pending");
     expect(row.request).toBe("v1 pending");
     expect(row.requested_by).toBe("legacy");
+    expect(approvalColumns(db)).toEqual([]);
     db.close();
   });
 });
 
 describe("work_item_approvals self-heal + verifier", () => {
-  it("boots a v2 DB missing the approvals table additively and backfills column carriers", () => {
+  it("boots a v2 DB missing the approvals table additively", () => {
     const file = path.join(tmp, "registry-heal-approvals.db");
     const db = freshV2(file);
-    const carrierId = seedItemWithColumns(db, { state: "pending", request: "heal me", target: "coo", target_kind: "employee" });
+    seedItem(db);
     db.exec("DROP TABLE work_item_approvals");
     db.close();
 
@@ -231,15 +232,14 @@ describe("work_item_approvals self-heal + verifier", () => {
     migrate.registerWorkItemIdentityFunctions(reopened);
     expect(migrate.migrateWorkItemsSchema(reopened).rebuilt).toBe(false);
     migrate.verifyCurrentWorkItemSchema(reopened);
-    const row = reopened.prepare("SELECT state, request FROM work_item_approvals WHERE work_item_id = ?").get(carrierId) as Record<string, unknown>;
-    expect(row).toEqual({ state: "pending", request: "heal me" });
+    expect(reopened.prepare("SELECT count(*) AS n FROM work_item_approvals").get()).toEqual({ n: 0 });
     reopened.close();
   });
 
   it("verifier refuses a dangling approval row (unknown work item)", () => {
     const file = path.join(tmp, "registry-verify-dangling.db");
     const db = freshV2(file);
-    seedItemWithColumns(db, null);
+    seedItem(db);
     db.pragma("foreign_keys = OFF");
     db.prepare(
       `INSERT INTO work_item_approvals (id, work_item_id, state, request, requested_by, requested_at)
@@ -252,7 +252,7 @@ describe("work_item_approvals self-heal + verifier", () => {
   it("verifier refuses two pending rows for one item even if the unique index is gone (belt and suspenders)", () => {
     const file = path.join(tmp, "registry-verify-dup-pending.db");
     const db = freshV2(file);
-    const id = seedItemWithColumns(db, null);
+    const id = seedItem(db);
     db.exec("DROP INDEX uq_wap_pending");
     for (const rowId of ["wap_bbbbbbbbbbbb", "wap_cccccccccccc"]) {
       db.prepare(
@@ -269,7 +269,7 @@ describe("work_item_approvals self-heal + verifier", () => {
   it("boots a v2 DB missing the operator-only table additively", () => {
     const file = path.join(tmp, "registry-heal-operator-only.db");
     const db = freshV2(file);
-    seedItemWithColumns(db, { state: "pending", request: "reserve me", target: "coo", target_kind: "employee" });
+    seedItem(db);
     db.exec("DROP TABLE work_item_approval_operator_only");
     db.close();
 
