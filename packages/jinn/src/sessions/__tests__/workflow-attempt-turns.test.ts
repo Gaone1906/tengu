@@ -79,7 +79,6 @@ function managerWith(runs: EngineRunOpts[]) {
   return new managerModule.SessionManager(
     config(),
     new Map([[engine.name, engine]]),
-    [],
     "test-boot",
     (id) => id === employee.name ? employee : undefined,
   );
@@ -113,7 +112,6 @@ describe("workflow attempt per-turn completion", () => {
     const manager = new managerModule.SessionManager(
       config(),
       new Map([[engine.name, engine]]),
-      [],
       "test-boot",
       (id) => id === employee.name ? employee : undefined,
     );
@@ -224,7 +222,6 @@ describe("workflow attempt per-turn completion", () => {
     const manager = new managerModule.SessionManager(
       config(),
       new Map([[engine.name, engine]]),
-      [],
       "test-boot",
       (id) => id === employee.name ? employee : undefined,
     );

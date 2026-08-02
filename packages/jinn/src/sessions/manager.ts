@@ -145,7 +145,6 @@ export function mergeTransportMeta(
 export class SessionManager {
   private config: JinnConfig;
   private engines: Map<string, Engine>;
-  private connectorNames: string[];
   private gatewayBootId: string;
   private queue = new SessionQueue();
   private connectorProvider: () => Map<string, Connector> = () => new Map();
@@ -155,13 +154,11 @@ export class SessionManager {
   constructor(
     config: JinnConfig,
     engines: Map<string, Engine>,
-    connectorNames: string[] = [],
     gatewayBootId = "",
     private readonly employeeProvider: (id: string) => Employee | undefined = () => undefined,
   ) {
     this.config = config;
     this.engines = engines;
-    this.connectorNames = connectorNames;
     this.gatewayBootId = gatewayBootId;
     this.recoverWorkflowAttemptDispatches();
   }
@@ -173,6 +170,9 @@ export class SessionManager {
   setConnectorProvider(provider: () => Map<string, Connector>): void {
     this.connectorProvider = provider;
   }
+
+  /** Live connector ids — reflects reloads, with no cached copy to refresh. */
+  private connectorNames(): string[] { return [...this.connectorProvider().keys()]; }
 
   setConfig(config: JinnConfig): void {
     this.config = config;
@@ -431,7 +431,7 @@ export class SessionManager {
         user: msg.user,
         employee,
         engine: session.engine,
-        connectors: this.connectorNames,
+        connectors: this.connectorNames(),
         config: this.config,
         gatewayBootId: this.gatewayBootId,
         sessionId: session.id,

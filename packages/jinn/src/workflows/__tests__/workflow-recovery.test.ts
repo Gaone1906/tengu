@@ -364,7 +364,7 @@ describe("Workflow retry, cancellation, and restart recovery", () => {
     const sessionConfig = { gateway: { port: 0, host: "127.0.0.1" }, engines: { default: "test-engine",
       claude: { bin: "", model: "test" }, codex: { bin: "", model: "test" }, "test-engine": {} },
       connectors: {}, logging: { file: false, stdout: false, level: "error" } } as unknown as JinnConfig;
-    const sessions = new SessionManager(sessionConfig, new Map([[engine.name, engine]]), [], "reconstructed",
+    const sessions = new SessionManager(sessionConfig, new Map([[engine.name, engine]]), "reconstructed",
       (id) => id === employee.name ? employee : undefined);
     service.dispose();
     service = new WorkflowService({ repository, executor: new RealExecutor(sessions),
