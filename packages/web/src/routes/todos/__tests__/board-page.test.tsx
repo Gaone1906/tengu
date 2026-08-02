@@ -1,12 +1,13 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
-import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom"
+import { MemoryRouter, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { WorkItemCompactWire, WorkItemListWire, WorkItemStatusWire, WorkItemTreeWire } from "@/lib/api"
 import { useQueryInvalidation } from "@/hooks/use-query-invalidation"
 import TodoBoardPage from "../board/board-page"
 import { boardColumnQueryKey, boardScopeParams } from "../board/use-board"
 import { clearBoardScrollCache } from "../board/board-route"
+import { useSetWorkItemStatus } from "../use-todos"
 
 vi.mock("@/components/page-layout", () => ({ PageLayout: ({ children }: { children: React.ReactNode }) => <>{children}</> }))
 vi.mock("@/routes/settings-provider", () => ({ useSettings: () => ({ settings: { employeeOverrides: {} } }) }))
@@ -149,6 +150,67 @@ function LiveInvalidation() {
   return null
 }
 
+function BoardNavigationProbe() {
+  const navigate = useNavigate()
+  return (
+    <>
+      <button type="button" data-testid="open-unloaded-todo" onClick={() => navigate("/todos/PLA-99", { state: { fromBoard: "my" } })}>
+        Open unloaded Todo
+      </button>
+      <TodoBoardPage />
+    </>
+  )
+}
+
+function DetailNavigationProbe() {
+  const { todoId } = useParams()
+  const navigate = useNavigate()
+  const setStatus = useSetWorkItemStatus()
+  return (
+    <>
+      <button
+        type="button"
+        data-testid="detail-change-status"
+        onClick={() => setStatus.mutate({ id: todoId!, status: "in_review" })}
+      >
+        Change status
+      </button>
+      <button type="button" data-testid="detail-browser-back" onClick={() => navigate(-1)}>Back</button>
+      <button type="button" data-testid="detail-my-requests" onClick={() => navigate("/todos/b/my")}>My Requests</button>
+    </>
+  )
+}
+
+function renderBoardNavigation() {
+  const client = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false, refetchOnMount: false },
+      mutations: { retry: false },
+    },
+  })
+  const view = render(
+    <QueryClientProvider client={client}>
+      <MemoryRouter initialEntries={["/todos/b/my"]}>
+        <Routes>
+          <Route path="/todos/b/:board" element={<BoardNavigationProbe />} />
+          <Route path="/todos/:todoId" element={<DetailNavigationProbe />} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  )
+  return { ...view, client }
+}
+
+function boardStatusRequestCount(): number {
+  return listWorkItems.mock.calls.filter(([params]) => params?.status).length
+}
+
+function expectColumnCountMatchesCards(status: WorkItemStatusWire): void {
+  const column = screen.getByTestId(`board-column-${status}`)
+  const count = Number(column.getAttribute("aria-label")?.match(/, (\d+) items$/)?.[1])
+  expect(column.querySelectorAll("[data-board-card]")).toHaveLength(count)
+}
+
 function renderBoard(path: string, live = false) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
   const view = render(
@@ -195,6 +257,89 @@ describe("boardScopeParams — the board data wiring", () => {
 })
 
 describe("the board surface", () => {
+  it.each([
+    ["browser Back", "detail-browser-back"],
+    ["My Requests link", "detail-my-requests"],
+  ])("resyncs invalidated columns after a detail status write via %s, but skips a fresh no-write return", async (_label, returnControl) => {
+    const todo = compact({ id: "PLA-1", status: "backlog", version: 4 })
+    rows.backlog = [todo]
+    totals.backlog = 1
+    setWorkItemStatus.mockImplementation(async () => {
+      rows.backlog = []
+      rows.in_review = [{ ...todo, status: "in_review", version: 5 }]
+      totals.backlog = 0
+      totals.in_review = 1
+      return undefined
+    })
+    const { client } = renderBoardNavigation()
+
+    fireEvent.click(await screen.findByTestId("board-card-PLA-1"))
+    await screen.findByTestId("detail-change-status")
+    fireEvent.click(screen.getByTestId("detail-change-status"))
+    await waitFor(() => {
+      const key = boardColumnQueryKey({ kind: "my" }, "backlog", { status: "open" })
+      expect(client.getQueryState(key)?.isInvalidated).toBe(true)
+    })
+    expect(boardStatusRequestCount()).toBe(8)
+
+    fireEvent.click(screen.getByTestId(returnControl))
+    expect(screen.queryByTestId("board-skeleton")).toBeNull()
+    await waitFor(() => expect(boardStatusRequestCount()).toBe(16))
+    const moved = screen.getByTestId("board-card-PLA-1")
+    expect(screen.getByTestId("board-column-backlog").contains(moved)).toBe(false)
+    expect(screen.getByTestId("board-column-in_review").contains(moved)).toBe(true)
+    expectColumnCountMatchesCards("backlog")
+    expectColumnCountMatchesCards("in_review")
+
+    fireEvent.click(moved)
+    await screen.findByTestId("detail-browser-back")
+    listWorkItems.mockClear()
+    fireEvent.click(screen.getByTestId(returnControl))
+    await screen.findByTestId("board-card-PLA-1")
+    expect(boardStatusRequestCount()).toBe(0)
+  })
+
+  it("recovers a changed Todo that was outside every cached board page without flashing cached content", async () => {
+    const cached = compact({ id: "PLA-1", status: "backlog" })
+    const outsidePage = compact({ id: "PLA-99", status: "backlog", version: 4 })
+    rows.backlog = [cached]
+    totals.backlog = 2
+    setWorkItemStatus.mockImplementation(async () => {
+      rows.in_review = [{ ...outsidePage, status: "in_review", version: 5 }]
+      totals.backlog = 1
+      totals.in_review = 1
+      return undefined
+    })
+    const { client } = renderBoardNavigation()
+
+    await screen.findByTestId("board-card-PLA-1")
+    fireEvent.click(screen.getByTestId("open-unloaded-todo"))
+    fireEvent.click(await screen.findByTestId("detail-change-status"))
+    await waitFor(() => {
+      const key = boardColumnQueryKey({ kind: "my" }, "backlog", { status: "open" })
+      expect(client.getQueryState(key)?.isInvalidated).toBe(true)
+    })
+
+    const pending: Array<{ status: WorkItemStatusWire | undefined; release: () => void }> = []
+    listWorkItems.mockImplementation((params: { status?: WorkItemStatusWire }) => new Promise((resolve) => {
+      pending.push({ status: params.status, release: () => resolve(listResponse(params)) })
+    }))
+    fireEvent.click(screen.getByTestId("detail-browser-back"))
+
+    expect(screen.getByTestId("board-card-PLA-1")).toBeTruthy()
+    expect(screen.queryByTestId("board-card-PLA-99")).toBeNull()
+    expect(screen.queryByTestId("board-skeleton")).toBeNull()
+    expect(screen.queryByTestId("board-filtered-empty")).toBeNull()
+    await waitFor(() => expect(pending.filter(({ status }) => status)).toHaveLength(8))
+    await act(async () => pending.splice(0).forEach(({ release }) => release()))
+
+    const moved = await screen.findByTestId("board-card-PLA-99")
+    expect(screen.getByTestId("board-column-backlog").contains(moved)).toBe(false)
+    expect(screen.getByTestId("board-column-in_review").contains(moved)).toBe(true)
+    expectColumnCountMatchesCards("backlog")
+    expectColumnCountMatchesCards("in_review")
+  })
+
   it("loads enrichment for 60 cards in at most two batch requests", async () => {
     rows.executing = Array.from({ length: 20 }, (_, index) =>
       compact({ id: `PLA-${index + 1}`, status: "executing" }),

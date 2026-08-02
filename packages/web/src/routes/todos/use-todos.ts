@@ -8,7 +8,7 @@ import {
   type WorkItemOpenDetailWire,
   type WorkItemLabelWire,
 } from "@/lib/api"
-import { queryKeys, TODO_WRITE_KEY } from "@/lib/query-keys"
+import { queryKeys, TODO_QUERY_FRESHNESS, TODO_WRITE_KEY } from "@/lib/query-keys"
 import { todoStatusMutationOptions } from "./todo-status-mutation"
 
 /* GRS-021d/027 + design-todos §7 → slice 6 — the shared Todos data layer.
@@ -25,7 +25,7 @@ export function useOpenDetails(openIds: string[], enabled = true) {
     queryKey: ["work-items", "open-details", key],
     queryFn: async (): Promise<WorkItemOpenDetailWire[]> => (await api.getWorkItems(openIds)).workItems,
     enabled: enabled && openIds.length > 0,
-    staleTime: 10_000,
+    ...TODO_QUERY_FRESHNESS,
   })
 }
 
@@ -35,7 +35,7 @@ export function useTodoById(todoId: string | null) {
   return useQuery<WorkItemDetailWire | null>({
     queryKey: ["work-item", todoId ?? ""],
     enabled: Boolean(todoId),
-    staleTime: 10_000,
+    ...TODO_QUERY_FRESHNESS,
     retry: false,
     queryFn: async ({ signal }): Promise<WorkItemDetailWire | null> => {
       if (!todoId) return null
@@ -64,7 +64,7 @@ export function useNeedsAttentionItems() {
       }
       return items
     },
-    staleTime: 10_000,
+    ...TODO_QUERY_FRESHNESS,
   })
 }
 
