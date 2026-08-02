@@ -8,7 +8,7 @@ import {
   type WorkItemTreeWire,
 } from "@/lib/api"
 import { dateBounds, type TodoFilters } from "@/lib/todos"
-import { TODO_WRITE_KEY } from "@/lib/query-keys"
+import { TODO_QUERY_FRESHNESS, TODO_WRITE_KEY } from "@/lib/query-keys"
 import { todoStatusMutationOptions } from "../todo-status-mutation"
 import type { BoardId } from "./board-route"
 import { boardKey } from "./board-route"
@@ -96,7 +96,7 @@ function useBoardColumn(board: BoardId, status: WorkItemStatusWire, filters: Tod
     getNextPageParam: (last) => last.nextOffset ?? undefined,
     enabled,
     placeholderData: keepPreviousData,
-    staleTime: 10_000,
+    ...TODO_QUERY_FRESHNESS,
   })
 }
 
@@ -172,7 +172,7 @@ export function useBoardMenuCounts(departments: DepartmentSummaryWire[] | undefi
   return useQuery({
     queryKey: ["work-items", "board-menu-counts", slugs.join(",")],
     enabled: enabled && departments !== undefined,
-    staleTime: 10_000,
+    ...TODO_QUERY_FRESHNESS,
     queryFn: async (): Promise<{ my: number; byDepartment: Record<string, number> }> => {
       const openOf = (totals: Partial<Record<WorkItemStatusWire, number>> | undefined): number =>
         OPEN_STATUSES.reduce((sum, s) => sum + (totals?.[s] ?? 0), 0)
@@ -199,7 +199,7 @@ export function useBoardTrees(ids: string[]) {
   return useQuery({
     queryKey: ["work-items", "board-trees", key],
     enabled: ids.length > 0,
-    staleTime: 10_000,
+    ...TODO_QUERY_FRESHNESS,
     placeholderData: keepPreviousData,
     queryFn: async (): Promise<Map<string, WorkItemTreeWire>> => {
       const { trees } = await api.getWorkItemTrees(ids)
