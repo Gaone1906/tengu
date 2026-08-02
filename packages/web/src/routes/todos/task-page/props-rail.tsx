@@ -1,6 +1,6 @@
 import { forwardRef } from "react"
-import { Calendar, ChevronDown, UserRound } from "lucide-react"
-import type { DepartmentSummaryWire, Employee, WorkItemDetailWire, WorkItemLabelWire } from "@/lib/api"
+import { ArrowUpRight, Calendar, ChevronDown, LoaderCircle, Send, UserRound } from "lucide-react"
+import type { DepartmentSummaryWire, Employee, LinkedSessionWire, WorkItemDetailWire, WorkItemLabelWire } from "@/lib/api"
 import { STATUS_LABEL, effectiveMaxRounds, effectiveVerifyMode, priorityLabel } from "@/lib/todos"
 import { EmployeeAvatar } from "@/components/ui/employee-avatar"
 import { StatusCircle } from "../state-glyph"
@@ -129,11 +129,19 @@ export function PropsRail({
   byName,
   departments,
   rowFor,
+  dispatcherSession,
+  dispatchPending,
+  onDispatch,
+  onOpenDispatcherSession,
 }: {
   detail: WorkItemDetailWire
   byName: Map<string, Employee>
   departments: DepartmentSummaryWire[] | undefined
   rowFor?: RailPickers["rowFor"]
+  dispatcherSession?: LinkedSessionWire
+  dispatchPending?: boolean
+  onDispatch?: () => void
+  onOpenDispatcherSession?: (sessionId: string) => void
 }) {
   const item = detail.workItem
   const labels = detail.labels ?? []
@@ -188,6 +196,30 @@ export function PropsRail({
         </RailRow>
         {assigneePick?.picker}
       </div>
+      {dispatcherSession ? (
+        <button
+          type="button"
+          data-testid="rail-dispatch-session"
+          data-session-id={dispatcherSession.id}
+          onClick={() => onOpenDispatcherSession?.(dispatcherSession.id)}
+          className="focus-ring group/dispatch relative -mx-2.5 flex min-h-[34px] w-[calc(100%+20px)] items-center gap-[9px] rounded-[9px] px-2.5 text-left text-[13.5px] font-medium text-[var(--text-primary)] outline-none hover:bg-[var(--fill-quaternary)]"
+        >
+          <span className="size-1.5 flex-none rounded-full bg-[var(--system-blue)] motion-safe:animate-[jinn-pulse_1.4s_ease-in-out_infinite]" aria-hidden />
+          Dispatcher working
+          <ArrowUpRight size={12} aria-hidden className="ml-auto text-[var(--text-quaternary)] opacity-0 transition-opacity group-hover/dispatch:opacity-100" />
+        </button>
+      ) : (
+        <button
+          type="button"
+          data-testid="rail-dispatch"
+          disabled={dispatchPending}
+          onClick={onDispatch}
+          className="focus-ring relative -mx-2.5 flex min-h-[34px] w-[calc(100%+20px)] items-center gap-[9px] rounded-[9px] px-2.5 text-left text-[13.5px] font-medium text-[var(--text-primary)] outline-none hover:bg-[var(--fill-quaternary)] disabled:cursor-wait disabled:text-[var(--text-tertiary)]"
+        >
+          {dispatchPending ? <LoaderCircle size={14} aria-hidden className="animate-spin text-[var(--text-tertiary)]" /> : <Send size={14} aria-hidden className="text-[var(--text-tertiary)]" />}
+          {dispatchPending ? "Starting Dispatcher…" : "Dispatch"}
+        </button>
+      )}
 
       <RailKicker later>Labels</RailKicker>
       <div className="relative">

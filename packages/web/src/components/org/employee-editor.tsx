@@ -38,6 +38,24 @@ function Field({ label, children, hint }: FieldProps) {
   )
 }
 
+function ReadonlyValue({ children, testId, tall }: {
+  children: React.ReactNode
+  testId?: string
+  tall?: boolean
+}) {
+  return (
+    <div
+      data-testid={testId}
+      aria-readonly="true"
+      className={`w-full rounded-[var(--radius-md)] bg-[var(--fill-quaternary)] px-[var(--space-3)] py-[var(--space-2)] text-[length:var(--text-subheadline)] text-[var(--text-secondary)] ${
+        tall ? "max-h-60 min-h-40 overflow-y-auto whitespace-pre-wrap leading-relaxed" : "min-h-9"
+      }`}
+    >
+      {children}
+    </div>
+  )
+}
+
 const inputCls =
   "w-full rounded-[var(--radius-md)] bg-[var(--fill-quaternary)] border border-[var(--separator)] px-[var(--space-3)] py-[var(--space-2)] text-[length:var(--text-subheadline)] text-[var(--text-primary)] outline-none focus:border-[var(--accent)] focus:ring-1 focus:ring-[var(--accent)]"
 
@@ -62,6 +80,7 @@ export function EmployeeEditor({
     model: employee.model,
     effortLevel: employee.effortLevel,
   })
+  const isSystem = employee.system === true
 
   // Department + reportsTo option lists come from the live org.
   const [departments, setDepartments] = useState<string[]>([])
@@ -127,21 +146,32 @@ export function EmployeeEditor({
       onKeyDown={onKeyDown}
     >
       <div className="flex items-center justify-between">
-        <h2 className="text-[length:var(--text-headline)] font-[var(--weight-bold)] text-[var(--text-primary)] m-0">
-          Edit employee
-        </h2>
+        <div className="flex items-center gap-2">
+          <h2 className="text-[length:var(--text-headline)] font-[var(--weight-bold)] text-[var(--text-primary)] m-0">
+            Edit employee
+          </h2>
+          {isSystem && (
+            <span className="rounded-full bg-[var(--fill-tertiary)] px-2 py-0.5 text-[length:var(--text-caption2)] font-[var(--weight-semibold)] text-[var(--text-secondary)]">
+              System
+            </span>
+          )}
+        </div>
         <span className="text-[length:var(--text-caption2)] font-[family-name:var(--font-mono)] text-[var(--text-tertiary)]">
           {employee.name}
         </span>
       </div>
 
       <Field label="Display name">
-        <input
-          className={inputCls}
-          value={displayName}
-          onChange={(e) => setDisplayName(e.target.value)}
-          aria-invalid={displayNameInvalid}
-        />
+        {isSystem ? (
+          <ReadonlyValue>{displayName}</ReadonlyValue>
+        ) : (
+          <input
+            className={inputCls}
+            value={displayName}
+            onChange={(e) => setDisplayName(e.target.value)}
+            aria-invalid={displayNameInvalid}
+          />
+        )}
         {displayNameInvalid && (
           <span className="text-[length:var(--text-caption2)] text-[var(--system-red)]">Required.</span>
         )}
@@ -149,7 +179,9 @@ export function EmployeeEditor({
 
       <div className="grid grid-cols-2 gap-[var(--space-3)]">
         <Field label="Rank">
-          <Select value={rank} onValueChange={(v) => setRank(v as Employee["rank"])}>
+          {isSystem ? (
+            <ReadonlyValue testId="system-readonly-rank">{rank.charAt(0).toUpperCase() + rank.slice(1)}</ReadonlyValue>
+          ) : <Select value={rank} onValueChange={(v) => setRank(v as Employee["rank"])}>
             <SelectTrigger>
               <SelectValue />
             </SelectTrigger>
@@ -160,11 +192,13 @@ export function EmployeeEditor({
                 </SelectItem>
               ))}
             </SelectContent>
-          </Select>
+          </Select>}
         </Field>
 
         <Field label="Department">
-          <Select value={department || NONE} onValueChange={(v) => setDepartment(v === NONE ? "" : v)}>
+          {isSystem ? (
+            <ReadonlyValue testId="system-readonly-department">{department || "None"}</ReadonlyValue>
+          ) : <Select value={department || NONE} onValueChange={(v) => setDepartment(v === NONE ? "" : v)}>
             <SelectTrigger>
               <SelectValue placeholder="None" />
             </SelectTrigger>
@@ -177,12 +211,14 @@ export function EmployeeEditor({
                 <SelectItem value={department}>{department}</SelectItem>
               )}
             </SelectContent>
-          </Select>
+          </Select>}
         </Field>
       </div>
 
       <Field label="Reports to" hint="Changing this re-parents the node on the map.">
-        <Select value={reportsTo || NONE} onValueChange={(v) => setReportsTo(v === NONE ? "" : v)}>
+        {isSystem ? (
+          <ReadonlyValue>{reportsTo || "None (top level)"}</ReadonlyValue>
+        ) : <Select value={reportsTo || NONE} onValueChange={(v) => setReportsTo(v === NONE ? "" : v)}>
           <SelectTrigger>
             <SelectValue placeholder="None" />
           </SelectTrigger>
@@ -192,7 +228,7 @@ export function EmployeeEditor({
               <SelectItem key={n} value={n}>{n}</SelectItem>
             ))}
           </SelectContent>
-        </Select>
+        </Select>}
       </Field>
 
       <Field label="Engine · Model · Effort" hint="Applies to new sessions for this employee.">
@@ -202,22 +238,32 @@ export function EmployeeEditor({
       </Field>
 
       <Field label="Persona / instructions">
-        <Textarea
-          rows={10}
-          value={persona}
-          onChange={(e) => setPersona(e.target.value)}
-          aria-invalid={personaInvalid}
-        />
-        <div className="flex justify-between">
-          {personaInvalid ? (
-            <span className="text-[length:var(--text-caption2)] text-[var(--system-red)]">Persona cannot be empty.</span>
-          ) : <span />}
-          <span className="text-[length:var(--text-caption2)] text-[var(--text-quaternary)]">{persona.length} chars</span>
-        </div>
+        {isSystem ? (
+          <ReadonlyValue testId="system-readonly-persona" tall>{persona}</ReadonlyValue>
+        ) : (
+          <>
+            <Textarea
+              rows={10}
+              value={persona}
+              onChange={(e) => setPersona(e.target.value)}
+              aria-invalid={personaInvalid}
+            />
+            <div className="flex justify-between">
+              {personaInvalid ? (
+                <span className="text-[length:var(--text-caption2)] text-[var(--system-red)]">Persona cannot be empty.</span>
+              ) : <span />}
+              <span className="text-[length:var(--text-caption2)] text-[var(--text-quaternary)]">{persona.length} chars</span>
+            </div>
+          </>
+        )}
       </Field>
 
       <Field label="CLI flags" hint="Space-separated, e.g. --chrome">
-        <input className={inputCls} value={cliFlags} onChange={(e) => setCliFlags(e.target.value)} />
+        {isSystem ? (
+          <ReadonlyValue>{cliFlags || "None"}</ReadonlyValue>
+        ) : (
+          <input className={inputCls} value={cliFlags} onChange={(e) => setCliFlags(e.target.value)} />
+        )}
       </Field>
 
       <div className="flex items-center justify-between">
@@ -234,7 +280,7 @@ export function EmployeeEditor({
         </div>
       )}
 
-      <div className="flex items-center justify-end gap-[var(--space-2)] sticky bottom-0 pt-[var(--space-2)] bg-[var(--material-regular)]">
+      <div className="sticky bottom-[calc(49px+var(--safe-bottom))] flex items-center justify-end gap-[var(--space-2)] bg-[var(--material-regular)] pt-[var(--space-2)] lg:bottom-0">
         <Button variant="ghost" onClick={onCancel} disabled={saving}>Cancel</Button>
         <Button onClick={() => void save()} disabled={!canSave || !dirty}>
           {saving ? "Saving…" : "Save"}
