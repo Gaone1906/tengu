@@ -30,6 +30,8 @@ const scheduleTrigger: WorkflowNode = { id: "start", type: "trigger", name: "Sta
   config: { kind: "schedule", cron: "0 * * * *", timezone: "UTC" } };
 const eventTrigger: WorkflowNode = { id: "start", type: "trigger", name: "Start",
   config: { kind: "event", eventName: "build.finished" } };
+const poisonSchedule: WorkflowNode = { id: "start", type: "trigger", name: "Start",
+  config: { kind: "schedule", cron: "every weekday please", timezone: "UTC" } };
 const finish: WorkflowNode = { id: "finish", type: "end", name: "Finish", config: { result: "success" } };
 const employee: Employee = { name: "worker", displayName: "Worker", department: "operations", rank: "employee",
   engine: "test-engine", model: "test-model", effortLevel: "high", persona: "Complete work." };
@@ -199,6 +201,36 @@ describe("Workflow executable service boundaries", () => {
     }
     expect(repository.getDefinition(authored.id)).toEqual(authored);
     expect(definitionChanges).toEqual([{ workflowId: authored.id, revision: authored.revision }]);
+  });
+
+  it("refuses an unparseable Schedule cron expression on save and on enable", () => {
+    const created = service.createDefinition({ id: "poison-schedule", title: "Poison schedule" });
+    const poison = { ...created, nodes: [poisonSchedule, finish], edges: [edge("start-finish", "start", "finish")] };
+    const expected = new WorkflowServiceError("invalid-definition", "Workflow definition is invalid.",
+      [{ code: "invalid-schedule", message: "schedule must be a valid cron expression", nodeId: "start", path: "config.cron" }]);
+    definitionChanges.length = 0;
+    let saveError: unknown;
+    let enableError: unknown;
+
+    try { service.saveDefinition(poison, created.revision); } catch (error) { saveError = error; }
+    expect(saveError).toEqual(expected);
+    expect(repository.getDefinition(created.id)).toEqual(created);
+
+    // Seeded past the gate, exactly as a row authored before it existed would be.
+    const stored = repository.saveDefinition(poison, created.revision);
+    try { service.setEnabled({ id: stored.id, enabled: true, expectedRevision: stored.revision }); }
+    catch (error) { enableError = error; }
+
+    expect(enableError).toEqual(expected);
+    expect(repository.getDefinition(stored.id)).toMatchObject({ enabled: false, revision: stored.revision });
+    expect(definitionChanges).toEqual([]);
+  });
+
+  it("cannot carry a Schedule trigger into createDefinition in the first place", () => {
+    expect(() => service.createDefinition(
+      { id: "created-with-nodes", title: "Created", nodes: [poisonSchedule] } as unknown as { id: string; title: string },
+    )).toThrow(expect.objectContaining<Partial<WorkflowRepositoryError>>({ code: "bad-input" }));
+    expect(repository.getDefinition("created-with-nodes")).toBeNull();
   });
 
   it("keeps valid enable, revision conflicts, and manual dispatch behavior unchanged", async () => {

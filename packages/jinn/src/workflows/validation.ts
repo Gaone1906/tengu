@@ -8,6 +8,7 @@ import {
   type WorkflowNode,
 } from './model.js';
 import { validateBindingPath } from './bindings.js';
+import { validateCronSchedule } from '../cron/validation.js';
 import type { WorkflowValidationIssue } from './issues.js';
 
 export type { WorkflowValidationIssue } from './issues.js';
@@ -339,6 +340,21 @@ function finalizeIssues(issues: WorkflowValidationIssue[], nodes: WorkflowNode[]
   });
 }
 
+/** A Schedule trigger declares the same two strings a Cron job does, so Cron's
+ *  validator owns them here too — otherwise `z.string()` lets an unparseable
+ *  expression become a durable enabled row that only fails when it is armed. */
+export function scheduleTriggerIssues(definition: WorkflowDefinition): WorkflowValidationIssue[] {
+  const issues: WorkflowValidationIssue[] = [];
+  for (const node of safeDefinition(definition)?.nodes ?? []) {
+    if (node.type !== 'trigger' || node.config.kind !== 'schedule') continue;
+    for (const error of validateCronSchedule({ schedule: node.config.cron, timezone: node.config.timezone })) {
+      issues.push({ code: 'invalid-schedule', message: error.message, nodeId: node.id,
+        path: error.field === 'schedule' ? 'config.cron' : 'config.timezone' });
+    }
+  }
+  return issues;
+}
+
 export function validateExecutableWorkflow(definition: WorkflowDefinition): { ok: boolean; issues: WorkflowValidationIssue[] } {
   const safe = safeDefinition(definition);
   if (!safe) return {
@@ -356,6 +372,7 @@ export function validateExecutableWorkflow(definition: WorkflowDefinition): { ok
   addCycleIssues(nodes, graph, add);
   addCardinalityIssues(nodes, graph, add);
   addReachabilityIssues(nodes, graph, add);
+  for (const item of scheduleTriggerIssues(safe)) add(item);
   const issues = finalizeIssues(collected, nodes, edges);
   return { ok: issues.length === 0, issues };
 }

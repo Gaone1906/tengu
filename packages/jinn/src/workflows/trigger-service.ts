@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import cron, { type ScheduledTask } from "node-cron";
+import { validateCronSchedule } from "../cron/validation.js";
 import { logger } from "../shared/logger.js";
 import { normalizeLabelName } from "../work-items/labels.js";
 import { createWorkflowTodoEventFeed, type WorkflowTodoEventClaimOutcome,
@@ -101,6 +102,14 @@ export class WorkflowTriggerService {
 
   private addSchedule(definition: WorkflowDefinition, schedule: TriggerNode): void {
     if (schedule.config.kind !== "schedule") return;
+    // A row stored before the authoring gate existed can still be unarmable;
+    // skip-and-log it exactly as the Cron scheduler does, rather than throwing
+    // out of rebuild() and taking the whole gateway down at boot.
+    const errors = validateCronSchedule({ schedule: schedule.config.cron, timezone: schedule.config.timezone });
+    if (errors.length > 0) {
+      logger.warn(`Skipping invalid Workflow schedule "${definition.id}": ${errors.map((error) => error.message).join("; ")}`);
+      return;
+    }
     const revision = definition.revision;
     const task = cron.schedule(schedule.config.cron, () => { void this.fireSchedule(definition.id, revision); },
       { timezone: schedule.config.timezone });
