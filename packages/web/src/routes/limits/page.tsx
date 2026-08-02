@@ -8,7 +8,6 @@ import { useBreadcrumbs } from "@/context/breadcrumb-context"
 import { Skeleton } from "@/components/ui/skeleton"
 import { deriveFreshness, useEngineLimits, type FreshnessKind } from "./use-engine-limits"
 
-const FEATURED_ENGINES = ["claude", "codex", "grok"]
 const DANGER = 90
 
 function formatDuration(minutes?: number) {
@@ -191,8 +190,6 @@ export default function LimitsPage() {
   useBreadcrumbs([{ label: 'Limits' }])
   const { data, phase, refreshing, error, now, refresh } = useEngineLimits()
 
-  const engines = FEATURED_ENGINES.map((name) => data?.engines[name]).filter(Boolean) as EngineLimitEngineSnapshot[]
-
   return (
     <PageLayout>
       {/* Same page frame as Todos: one scrolling column, inline large-title
@@ -234,7 +231,7 @@ export default function LimitsPage() {
             </div>
           ) : (
             <div className="grid items-start gap-4 md:grid-cols-2">
-              {engines.map((engine) => (
+              {Object.values(data?.engines ?? {}).map((engine) => (
                 <EngineCard key={engine.name} engine={engine} now={now} />
               ))}
             </div>

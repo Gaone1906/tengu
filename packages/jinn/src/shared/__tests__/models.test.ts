@@ -320,6 +320,12 @@ describe("featured models (registry marking)", () => {
   });
 });
 
+it("drift guard: registers 6 engines and stamps supportsPty on the 5 PTY-capable ones", () => {
+  const reg = getModelRegistry(cfg({}));
+  expect(Object.keys(reg)).toEqual(["claude", "codex", "antigravity", "grok", "pi", "hermes"]);
+  expect(Object.keys(reg).filter((n) => reg[n].supportsPty)).toEqual(["claude", "codex", "antigravity", "grok", "hermes"]);
+});
+
 describe("cache + invalidate", () => {
   it("caches across calls and refreshes only after invalidate", () => {
     const a = getModelRegistry(cfg({}));

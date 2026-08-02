@@ -15,7 +15,7 @@ import { useLiveSession } from '@/hooks/use-live-session'
 const CliTerminal = lazy(() => import('@/components/cli-terminal').then(m => ({ default: m.CliTerminal })))
 import type { CliTerminalHandle } from '@/components/cli-terminal'
 import { buildNewSessionParams, resolveNewSessionSelector, shouldPersistNewSessionSelector } from '@/components/chat/new-chat-helpers'
-import type { Employee } from '@/lib/api'
+import type { Employee, EnginesResponse } from '@/lib/api'
 import type { Message, MediaAttachment } from '@/lib/conversations'
 
 // The live read pipeline (load/WS/reconnect/watchdog) now lives in
@@ -26,7 +26,6 @@ export { shouldRecoverStuckTurn } from '@/hooks/use-live-session'
 type Listener = (event: string, payload: unknown) => void
 
 const NEW_SESSION_SELECTOR_KEY = 'jinn-chat-new-session-selector'
-const CLI_CAPABLE_ENGINES = new Set(['claude', 'codex', 'antigravity', 'grok'])
 
 function readNewSessionSelector(): SelectorValue {
   if (typeof window === 'undefined') return {}
@@ -53,14 +52,6 @@ function writeNewSessionSelector(value: SelectorValue): void {
   }))
 }
 
-function supportsCli(engine: string | undefined): boolean {
-  return !!engine && CLI_CAPABLE_ENGINES.has(engine)
-}
-
-function supportsCliPreference(engine: string | undefined): boolean {
-  return !engine || supportsCli(engine)
-}
-
 interface ChatPaneProps {
   sessionId: string | null
   isActive: boolean
@@ -79,6 +70,7 @@ interface ChatPaneProps {
   portalName?: string
   /** Gateway subscribe function for WS events */
   subscribe: (fn: Listener) => () => void
+  engineRegistry?: EnginesResponse // supportsPty decides the CLI/xterm affordance
   /** Gateway connection seq number - triggers reload on reconnect */
   connectionSeq?: number
   /** Gateway skills version */
@@ -112,6 +104,7 @@ export function ChatPane({
   onRefresh,
   portalName = 'Jinn',
   subscribe,
+  engineRegistry,
   connectionSeq,
   skillsVersion,
   events,
@@ -358,7 +351,7 @@ export function ChatPane({
             effortLevel: selector.effortLevel,
             speech,
           })
-          if (viewMode === 'cli' && supportsCliPreference(selector.engine)) (params as Record<string, unknown>).mode = 'interactive'
+          if (viewMode === 'cli' && (!selector.engine || engineRegistry?.engines?.[selector.engine]?.supportsPty)) (params as Record<string, unknown>).mode = 'interactive'
           const session = (await api.createSession(params)) as Record<string, unknown>
           if (shouldPersistNewSessionSelector({ selectedEmployee, manuallyChanged: newSessionSelectorDirtyRef.current })) {
             writeNewSessionSelector(selector)
@@ -369,7 +362,7 @@ export function ChatPane({
         } else {
           // CLI view → route to the interactive PTY engine so the user sees the prompt
           // get injected into the live xterm + claude's streaming response.
-          const mode = viewMode === 'cli' && supportsCli(currentSession?.engine as string | undefined) ? 'interactive' : undefined
+          const mode = viewMode === 'cli' && engineRegistry?.engines?.[String(currentSession?.engine ?? '')]?.supportsPty ? 'interactive' : undefined
           await api.sendMessage(sid, { message, interrupt: interrupt || undefined, attachments: attachmentIds, mode, speech: speech || undefined })
           onRefresh?.()
         }
@@ -380,7 +373,7 @@ export function ChatPane({
     // viewMode MUST be in deps — without it, toggling chat↔CLI keeps the stale
     // closure value and routes CLI sends to the headless engine, which is
     // exactly what made "the xterm shows stale content" reproducible.
-    [sessionId, selectedEmployee, onSessionCreated, onRefresh, viewMode, selector, currentSession?.engine, beginSend, failSend]
+    [sessionId, selectedEmployee, onSessionCreated, onRefresh, viewMode, selector, currentSession?.engine, engineRegistry, beginSend, failSend]
   )
 
   const handleStatusRequest = useCallback(async () => {

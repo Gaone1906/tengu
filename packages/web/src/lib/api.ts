@@ -287,6 +287,7 @@ export interface EngineRegistryEntry {
   defaultModel: string;
   effortMechanism: "claude-flag" | "codex-config" | "grok-flag" | "pi-flag" | "none";
   models: ModelInfo[];
+  supportsPty?: boolean; // interactive PTY/CLI view (`/ws/pty`)
 }
 export interface EnginesResponse {
   default: string;
