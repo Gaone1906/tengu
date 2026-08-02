@@ -172,6 +172,8 @@ export class HermesAcpEngine implements InterruptibleEngine {
 
     let resultText = "";
     let lastContext: number | undefined;
+    let hasToolActivity = false;
+    let toolCallCount = 0;
     const hermesSessionId = p.hermesSessionId;
 
     const onNote = (m: string, params: Record<string, unknown>) => {
@@ -195,6 +197,10 @@ export class HermesAcpEngine implements InterruptibleEngine {
           if (op === "replace") opts.onStream?.({ type: "text_snapshot", content: text });
           else if (op === "append") opts.onStream?.(d);
         } else {
+          if (d.type === "tool_use" || d.type === "tool_result" || d.type === "block") {
+            hasToolActivity = true;
+            if (d.type === "tool_use") toolCallCount += 1;
+          }
           opts.onStream?.(d);
         }
       }
@@ -219,9 +225,14 @@ export class HermesAcpEngine implements InterruptibleEngine {
       const error = !resultText
         ? (stop === "refusal" || stop === "cancelled"
           ? `Hermes turn ended: ${stop}`
-          : "Hermes turn ended with no assistant text")
+          : hasToolActivity
+            ? undefined
+            : `Hermes turn ended (${stop || "unknown"}) with no output`)
         : undefined;
 
+      if (!resultText && hasToolActivity && !error) {
+        logger.info(`[hermes-acp] tool-only turn for ${jinnId} completed with ${toolCallCount} tool call(s)`);
+      }
       if (error) this.evictProc(jinnId, p);
 
       return {

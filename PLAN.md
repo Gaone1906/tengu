@@ -1,196 +1,111 @@
-# ICI-666 — `jinn-simplify`, the ultra workflow
+# ICI-293 — "Error: Hermes turn ended with no assistant text"
 
-Base: `main` @ `492cbc18dcc7fc883f8bcae1dcc4bac1bccf46dc`
-Branch: `build/ICI-666-simplify-workflow`
+Base: `main` @ `23df25ed62acfa162a39923638eb14dbbf1d8bea`
+Branch: `build/ICI-293-hermes-empty-turn`
 
-## What the operator asked for
+> This file previously held the ICI-666 plan (committed to `main` by that ticket). Replaced
+> here on this branch only. The stale plan on `main` is an adjacent problem — reported, not
+> fixed, per taste §4.
 
-A second build-style pipeline, deliberately expensive, running on Claude models (Opus 5
-and Fable 5). It is armed by enabling it and runs hourly while enabled — the on/off switch
-is "do I have spare tokens this week". Each run picks **one** area of the Jinn project to
-improve, writes **hard, mechanically checkable constraints before touching any code** so
-the result is a *simplification* rather than another layer, and runs PLAN → IMPLEMENT →
-VERIFY like `jinn-build`. It asks for **no approval**. When a run succeeds it opens a
-**pull request** with a detailed summary and leaves its Todo in `in_review`.
+## Is it fixed? No.
 
-## Where the deliverable lives — read this before reviewing the diff
+`packages/jinn/src/engines/hermes-acp.ts:219-225` is unchanged since before the Todo was
+filed. The only commit touching that file since 2026-07-10 is `1e761b16`
+(`feat(chat): persist todo and workflow receipts`), which does not go near this branch. And
+`__tests__/hermes-acp.test.ts:389` ("treats an empty prompt completion as an error instead of
+silent success") pins the current behaviour as deliberate, so nothing has quietly changed it.
 
-A Workflow in Jinn is **company state, not repository code**. `jinn-build` itself does not
-exist anywhere under `packages/**`; it lives in the Workflow store and is authored through
-`create_workflow` / `update_workflow`. `jinn-simplify` is authored the same way.
+## What actually happens
 
-So the acceptance criteria below are checked against the **live definition**
-(`get_workflow { workflowId: "jinn-simplify" }`), not against a file. The branch diff is
-intentionally `PLAN.md` only — that file is already tracked on `main` and is this
-pipeline's existing convention.
+The branch fires whenever `resultText === ""` after `session/prompt` returns
+`stopReason: "end_turn"`. Reading the hermes ACP server (`~/Projects/hermes-agent`,
+`acp_adapter/server.py`) there are three unrelated conditions that all land there:
 
-Explicitly rejected: committing the definition as JSON under `packages/**` plus an
-installer script. It would be a second source of truth for something the store already
-owns, it would ship a definition full of one operator's local paths to strangers, and
-inventing a new repo convention for a single file is exactly the over-engineering this
-workflow is being built to fight.
+1. `final_response` is empty because the model emitted only tool calls plus reasoning.
+   Hermes' own suite calls this "the canonical thinking-model shape"
+   (`tests/acp/test_server.py:646`) and asserts no `agent_message_chunk` is sent. **Benign.**
+2. Hermes' executor raised — `server.py:1573` logs the exception and returns `end_turn`
+   with no text. **Real failure.**
+3. The prompt carried no content — `server.py:1334` returns `end_turn` immediately.
+   **Real failure.**
 
-## The graph
+jinn collapses all three into one opaque string and, on every one of them, calls
+`this.evictProc(jinnId, p)` (`hermes-acp.ts:225`) — killing a hermes process that in case 1 is
+demonstrably healthy, destroying the warm ACP session and forcing a `session/load` next turn.
+Case 1 is the common one, so the usual outcome is: the agent did real tool work, the user sees
+`Error: Hermes turn ended with no assistant text`, and the session gets torn down for it.
 
-Trigger `schedule`, cron `0 * * * *`, timezone `Europe/Sofia`. Created **disabled**.
+## The fix (KISS)
 
-```
-trigger ─ survey ─ worth-doing? ─(no)─ nothing-found (end)
-                        │
-                       (yes)
-                        │
-                    constrain
-                        │
-                   implement-1 ─ verify-1 ─ verdict-1 ─(ship)──┐
-                        ┌──────────(rework)──────┘             │
-                   implement-2 ─ verify-2 ─ verdict-2 ─(ship)──┤
-                                               (rework)        │
-                                                  │        shippable
-                                              handback         │
-                                                  │         deliver
-                                            stopped (end)      │
-                                                          delivered (end)
-```
+Split the single branch into three outcomes using signal that is already on the wire — no new
+protocol, no new config. `run()` tracks whether the turn produced **tool activity**
+(a `tool_use`, `tool_result`, or `block` delta).
 
-No approval node anywhere. Mirrors `jinn-build` minus the variant gate and the merge gate.
+| Turn produced | Result | Evict? |
+|---|---|---|
+| reply text | unchanged: success | no |
+| no text, but tool activity | `result: ""`, `error: undefined`, one `logger.info` naming the session + tool-call count | **no** |
+| no text and no tool activity | `error` naming the stop reason, e.g. `Hermes turn ended (end_turn) with no output` | yes |
 
-### Node roles, employees and models
+`refusal` / `cancelled` keep their existing dedicated message.
 
-| Node | Employee | Engine / model / effort | Job |
-| --- | --- | --- | --- |
-| `survey` | `jinn-dev` | claude / **opus** / high | Pick exactly ONE target. Create the Todo. |
-| `constrain` | `jinn-verifier` | claude / **fable** / high | Turn it into a budget the implementer cannot argue with. |
-| `implement-1` | `jinn-dev` | claude / **opus** / high | Build inside the budget. |
-| `verify-1` | `jinn-verifier` | claude / **fable** / high | Independent review plus the budget check. |
-| `implement-2` | `jinn-dev` | claude / **opus** / high | Fix round-1 Blockers and Majors only. |
-| `verify-2` | `jinn-verifier` | claude / **fable** / high | Scope-locked final check. |
-| `deliver` | `jinn-dev` | claude / **opus** / high | Push, open the PR, move the Todo to `in_review`. |
-| `handback` | `jinn-verifier` | claude / **fable** / low | Honest failure note, Todo → `escalated`. |
+**Critical detail the implementer must not get wrong:** `usage_update` maps to a `context`
+delta and hermes sends one on essentially every turn (`server.py:1690`). Counting "any delta"
+as activity makes row 3 unreachable. Activity is `tool_use` / `tool_result` / `block` only;
+`context` and thought chunks do not count.
 
-Alternating Opus and Fable across the propose/check pairs is deliberate: the model that
-writes the budget is not the model that spends it, and the model that writes the code is
-not the model that judges it.
+### Stated assumption (per taste §4)
 
-### The Todo
+Row 2 returning no error means a delegated hermes child that ends on tool calls reports
+"replied (no output)" to its parent instead of an error string. That is the accurate
+description of what happened, and it stops a benign turn from both poisoning the transcript
+with a false error and skipping `recordEngineSessionId` (`api.ts:7469`, gated on
+`!result.error`). Flagged because it is a real behaviour change for delegation, not a silent
+one.
 
-A schedule-triggered run has no Todo of its own, so `survey` creates one
-(`create_work_item`, label `simplify`) and emits `todoId`. Every later node addresses that
-Todo, which also makes the Todo ledger this workflow's memory.
+## Files
 
-### Not repeating itself, and not piling up
-
-`survey` reads the existing `simplify` Todos first and must:
-
-- pick an area no open or recently closed `simplify` Todo already covers;
-- emit `worth: no` and end the run cleanly when it cannot find one worth the money — an
-  hourly job that always finds something will manufacture work;
-- emit `worth: no` when two or more `simplify` Todos are already `executing`, capping
-  concurrency at two overlapping runs on one checkout.
-
-### What `survey` is looking for
-
-The operator named three flavours, and `survey` picks exactly one target from them:
-
-1. **Over-engineering to delete** — abstractions with one caller, configuration nobody
-   sets, indirection that costs more to read than it saves.
-2. **Blended concerns** — enumerate the core pieces (Todos, Workflows, Triggers, Sessions,
-   Employees, Engines, Connectors, Cron, Knowledge, gateway HTTP, web UI) and find two that
-   share code, storage, or vocabulary where they should be separate. The operator's own
-   example is Todos versus Workflows.
-3. **Something that does not work** — a dead path, a silently swallowed failure, prose the
-   code has already falsified.
-
-### The constraints — the actual point of the workflow
-
-`constrain` emits the budget as data, and every field is something a shell command can
-settle. Defaults it must justify departing from:
-
-- `netLineDelta` ≤ 0 — a simplification removes at least as much as it adds.
-- `maxFilesTouched` — a small integer, stated.
-- `maxNewFiles` — 0, unless splitting an oversized file is the whole task.
-- `maxFileLines` — no file may end the change longer than this, and no touched file may
-  grow at all.
-- `noNewDependencies` — `package.json` and the lockfile untouched.
-- `noNewConfigOptions`, `noNewPublicExports` — no new surface for a case nobody has.
-- `noSingleCallerAbstraction` — no helper, interface, or option introduced with fewer than
-  two real callers.
-- Behaviour preserved: `pnpm typecheck`, `pnpm test`, `pnpm build` green, and no test
-  deleted unless the thing it tested was deleted.
-
-`constrain` also emits `budgetCommand`: a literal shell command printing the measured
-numbers, so `verify-1` settles the budget by running it rather than by having an opinion.
-
-### Delivery
-
-`deliver` pushes the branch to `origin` and runs `gh pr create` with a summary stating the
-area, why it was over-engineered, the budget, and the measured result against that budget.
-It then sets the Todo to `in_review`. It does not merge, and there is no approval gate
-anywhere in the graph — that is what the operator asked for. The PR is public; that is the
-operator's explicit instruction, recorded here so it is a decision rather than a surprise.
-
-Every phase inherits `jinn-build`'s production-safety block verbatim (never port 7777,
-never `~/.jinn`, never a gateway without a throwaway `JINN_HOME` and a non-prod port, never
-kill a process it did not start, isolated `AGENT_BROWSER_PROFILE`) and its worktree
-discipline, with paths `~/Projects/.worktrees/jinn-simplify-<todoId>` and branch
-`simplify/<todoId>-<slug>` so concurrent runs cannot collide.
+- `packages/jinn/src/engines/hermes-acp.ts` — the only production change.
+- `packages/jinn/src/engines/__tests__/hermes-acp.test.ts` — rewrite the existing
+  `treats an empty prompt completion as an error…` test (it asserts the old behaviour) and add
+  the new cases.
+- `packages/jinn/src/gateway/__tests__/block-finalize.test.ts:53` — asserts the exact old
+  string through `formatEngineErrorAssistantMessage`. Update the fixture string only; do not
+  change `formatEngineErrorAssistantMessage` itself.
 
 ## Acceptance criteria
 
-1. `get_workflow { workflowId: "jinn-simplify" }` returns a definition whose only trigger
-   node is `kind: "schedule"` with `cron: "0 * * * *"`, and whose `enabled` is `false`.
-2. The definition contains **zero** nodes of type `approval`.
-3. Every `employee` node sets `engine: claude`, and the set of models across those nodes is
-   exactly `{opus, fable}` — both present, nothing else.
-4. The definition contains employee nodes for the phases `survey`, `constrain`,
-   `implement-1`, `verify-1`, `implement-2`, `verify-2`, `deliver` and `handback`, wired so
-   that a `rework` verdict in round 1 reaches `implement-2`, a `rework` verdict in round 2
-   reaches `handback` and never a third implementation round, and a `ship` verdict in
-   either round reaches `deliver`.
-5. `survey`'s declared output includes `todoId` and `worth`, and a condition node routes
-   `worth != yes` to an `end` node without reaching `constrain`. The `survey` prompt
-   instructs it to create the Todo with the `simplify` label and to skip areas already
-   covered by existing `simplify` Todos.
-6. `constrain`'s declared output includes `netLineDelta`, `maxFilesTouched`, `maxNewFiles`,
-   `maxFileLines`, `budgetCommand` and `acceptance`, and `implement-1`, `implement-2`,
-   `verify-1` and `verify-2` each interpolate the constraint fields into their prompts.
-7. `verify-1`'s prompt requires it to run `budgetCommand`, quote the real output, and
-   return `rework` when the measured result exceeds the budget — a budget breach is a
-   Blocker, not a note.
-8. `deliver`'s prompt pushes the branch, opens a PR with `gh pr create`, and sets the Todo
-   to `in_review`; `handback`'s sets it to `escalated`. Neither ever sets `done`.
-9. Every employee node's prompt contains the production-safety block: no port 7777, no
-   `~/.jinn`, no gateway without a throwaway `JINN_HOME` and a non-production port, and no
-   killing a process it did not start.
-10. The definition saves with zero validation issues, and the run history for
-    `jinn-simplify` is empty — it must not have been enabled or fired during this ticket.
+1. A turn that streams `tool_call` + `tool_call_update` and then ends `end_turn` with no
+   `agent_message_chunk` returns `error: undefined` and `result: ""`, and `isAlive(sessionId)`
+   is still `true` afterwards.
+2. A turn that streams nothing but a `usage_update` and ends `end_turn` returns an `error`
+   containing the stop reason `end_turn`, and `isAlive(sessionId)` is `false` (still evicted).
+   This is the test that proves `context` deltas are not counted as activity.
+3. A turn that streams normal answer text is unchanged: `result` is that text, `error` is
+   `undefined`, process stays alive — existing test `streams text + context…` still passes.
+4. `stopReason: "refusal"` and `stopReason: "cancelled"` with no text still return
+   `Hermes turn ended: <stop>` and still evict.
+5. No new or changed error string contains an absolute user-home path, a real person name, or
+   a real project name.
+6. `pnpm --filter jinn-cli test` and `pnpm typecheck` pass with no new failures against the
+   pre-change baseline (capture the baseline before editing).
 
 ## Verification
 
-Criteria 1–9 are read directly off `get_workflow { workflowId: "jinn-simplify" }`; each is
-a property of the returned JSON, so the check is mechanical rather than a matter of taste.
-Criterion 10 is `list_workflow_runs { workflowId: "jinn-simplify" }` returning nothing.
+Unit tests only, via the fake ACP server already in `hermes-acp.test.ts` — extend
+`fakeServerEmptyPromptResult` into a parametrized variant that can emit tool frames and/or a
+`usage_update`. Per taste §5.1, criteria 1 and 2 must each be shown **red before** the change
+and green after; paste both outputs.
 
-No repo tests are added, because no repo code changes. `pnpm typecheck`, `pnpm test` and
-`pnpm build` are still run on the branch to prove the `PLAN.md`-only diff broke nothing.
+No sandbox gateway and no browser run: this is engine-internal, with no user-visible surface
+beyond the assistant message text that the unit tests already cover.
 
 ## Out of scope
 
-- Enabling the workflow. It ships disabled; arming it is the operator's call and is the
-  "I have free tokens" switch.
-- Running it end to end. Its first real run spends Claude money and opens a PR; a live
-  rehearsal is not something this ticket buys.
-- Any change under `packages/**`. No gateway, schema, or web change is needed — schedule
-  triggers, the `opus`/`fable` aliases, and Todo creation from a phase session all exist.
-- Changing `jinn-build`. The two pipelines stay separate.
-- Retiring or editing any other workflow.
-
-## Risks worth stating
-
-- **Hourly and expensive by design.** The guards are that it ships disabled, that `survey`
-  can decline a run, and that it refuses a third concurrent run. There is no spend cap in
-  the graph itself; if the operator wants one, that is a follow-up.
-- **It opens public PRs without asking.** Explicitly requested. Worth re-reading once the
-  first PR appears.
-- **Concurrent runs share one checkout.** Per-Todo worktrees and the concurrency check hold
-  this to two, but `main` moving underneath a long run is still possible; the PR surfaces
-  the conflict rather than hiding it.
+- The `HermesRpc.onNotification` single-callback slot (`hermes-jsonrpc.ts:31`): a concurrent
+  `run()` on one session would clobber the previous turn's accumulator. Real, but a different
+  bug — write it up as a follow-up Todo, do not fix here.
+- The stale ICI-666 `PLAN.md` sitting on `main`.
+- Any change to `formatEngineErrorAssistantMessage` or the gateway persist/notify path.
+- Anything in `hermes-agent` — separate repo.
+- Any refactor of `hermes-acp.ts` beyond this branch.

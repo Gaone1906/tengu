@@ -95,7 +95,10 @@ function fakeServerPromptError() {
 }
 
 /** Fake server whose prompt completes without any assistant text. */
-function fakeServerEmptyPromptResult() {
+function fakeServerEmptyPromptResult(opts: {
+  updates?: Record<string, unknown>[];
+  stopReason?: string;
+} = {}) {
   const toServer = new PassThrough();
   const fromServer = new PassThrough();
   const rpc = new HermesRpc(toServer, fromServer);
@@ -105,11 +108,16 @@ function fakeServerEmptyPromptResult() {
       const msg = JSON.parse(line) as Record<string, unknown>;
       const reply = (result: unknown) =>
         fromServer.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result }) + "\n");
+      const note = (params: unknown) =>
+        fromServer.write(JSON.stringify({ jsonrpc: "2.0", method: "session/update", params }) + "\n");
       if (msg.method === "initialize") reply({ protocolVersion: 1 });
       else if (msg.method === "session/new")
         reply({ sessionId: "S1", models: { currentModelId: "openai-codex:gpt-5.5", availableModels: [] } });
       else if (msg.method === "session/set_mode") reply({});
-      else if (msg.method === "session/prompt") reply({ stopReason: "end_turn" });
+      else if (msg.method === "session/prompt") {
+        for (const update of opts.updates ?? []) note({ sessionId: "S1", update });
+        reply({ stopReason: opts.stopReason ?? "end_turn" });
+      }
     }
   });
   return rpc;
@@ -386,18 +394,39 @@ describe("HermesAcpEngine.run", () => {
     expect(eng.isAlive("jinn-auth-expired")).toBe(false);
   });
 
-  it("treats an empty prompt completion as an error instead of silent success", async () => {
-    class EmptyResultEngine extends HermesAcpEngine {
-      protected spawnProc() {
-        const rpc = fakeServerEmptyPromptResult();
-        return { rpc, killProc: () => {}, isAliveProc: () => true, onExit: (_cb: () => void) => {}, onError: (_cb: (e: Error) => void) => {} };
-      }
-    }
+  it("keeps the process alive when an empty end_turn produced tool activity", async () => {
+    const eng = engineWith(fakeServerEmptyPromptResult({
+      updates: [
+        { sessionUpdate: "tool_call", toolCallId: "t1", title: "bash", rawInput: { cmd: "ls" } },
+        { sessionUpdate: "tool_call_update", toolCallId: "t1", status: "completed" },
+      ],
+    }));
+    const r = await eng.run({ prompt: "hi", cwd: "/tmp", sessionId: "jinn-tools-only" });
 
-    const eng = new EmptyResultEngine();
-    const r = await eng.run({ prompt: "hi", cwd: "/tmp", sessionId: "jinn-empty" });
     expect(r.result).toBe("");
-    expect(r.error).toMatch(/no assistant text/);
+    expect(r.error).toBeUndefined();
+    expect(eng.isAlive("jinn-tools-only")).toBe(true);
+  });
+
+  it("evicts an empty end_turn that only produced a usage update", async () => {
+    const eng = engineWith(fakeServerEmptyPromptResult({
+      updates: [{ sessionUpdate: "usage_update", size: 1000, used: 42 }],
+    }));
+    const r = await eng.run({ prompt: "hi", cwd: "/tmp", sessionId: "jinn-usage-only" });
+
+    expect(r.result).toBe("");
+    expect(r.error).toContain("end_turn");
+    expect(eng.isAlive("jinn-usage-only")).toBe(false);
+  });
+
+  it.each(["refusal", "cancelled"])("evicts an empty %s turn with its dedicated error", async (stopReason) => {
+    const sessionId = `jinn-${stopReason}`;
+    const eng = engineWith(fakeServerEmptyPromptResult({ stopReason }));
+    const r = await eng.run({ prompt: "hi", cwd: "/tmp", sessionId });
+
+    expect(r.result).toBe("");
+    expect(r.error).toBe(`Hermes turn ended: ${stopReason}`);
+    expect(eng.isAlive(sessionId)).toBe(false);
   });
 
   // GRS-018 — the resolved MCP set is emitted into the ACP session handshake.
