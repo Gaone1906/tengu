@@ -12,7 +12,7 @@ import {
 import { RunMutation } from './repository-run-transaction.js';
 import {
   equivalentRun, insertRun, listRunSummaries, readAttempt, readAttemptByRetryKey, readAttemptBySession,
-  readAttempts, readDueReminders, readDueWaits, readNextDueReminder, readNextDueWait, readRecoverableRuns,
+  readAttempts, readDueReminders, readDueWaits, readNextDueReminder, readNextDueTimeout, readNextDueWait, readRecoverableRuns,
   readRun, readRunByIdempotency,
   readWorkflowCallByIdempotency, readRunDetail,
   type NormalizedRunListQuery,
@@ -386,4 +386,5 @@ export class WorkflowRepository {
   nextDueReminder(): { runId: string; nodeId: string; attempt: number; nextReminderAt: string } | null {
     return readNextDueReminder(this.db);
   }
+  nextDueTimeout(): string | null { return readNextDueTimeout(this.db); }
 }

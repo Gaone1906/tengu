@@ -73,6 +73,11 @@ function worker(id: string, attempts = 3, delaySeconds = 60): Extract<WorkflowNo
   return { id, type: "employee", name: id, config: { employee: { source: "fixed", value: "worker" }, prompt: `Run ${id}.`,
     retry: { attempts, delaySeconds, backoff: "exponential" }, timeoutMinutes: 1 } };
 }
+function workerWithoutTimeout(id: string): Extract<WorkflowNode, { type: "employee" }> {
+  const node = worker(id);
+  const { timeoutMinutes: _timeoutMinutes, ...config } = node.config;
+  return { ...node, config };
+}
 function save(id: string, nodes: WorkflowNode[], edges: WorkflowDefinition["edges"]): WorkflowDefinition {
   const created = repository.createDefinition({ id, title: id });
   const saved = repository.saveDefinition({ ...created, nodes, edges }, created.revision);
@@ -176,6 +181,42 @@ describe("Workflow retry, cancellation, and restart recovery", () => {
     now = new Date("2026-07-21T11:05:00.000Z");
     await vi.advanceTimersByTimeAsync(300_000);
     expect(repository.getRun(definition.id, disposed.id)?.status).toBe("waiting");
+  });
+
+  it("times out a wedged running attempt at its deadline without external recovery", async () => {
+    service.dispose();
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    service = buildService();
+    const definition = linear("timer-timeout", worker("work", 1, 0));
+    const run = await service.startManual({ workflowId: definition.id, input: {} });
+
+    now = new Date("2026-07-21T10:00:59.999Z");
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(service.getRun(definition.id, run.id)?.attempts).toMatchObject([{ status: "running" }]);
+
+    now = new Date("2026-07-21T10:01:00.000Z");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(service.getRun(definition.id, run.id)?.attempts).toMatchObject([{
+      status: "timed-out",
+      error: { code: "workflow-timeout" },
+    }]);
+  });
+
+  it("defaults an unconfigured employee attempt timeout to 180 minutes", async () => {
+    const definition = linear("default-timeout", workerWithoutTimeout("work"));
+    const run = await service.startManual({ workflowId: definition.id, input: {} });
+    expect(run.attempts).toMatchObject([{ resolvedConfig: { timeoutMinutes: 180 } }]);
+  });
+
+  it("preserves an authored employee attempt timeout", async () => {
+    const authored = worker("work");
+    const definition = linear("authored-timeout", {
+      ...authored,
+      config: { ...authored.config, timeoutMinutes: 17 },
+    });
+    const run = await service.startManual({ workflowId: definition.id, input: {} });
+    expect(run.attempts).toMatchObject([{ resolvedConfig: { timeoutMinutes: 17 } }]);
   });
 
   it("times out durably, stops the owned session, and advances the deterministic retry", async () => {

@@ -96,6 +96,7 @@ type NodeAction =
   | { kind: "activate" | "skip" | "condition" | "merge" | "approval" | "wait" | "end"; node: WorkflowNode }
   | { kind: "dispatch"; node: EmployeeNode; config: ResolvedEmployeeConfig };
 const REMINDER_RUNGS_MINUTES = [5, 15, 30] as const;
+const DEFAULT_ATTEMPT_TIMEOUT_MINUTES = 180;
 const REMINDER_TEXT = "Workflow reminder: if you have finished this step, call `workflow_submit_output` now. If you are still working or waiting on delegated work, continue.";
 const FINAL_REMINDER_TEXT = `${REMINDER_TEXT} This is the final reminder. If you genuinely need more time, call \`workflow_extend_deadline\`.`;
 function addMinutes(at: string, minutes: number): string {
@@ -161,7 +162,7 @@ function resolveDispatch(run: WorkflowRunDetail, node: EmployeeNode, options: Wo
   const config: ResolvedEmployeeConfig = {
     employeeId, engine, model, ...(effort ? { effort } : {}),
     retry: node.config.retry ?? { attempts: 1, delaySeconds: 0, backoff: "fixed" },
-    ...(node.config.timeoutMinutes === undefined ? {} : { timeoutMinutes: node.config.timeoutMinutes }),
+    timeoutMinutes: node.config.timeoutMinutes ?? DEFAULT_ATTEMPT_TIMEOUT_MINUTES,
   };
   return config;
 }
