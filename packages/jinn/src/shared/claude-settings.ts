@@ -135,6 +135,7 @@ export function seedTrust(claudeJsonFile: string, projectDir: string): void {
   const alreadySeeded =
     data.hasCompletedOnboarding === true &&
     data.hasCompletedClaudeInChromeOnboarding === true &&
+    data.bypassPermissionsModeAccepted === true &&
     proj.hasTrustDialogAccepted === true &&
     proj.hasCompletedProjectOnboarding === true;
   if (alreadySeeded) return;
@@ -144,11 +145,15 @@ export function seedTrust(claudeJsonFile: string, projectDir: string): void {
   if (fs.existsSync(claudeJsonFile) && !fs.existsSync(backupPath)) {
     try { fs.copyFileSync(claudeJsonFile, backupPath, fs.constants.COPYFILE_EXCL); } catch { /* best effort */ }
   }
-  // Global onboarding: dismisses the Bypass Permissions consent
-  // (hasCompletedOnboarding) and the Claude in Chrome (beta) intro
-  // (hasCompletedClaudeInChromeOnboarding) that otherwise block the interactive PTY.
+  // Global onboarding: dismisses the first-run intro (hasCompletedOnboarding) and
+  // the Claude in Chrome (beta) intro (hasCompletedClaudeInChromeOnboarding) that
+  // otherwise block the interactive PTY.
   data.hasCompletedOnboarding = true;
   data.hasCompletedClaudeInChromeOnboarding = true;
+  // Bypass Permissions consent, recorded explicitly: up to 2.1.170 completing
+  // global onboarding implied it, and from 2.1.220 it does not — leaving every
+  // spawn blocked on a dialog no PTY can answer.
+  data.bypassPermissionsModeAccepted = true;
   // Per-project trust: dismisses the folder-trust dialog.
   proj.hasTrustDialogAccepted = true;
   proj.hasCompletedProjectOnboarding = true;

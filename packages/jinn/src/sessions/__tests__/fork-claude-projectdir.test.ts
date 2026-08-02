@@ -29,7 +29,9 @@ vi.mock("node:os", async (importOriginal) => {
 import { claudeProjectDir } from "../fork.js";
 
 describe("claudeProjectDir", () => {
-  const base = path.join("/home/test", ".claude", "projects");
+  // Resolved like claudeProjectDir() does, or the expectation misses the drive letter
+  // path.resolve adds on Windows.
+  const base = path.join(path.resolve(path.join("/home/test", ".claude")), "projects");
 
   // CLAUDE_CONFIG_DIR wins over the mocked homedir, so clear it to keep these
   // assertions about slugification rather than about the ambient environment.

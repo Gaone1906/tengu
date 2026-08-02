@@ -1,0 +1,172 @@
+# Running Jinn in Docker
+
+## Why
+
+`InteractiveClaudeEngine` spawns `claude` with `--dangerously-skip-permissions` on every turn. That disables Claude Code's approval prompt for everything the process can reach — on a workstation, your entire home directory. The flag is deliberate (Jinn enforces its own policy through `PreToolUse` hooks rather than interactive prompts), but it means a mistake or a prompt injection has a large blast radius.
+
+In a container, that radius is exactly the directories you mount. Nothing else on the host exists as far as the agents are concerned.
+
+Containerising also avoids a class of packaging problem. `better-sqlite3` needs its native binding compiled and `node-pty` needs its prebuilt `spawn-helper` to be executable, both at install time. Any install that skips lifecycle scripts yields a Jinn that crashes on boot or fails every PTY spawn with `posix_spawnp failed.` The image installs normally, so both are correct by construction.
+
+## Quick start
+
+First, edit `docker-compose.yml` and uncomment at least one entry under **Project mounts**. At least one is required — without it `/work` is empty and the agents have nothing to work on.
+
+```yaml
+      # - ${HOME}/code/my-project:/work/my-project     ← uncomment and edit
+```
+
+Then:
+
+```bash
+docker compose up -d --build
+docker compose exec jinn claude      # use /login, complete the flow, then quit
+docker compose exec jinn jinn pair   # prints a single-use pairing code
+```
+
+Open **http://localhost:7777** and enter the code at the **Pair This Browser** prompt.
+
+### Why pairing, when a host install just opens the dashboard
+
+`jinn setup` writes `authRequired: true`, and inside a container the entrypoint rebinds `gateway.host` to `0.0.0.0` — which also counts as network-exposed — so the gateway requires authentication. A host install skips the prompt because `jinn start` runs on a TTY and mints a short-lived local credential for the browser it opens, and that exchange is loopback-only. Your browser reaches the container through Docker's NAT, arriving as `172.x` rather than `127.0.0.1`, so it cannot use that path.
+
+`jinn pair` is the way in: run inside the container it dials loopback and proves it controls `JINN_HOME`, then hands you a code to type into the browser. You only do this once per browser.
+
+If you run several instances, name the one you mean: `docker compose exec jinn jinn -i <instance> pair`.
+
+## Credentials
+
+Claude Code stores credentials differently per platform: the login Keychain on macOS, a plaintext `~/.claude/.credentials.json` on Linux. The container is Linux, so it needs its own login — you cannot copy macOS Keychain credentials into it.
+
+Sign in once with `docker compose exec jinn claude`. The credentials land on the `jinn-claude` volume and survive restarts and rebuilds. The mount is read-write on purpose: the CLI refreshes its OAuth token in place, and a read-only mount turns a working login into a puzzling auth failure days later.
+
+Run that from a real terminal. `docker compose exec` allocates a TTY by default, so invoking it where there isn't one — a CI step, an editor task runner, an agent shell — fails with a bare usage error rather than anything explanatory. For a non-interactive check, `docker compose exec -T jinn claude --version` works; the login flow itself needs the TTY.
+
+Model discovery caches its result, so a `Claude model discovery returned 0 models` warning can linger in the log after a successful login. `docker compose restart` re-runs discovery and reports the real count.
+
+Do not try to pass a token via `CLAUDE_CODE_OAUTH_TOKEN`. `buildEngineChildEnv` strips every `CLAUDE_CODE_*` key when spawning the engine (`packages/jinn/src/shared/child-env.ts`), so it never reaches the CLI. That env var is read by the gateway for model discovery, not by the spawned session.
+
+## Mounts
+
+Project mounts live in `docker-compose.yml` itself, under **Project mounts** — one line per repository:
+
+```yaml
+      - ${HOME}/code/my-project:/work/my-project
+      - ${HOME}/code/design-system:/work/design-system:ro
+```
+
+**At least one is required.** With none, the container starts fine but `/work` is empty and the agents have nothing to act on. Check with `docker compose exec jinn ls /work`.
+
+Point your employees' working directories at the container paths (`/work/my-project`), not the host paths.
+
+Prefer `:ro` wherever the agents only need to read — that list is the blast radius, and everything on it is writable without a prompt.
+
+> If you would rather not carry local edits in a tracked file, the same entries work in a `docker-compose.override.yml` (git-ignored, merged automatically by `docker compose`). Editing `docker-compose.yml` directly is the simpler default; the override file is there if you want a clean `git status`.
+
+## What the isolation does and does not cover
+
+**Covered.** The host filesystem outside your mounts — SSH keys, browser profiles, credential stores, other repositories, everything in `$HOME` you did not explicitly mount. Host processes. The gateway is published on `127.0.0.1` only, so it is not reachable from your network.
+
+**Not covered:**
+
+- **Mounted directories are fully writable.** An agent can delete or rewrite anything under a read-write mount without asking. Use `:ro` where you can, and prefer repositories with a clean git state.
+- **Network egress is unrestricted.** The container has to reach the Anthropic API; it can therefore reach anything else, so treat data inside mounts as exfiltratable.
+- **Credentials in the container are real.** The `jinn-claude` volume holds a live token for your account.
+- **Only the `claude` engine is installed.** `codex`, `grok` and `hermes` appear in the default config but their binaries are not in the image, so selecting one in the dashboard will fail. A Homebrew or npm install does not provide them either.
+- **Voice features are not installed.** Speech-to-text needs `whisper-cli`, `ffmpeg` and `curl` — see [Enabling speech-to-text](#enabling-speech-to-text). Voice *output* (kokoro TTS) additionally shells out to `python`, which the runtime stage does not include, so `/talk` playback is unavailable without extending the image further.
+- **Git has no identity.** `git commit` inside a mounted repo fails with *"Author identity unknown"* unless you supply `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL`, and on a Linux host whose user is not uid 1000 the bind-mounted files are not writable by the container's `node` user.
+
+## Enabling speech-to-text
+
+`/talk`, voice notes and the dashboard microphone shell out to `whisper-cli` and `ffmpeg`. The image does not include them — neither does a Homebrew or npm install, where you would run `brew install ffmpeg whisper-cpp` yourself.
+
+Installing them inside a running container with `apt-get` will *not* work: that lands in the container's writable layer, which `docker compose up -d --build` throws away. They have to be baked into an image.
+
+Build the base image under its own tag first, so the derived one has something to extend (compose tags its own build `jinn:local`, so `Dockerfile.stt` must not use that name as its base):
+
+```bash
+docker build --tag jinn:base .
+```
+
+Then create `Dockerfile.stt`:
+
+```dockerfile
+FROM jinn:base
+USER root
+ARG WHISPER_CPP_REF=v1.7.4
+# curl is needed too: the model download shells out to it, and node:*-slim has no curl.
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg curl cmake g++ git \
+ && git clone --depth 1 -b "$WHISPER_CPP_REF" https://github.com/ggerganov/whisper.cpp /tmp/w \
+ && cmake -S /tmp/w -B /tmp/w/build \
+ && cmake --build /tmp/w/build -j --target whisper-cli \
+ && cp /tmp/w/build/bin/whisper-cli /usr/local/bin/ \
+ && rm -rf /tmp/w /var/lib/apt/lists/*
+USER node
+```
+
+Point compose at it in `docker-compose.override.yml`:
+
+```yaml
+services:
+  jinn:
+    build:
+      dockerfile: Dockerfile.stt
+```
+
+Then `docker compose up -d --build` and download a model from the dashboard. **No extra volume is needed** — models are written to `~/.jinn/models/whisper`, already on the `jinn-home` volume, so each one downloads once and survives every later upgrade. Re-run the `docker build --tag jinn:base .` step whenever you upgrade Jinn itself.
+
+## Persistence and upgrades
+
+Upgrading is `docker compose up -d --build` (or a `pull` and recreate). **Nothing is lost** — the same as a `brew upgrade` or `npm i -g` bump. No re-login, no re-pairing, no repeated onboarding, no folder-trust prompts.
+
+Two named volumes hold every stateful path:
+
+| Volume | Contents |
+| --- | --- |
+| `jinn-home` | `~/.jinn` — `config.yaml`, your customised `CLAUDE.md`, `sessions/registry.db` and transcripts, paired browsers (`auth-devices.json`), cron jobs, connectors, workflows, knowledge, skills, `secrets/`, logs, and whisper models if you enable STT |
+| `jinn-claude` | `~/.claude` — the engine login (`.credentials.json`), skills, agents, commands, plugins, hooks, Claude Code's own session history, **and `.claude.json`** |
+
+That last entry is the one worth knowing about. Claude Code normally writes its global config to `~/.claude.json` — *outside* `~/.claude` — which in a container means the container layer, discarded on every rebuild. That file holds your user-scope MCP servers, per-project trust settings, account and subscription identity, and onboarding flags, so losing it means re-adding MCP servers and re-approving every mounted repository after each upgrade.
+
+The image avoids that by setting `CLAUDE_CONFIG_DIR=/home/node/.claude`, which moves that one file inside the volume and changes nothing else. Verify with:
+
+```bash
+docker compose exec jinn ls -la ~/.claude/.claude.json
+```
+
+> **A note on that setting.** `CLAUDE_CONFIG_DIR` works (verified against Claude Code 2.1.220) but is not in the published settings documentation, and [anthropics/claude-code#25762](https://github.com/anthropics/claude-code/issues/25762), which asks for exactly this variable, is still open. The use here is deliberately safe: it points at the directory Claude Code already uses, so if a future release stops honouring it the only consequence is that `.claude.json` returns to its unpersisted default — nothing is corrupted. The entrypoint warns loudly in `docker compose logs` if it detects that, so you would not find out silently.
+
+After upgrading, run `jinn migrate` as you would on a host install.
+
+`docker compose down` keeps the volumes; `docker compose down -v` destroys them, which means re-running setup, signing in and pairing again.
+
+## Notes on the container
+
+- **Bind address.** The entrypoint rewrites `gateway.host` from `127.0.0.1` to `0.0.0.0` in `config.yaml`. Inside a container the shipped default binds the container's own loopback, so a published port would resolve to nothing. The published port is still `127.0.0.1:7777:7777`, so the gateway is not exposed beyond the host.
+- **Bypass consent.** `bypassPermissionsModeAccepted` is recorded in `~/.claude/.claude.json`. Claude Code answers `--dangerously-skip-permissions` with a one-time blocking dialog, and nothing in a PTY presses a key — without this, every turn hangs and is eventually abandoned with *"no completion signal and no recoverable transcript"*. Claude Code 2.1.170 implied the consent through global onboarding and 2.1.220 does not, so the gateway now seeds it on every install, host ones included; the entrypoint still writes it before boot, which is also where an unparseable `.claude.json` gets rescued.
+- **Config location.** `CLAUDE_CONFIG_DIR=/home/node/.claude` keeps Claude Code's `.claude.json` inside the volume; see [Persistence and upgrades](#persistence-and-upgrades).
+- **Engine version.** `@anthropic-ai/claude-code` is pinned by the `CLAUDE_CODE_VERSION` build arg so two builds of the same commit get the same engine, and `DISABLE_AUTOUPDATER=1` stops the CLI relocating itself onto the volume and drifting past the pin. Override with `docker compose build --build-arg CLAUDE_CODE_VERSION=<version>`.
+- **Timezone.** The container is UTC. Shells do not normally export `TZ`, so `${TZ:-UTC}` takes the default unless you set it explicitly — either in your shell or, more reliably, in a `.env` file beside `docker-compose.yml` (`TZ=Europe/Paris`), which Compose reads automatically. It matters because a cron job with no explicit `timezone` fires in the container's zone; giving each job its own timezone is the more robust fix.
+- **Non-root.** Everything runs as the image's `node` user.
+- **`init: true`.** Each session spawns a PTY that spawns its own children; without an init process, orphans accumulate as zombies.
+- **macOS sleep prevention** (`caffeinate`) is skipped automatically — it is guarded by a platform check.
+
+## Troubleshooting
+
+**Dashboard shows a pairing screen.** Expected on a new browser — run `docker compose exec jinn jinn pair` and enter the code. See [Why pairing](#why-pairing-when-a-host-install-just-opens-the-dashboard).
+
+**Dashboard doesn't load at all.** Check `docker compose logs jinn` for `Jinn gateway listening on http://0.0.0.0:7777`. The entrypoint refuses to start if it cannot read or parse `config.yaml`, so that shows up as a restart loop with an explanatory message in the log rather than a silently dead dashboard. A missing `gateway.host` is written rather than treated as fatal.
+
+**A warning about `~/.claude.json` in the logs.** The `CLAUDE_CONFIG_DIR` redirect stopped taking effect, so Claude Code's config is being written outside the volume and will not survive your next upgrade. See the note under [Persistence and upgrades](#persistence-and-upgrades).
+
+**A warning that `.claude.json` does not parse.** The entrypoint side-copies the damaged file to `~/.claude/.claude.json.corrupt`, then writes a fresh config so turns still run. Your MCP servers and per-project trust are not restored automatically — recover what you need from the `.corrupt` copy and re-add them.
+
+**Every turn stalls, then reports no completion signal.** The bypass consent is missing. Confirm with:
+
+```bash
+docker compose exec jinn node -e 'console.log(require(process.env.CLAUDE_CONFIG_DIR+"/.claude.json").bypassPermissionsModeAccepted)'
+```
+
+**Model discovery returns 0 models.** Authentication, not the container. `readClaudeOAuthToken()` in `packages/jinn/src/shared/claude-models.ts` is the single reader for the whole codebase; on Linux it expects `~/.claude/.credentials.json`. Re-run `docker compose exec jinn claude` and `/login`.
+
+**Agent can't see a project.** It isn't mounted, or the employee's working directory still points at a host path. Check `docker compose exec jinn ls /work`.

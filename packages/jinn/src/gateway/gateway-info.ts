@@ -4,10 +4,32 @@ import crypto from "node:crypto";
 
 export interface GatewayInfo { port: number; host?: string; secret: string; pid: number; token?: string; ptyPids?: number[]; namespace?: string; }
 
-/** Identifies the pid namespace the recorded pids belong to. Under Docker this is
- *  the container id, so it changes on every recreate. */
+/**
+ * A boot identity to pair with the hostname, because pid numbers survive neither a
+ * reboot nor a namespace swap. Linux answers exactly: boot_id changes on every host
+ * boot, and the pid-namespace inode changes when the namespace does — needed because
+ * a container shares the host's boot_id, so `docker restart` (same hostname, fresh
+ * pids from 1) would otherwise look like the same namespace.
+ *
+ * Elsewhere the boot instant is derived from uptime and bucketed: os.uptime() has
+ * second granularity, so the derived instant jitters by a tick between reads. A read
+ * landing either side of a bucket edge makes one boot look like two, which only skips
+ * reaping — it never signals a pid this namespace no longer owns.
+ */
+function bootIdentity(): string {
+  try {
+    const bootId = fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf-8").trim();
+    return `${bootId}/${fs.readlinkSync("/proc/self/ns/pid")}`; // "pid:[4026531836]"
+  } catch {
+    return `boot-${Math.floor((Date.now() - os.uptime() * 1000) / 600_000)}`;
+  }
+}
+
+/** Identifies the pid namespace the recorded pids belong to. Under Docker the
+ *  hostname is the container id, so it changes on every recreate; the boot identity
+ *  covers the cases where it does not (host reboot, restart of the same container). */
 function currentNamespace(): string {
-  return os.hostname();
+  return `${os.hostname()}:${bootIdentity()}`;
 }
 
 export function staleGatewayPids(

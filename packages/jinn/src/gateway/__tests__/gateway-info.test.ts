@@ -38,11 +38,19 @@ describe("gateway-info", () => {
     expect(staleGatewayPids({ pid: 7, ptyPids: [14] } as any, 1234, "h1")).toEqual([]);
   });
 
-  it("writeGatewayInfo stamps the current namespace", () => {
+  // Hostname AND boot identity: a reboot keeps the hostname while recycling every
+  // pid, so the stamp has to change even though the machine has not.
+  it("writeGatewayInfo stamps a namespace that is stable within one boot", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-"));
     const file = path.join(dir, "gateway.json");
     writeGatewayInfo(file, { port: 7777, pid: 1234 });
-    expect(readGatewayInfo(file)!.namespace).toBe(os.hostname());
+    const stamped = readGatewayInfo(file)!.namespace!;
+    expect(stamped.startsWith(`${os.hostname()}:`)).toBe(true);
+    expect(stamped.length).toBeGreaterThan(os.hostname().length + 1);
+
+    const second = path.join(dir, "gateway-2.json");
+    writeGatewayInfo(second, { port: 7778, pid: 1235 });
+    expect(readGatewayInfo(second)!.namespace).toBe(stamped);
   });
 
   it("formats gateway URLs for network, wildcard, and IPv6 hosts", () => {

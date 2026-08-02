@@ -76,3 +76,54 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
+
+  docker:
+    runs-on: ubuntu-latest
+    # The failure worth catching is a gateway that builds but cannot spawn a
+    # session — a wrong-ABI sqlite binding, or a skipped node-pty build. `docker
+    # build` never loads a native addon or starts the gateway, so the two steps
+    # after it are what actually exercise that. Plain `docker build` because
+    # nothing is published and fork PRs get a read-only token.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - run: docker build --tag jinn:ci .
+
+      # Formula/jinn.rb asserts the same for the Homebrew install. --workdir is the
+      # jinn package because pnpm links these under packages/jinn/node_modules.
+      # Fails closed: a lost exit event must not drain the loop and exit 0.
+      - name: Native addons load and a PTY spawns
+        run: |
+          docker run --rm --workdir /opt/jinn/packages/jinn --entrypoint node jinn:ci -e '
+            process.exitCode = 1;
+            const Database = require("better-sqlite3");
+            new Database(":memory:").close();
+            const pty = require("node-pty");
+            const timer = setTimeout(() => {
+              console.error("pty exit event never arrived");
+              process.exit(1);
+            }, 30000);
+            const p = pty.spawn("/bin/sh", ["-c", "exit 0"], {});
+            p.onExit(({ exitCode }) => {
+              clearTimeout(timer);
+              if (exitCode !== 0) { console.error("pty exited " + exitCode); return; }
+              process.exitCode = 0;
+              console.log("better-sqlite3 + node-pty OK");
+            });
+          '
+
+      # End-to-end boot: first-run `jinn setup` on an empty volume,
+      # scripts/docker-configure.mjs (which now exits non-zero rather than leaving
+      # the gateway on the container's loopback), and the port publish. /api/status
+      # is deliberately auth-exempt, so this needs no token.
+      - name: Gateway boots and answers
+        run: |
+          docker run -d --name jinn-smoke --init -p 127.0.0.1:7777:7777 jinn:ci
+          ok=
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:7777/api/status >/dev/null 2>&1; then ok=1; break; fi
+            sleep 2
+          done
+          docker logs jinn-smoke
+          docker rm -f jinn-smoke >/dev/null
+          test -n "$ok" || { echo "gateway never answered on /api/status"; exit 1; }

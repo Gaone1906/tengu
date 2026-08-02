@@ -14,9 +14,12 @@ describe("claude-settings", () => {
       else process.env.CLAUDE_CONFIG_DIR = original;
     });
 
+    // path.resolve on both sides: on Windows the production path picks up the cwd's
+    // drive letter, which a bare path.join expectation would not have.
     it("follows CLAUDE_CONFIG_DIR when set", () => {
-      process.env.CLAUDE_CONFIG_DIR = path.join("/somewhere", ".claude");
-      expect(claudeJsonPath()).toBe(path.join("/somewhere", ".claude", ".claude.json"));
+      const configDir = path.join("/somewhere", ".claude");
+      process.env.CLAUDE_CONFIG_DIR = configDir;
+      expect(claudeJsonPath()).toBe(path.join(path.resolve(configDir), ".claude.json"));
     });
 
     it("falls back to the home directory when unset", () => {

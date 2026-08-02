@@ -130,6 +130,7 @@ import { logger } from "../shared/logger.js";
 import { redactText } from "../shared/redact.js";
 import { getSttStatus, downloadModel, transcribe as sttTranscribe, resolveLanguages, WHISPER_LANGUAGES } from "../stt/stt.js";
 import { CODEX_HOMES_DIR, JINN_HOME } from "../shared/paths.js";
+import { resolveClaudeConfigDir } from "../shared/home.js";
 import { resolveEffort } from "../shared/effort.js";
 import { selectClaudeModelFallback } from "../shared/model-fallback.js";
 import { detectRateLimit, rateLimitEngineLabel } from "../shared/rateLimit.js";
@@ -6621,11 +6622,7 @@ interface TranscriptEntry {
 }
 
 function loadRawTranscript(engineSessionId: string): TranscriptEntry[] {
-  const claudeProjectsDir = path.join(
-    process.env.HOME || process.env.USERPROFILE || "",
-    ".claude",
-    "projects",
-  );
+  const claudeProjectsDir = path.join(resolveClaudeConfigDir(), "projects");
   if (!fs.existsSync(claudeProjectsDir)) return [];
 
   const projectDirs = fs.readdirSync(claudeProjectsDir, { withFileTypes: true });
@@ -6738,12 +6735,8 @@ function scheduleTranscriptBackfill(sessionId: string, engineSessionId: string, 
 }
 
 function loadTranscriptMessages(engineSessionId: string): Array<{ role: string; content: string }> {
-  // Claude Code stores transcripts in ~/.claude/projects/<project-key>/<sessionId>.jsonl
-  const claudeProjectsDir = path.join(
-    process.env.HOME || process.env.USERPROFILE || "",
-    ".claude",
-    "projects",
-  );
+  // Claude Code stores transcripts in <config dir>/projects/<project-key>/<sessionId>.jsonl
+  const claudeProjectsDir = path.join(resolveClaudeConfigDir(), "projects");
   if (!fs.existsSync(claudeProjectsDir)) return [];
 
   // Search all project dirs for the transcript
