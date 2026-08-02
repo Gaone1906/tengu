@@ -7,6 +7,7 @@ import yaml from "js-yaml";
 import type { ChatBlock, ChatBlockEnvelope, CronJob, DelegatedActivity, Employee, Engine, IncomingMessage, JinnConfig, JsonObject, Session, StreamDelta, Target } from "../shared/types.js";
 import { isInterruptibleEngine, reportsTurnProgress, STRUCTURED_MESSAGE_BODY_MAX_CHARS } from "../shared/types.js";
 import { compactEmployeeRole } from "../shared/employee-role.js";
+import { resolveStaleChatPolicy } from "../shared/stale-chat.js";
 export { compactEmployeeRole } from "../shared/employee-role.js";
 import {
   getModelRegistry,
@@ -2347,7 +2348,11 @@ export async function handleApiRequest(
     if (!identifiedCaller && rejectUnverifiedIdentifiedApiCaller(req, res, method, pathname, context)) return;
 
     if (method === "GET" && pathname === "/api/features") {
-      return json(res, { notesEnabled: context.getConfig().gateway.notesEnabled === true });
+      const config = context.getConfig();
+      return json(res, {
+        notesEnabled: config.gateway.notesEnabled === true,
+        staleChat: resolveStaleChatPolicy(config),
+      });
     }
 
     if (pathname === "/api/notes" || pathname === "/api/notes/read") {

@@ -6,6 +6,7 @@ import type {
   UpdateNoteInput,
 } from "@/routes/notes/types"
 import type { ExperimentResponse, ExperimentsResponse } from "@/routes/experiments/types"
+import type { StaleChatPolicy } from "@/lib/stale-chat"
 
 export interface TranscriptContentBlock {
   type: 'text' | 'tool_use' | 'tool_result' | 'thinking'
@@ -871,7 +872,7 @@ export const api = {
     get<ExperimentsResponse>(`/api/experiments${status ? `?status=${status}` : ""}`),
   getExperiment: (id: string) =>
     get<ExperimentResponse>(`/api/experiments/${encodeURIComponent(id)}`),
-  getFeatures: () => get<{ notesEnabled: boolean }>("/api/features"),
+  getFeatures: () => get<{ notesEnabled: boolean; staleChat: StaleChatPolicy }>("/api/features"),
   getStatus: () => get<Record<string, unknown>>("/api/status"),
   listWorkflowDefinitionsV2: () =>
     get<{ items: WorkflowDefinitionSummaryV2Wire[]; nextCursor: string | null }>("/api/workflows"),

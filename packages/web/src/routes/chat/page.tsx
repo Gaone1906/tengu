@@ -18,7 +18,7 @@ import { ChatSidebar, pickDeleteFallbackId, type SidebarOrder } from '@/componen
 import { ChatHeaderPills } from '@/components/chat/chat-tabs'
 import { NavRibbon } from '@/components/pill-nav'
 import { MobileTabBar } from '@/components/chat/mobile-tab-bar'
-import { ChatPane } from '@/components/chat/chat-pane'
+import { ChatPane, type FreshChatSourceSession } from '@/components/chat/chat-pane'
 import { ThreadPeek, type CommsPeekData } from '@/components/chat/thread-peek'
 import { formatMessage } from '@/components/chat/chat-messages'
 // Lazy so the file viewer's syntax-highlighter grammars + react-markdown are
@@ -43,6 +43,8 @@ import { cn } from '@/lib/utils'
 import { Archive, ArchiveRestore, Check, Copy, MoreHorizontal, Search, Share2, Trash2 } from 'lucide-react'
 import { writeViewMode, type ViewMode } from '@/lib/view-mode'
 import { shareDebugLog, clearDebugLog } from '@/lib/debug-log'
+import { buildNewSessionParams } from '@/components/chat/new-chat-helpers'
+import { buildContinuationPrompt } from '@/lib/stale-chat'
 
 class ChatErrorBoundary extends React.Component<{ children: React.ReactNode }, { error: Error | null }> {
   state: { error: Error | null } = { error: null }
@@ -595,6 +597,31 @@ function ChatPage() {
     chatTabs.openTab({ sessionId: newSessionId, label: 'Duplicated Chat', status: 'idle', unread: false, pinned: true })
     qc.invalidateQueries({ queryKey: queryKeys.sessions.all })
   }, [chatTabs, qc])
+
+  const handleStartFreshChat = useCallback(async (previous: FreshChatSourceSession) => {
+    const prompt = buildContinuationPrompt(previous.id)
+    const result = await api.createSession(buildNewSessionParams({
+      message: prompt,
+      selectedEmployee: previous.employee ?? null,
+      engine: previous.engine,
+      model: previous.model,
+      effortLevel: previous.effortLevel,
+    }))
+    const newSessionId = typeof result.id === 'string' ? result.id : ''
+    if (!newSessionId) throw new Error('The gateway did not return a new session id')
+
+    chatTabs.openTab({
+      sessionId: newSessionId,
+      label: typeof result.title === 'string' && result.title ? result.title : 'Continued Chat',
+      status: 'running',
+      unread: false,
+      pinned: true,
+      employeeName: previous.employee,
+    })
+    pendingNavRef.current = newSessionId
+    navigate(sessionPath(newSessionId))
+    qc.invalidateQueries({ queryKey: queryKeys.sessions.all })
+  }, [chatTabs, navigate, qc])
 
   // ChatPane callbacks
   const handleSessionCreated = useCallback((newId: string, pending?: Message) => {
@@ -1163,6 +1190,7 @@ function ChatPage() {
                 onPeek={requestThreadPreview}
                 onContentReady={handlePaneContentReady}
                 delegatedActivity={selectedDelegatedActivity}
+                onStartFreshChat={handleStartFreshChat}
               />
             )}
           </div>
