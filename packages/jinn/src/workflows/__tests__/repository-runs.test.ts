@@ -137,6 +137,7 @@ describe('WorkflowRepository Task 11 contract', () => {
     expectTypeOf(repository.nextDueReminder).returns.toEqualTypeOf<{
       runId: string; nodeId: string; attempt: number; nextReminderAt: string;
     } | null>();
+    expectTypeOf(repository.nextDueTimeout).returns.toEqualTypeOf<string | null>();
   });
 
   it('exports one public repository and the same error without exposing helpers', () => {
@@ -340,6 +341,43 @@ describe('atomic run mutations', () => {
       attempt: 1,
       nextReminderAt: '2026-07-21T10:15:00.000Z',
     });
+  });
+
+  it('reads the earliest running attempt timeout and ignores attempts without one', () => {
+    const createRunningAttempt = (id: string, startedAt: string, timeoutMinutes?: number) => {
+      now = startedAt;
+      authoredDefinition(id, id);
+      const run = createRun({ workflowId: id });
+      const config = resolved();
+      if (timeoutMinutes === undefined) delete config.timeoutMinutes;
+      else config.timeoutMinutes = timeoutMinutes;
+      repository.mutateRun(run.id, run.revision, (tx) => {
+        tx.setRunStatus('running');
+        tx.setNodeStatus('draft', 'dispatching', { activated: true, startedAt });
+        tx.createAttempt({ nodeId: 'draft', resolvedConfig: config, input: {} });
+      });
+      repository.mutateRun(run.id, 2, (tx) => {
+        tx.settleAttempt('draft', 1, { status: 'running', sessionId: `session-${id}` });
+      });
+      return run;
+    };
+
+    expect(repository.nextDueTimeout()).toBeNull();
+    createRunningAttempt('unbounded-flow', '2026-07-21T10:00:00.000Z');
+    expect(repository.nextDueTimeout()).toBeNull();
+    const later = createRunningAttempt('later-flow', '2026-07-21T10:01:00.000Z', 30);
+    const earlier = createRunningAttempt('earlier-flow', '2026-07-21T10:05:00.000Z', 10);
+    expect(repository.nextDueTimeout()).toBe('2026-07-21T10:15:00.000Z');
+
+    const timeoutError = { code: 'workflow-timeout', message: 'Workflow attempt timed out.', retryable: true };
+    repository.mutateRun(earlier.id, 3, (tx) => {
+      tx.settleAttempt('draft', 1, { status: 'timed-out', error: timeoutError, endedAt: '2026-07-21T10:15:00.000Z' });
+    });
+    expect(repository.nextDueTimeout()).toBe('2026-07-21T10:31:00.000Z');
+    repository.mutateRun(later.id, 3, (tx) => {
+      tx.settleAttempt('draft', 1, { status: 'timed-out', error: timeoutError, endedAt: '2026-07-21T10:31:00.000Z' });
+    });
+    expect(repository.nextDueTimeout()).toBeNull();
   });
 
   it('rolls back atomically, bumps once when changed, never bumps a no-op, and rejects stale revisions', () => {

@@ -153,7 +153,8 @@ export class WorkflowService {
     if (this.disposed) return;
     const wait = this.options.repository.nextDueWait();
     const reminder = this.options.repository.nextDueReminder();
-    const nextAt = [wait?.resumeAt, reminder?.nextReminderAt].filter((value): value is string => Boolean(value)).sort()[0];
+    const timeout = this.options.repository.nextDueTimeout();
+    const nextAt = [wait?.resumeAt, reminder?.nextReminderAt, timeout].filter((value): value is string => Boolean(value)).sort()[0];
     if (!nextAt) return;
     const delay = Math.min(2_147_483_647, Math.max(0, Date.parse(nextAt) - Date.parse(this.now())));
     this.wakeTimer = setTimeout(() => {

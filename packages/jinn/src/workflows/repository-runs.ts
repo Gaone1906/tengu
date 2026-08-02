@@ -393,6 +393,18 @@ export function readNextDueReminder(db: WorkflowSqliteConnection): {
   };
 }
 
+export function readNextDueTimeout(db: WorkflowSqliteConnection): string | null {
+  const row = db.prepare(`SELECT * FROM workflow_attempts
+    WHERE status = 'running' AND json_extract(resolved_config_json, '$.timeoutMinutes') IS NOT NULL
+    ORDER BY julianday(started_at) + json_extract(resolved_config_json, '$.timeoutMinutes') / 1440.0,
+      run_id, node_id, attempt LIMIT 1`).get() as AttemptRow | undefined;
+  if (!row) return null;
+  const attempt = decodeAttempt(row);
+  const timeoutMinutes = attempt.resolvedConfig.timeoutMinutes;
+  if (timeoutMinutes === undefined) repositoryError('corrupt-record', 'Workflow attempt timeout is invalid.');
+  return new Date(Date.parse(attempt.startedAt) + timeoutMinutes * 60_000).toISOString();
+}
+
 export function readRecoverableRuns(db: WorkflowSqliteConnection): WorkflowRunRecord[] {
   return (db.prepare("SELECT * FROM workflow_runs WHERE status IN ('pending','running','waiting') ORDER BY started_at, id")
     .all() as RunRow[]).map(decodeRun);
