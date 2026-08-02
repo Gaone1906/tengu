@@ -255,15 +255,7 @@ import { scanOrg } from "./org.js";
 import { TODO_DISPATCHER_NAME } from "./system-employees.js";
 import { resolveOrgHierarchy } from "./org-hierarchy.js";
 import { surfaceManagerVisibility } from "./manager-visibility.js";
-import { searchKnowledge, readKnowledgeFile } from "../knowledge/store.js";
-import {
-  NOTE_FILE_MAX_BYTES,
-  createNote,
-  listNotes,
-  readNote,
-  updateNote,
-  type NoteStoreResult,
-} from "../notes/store.js";
+import { NOTE_FILE_MAX_BYTES, createNote, listNotes, readKnowledgeFile, readNote, searchKnowledge, updateNote, type NoteStoreResult } from "../notes/store.js";
 import { loadInstances, saveInstances, type Instance, type InstanceInput } from "../instances/directory.js";
 import { createInstance, type CreateInstanceInput, type CreateInstanceResult } from "../instances/create.js";
 import { startInstance, type StartInstanceInput, type StartInstanceResult } from "../instances/start.js";
