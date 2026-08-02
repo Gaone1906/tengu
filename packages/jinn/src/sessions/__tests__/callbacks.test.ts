@@ -438,8 +438,8 @@ describe("notifyParentSession", () => {
     expect(body.message).not.toContain("…");
   });
 
-  it("delivers an exact 4,000-character reply without clipping or preview framing", async () => {
-    const result = `${"x".repeat(3_999)}z`;
+  it("delivers a 4,001-character reply whole to the parent engine", async () => {
+    const result = `${"x".repeat(4_000)}z`;
     const child = makeSession();
 
     notifyParentSession(child, { result });
@@ -453,8 +453,38 @@ describe("notifyParentSession", () => {
     expect(body.message).not.toContain("…");
   });
 
-  it("clips replies over 4,000 characters with an honest recovery instruction", async () => {
-    const result = `${"x".repeat(4_000)}z`;
+  it("delivers a 20,000-character reply whole to the parent engine", async () => {
+    const result = `${"x".repeat(19_999)}z`;
+    const child = makeSession();
+
+    notifyParentSession(child, { result });
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body.message).toContain(`Reply:\n${result}\n\n`);
+    expect(body.message).not.toContain("preview");
+    expect(body.message).not.toContain("clipped");
+    expect(body.message).not.toContain("…");
+  });
+
+  it("delivers an exact 128,000-character reply whole to the parent engine", async () => {
+    const result = `${"x".repeat(127_999)}z`;
+    const child = makeSession();
+
+    notifyParentSession(child, { result });
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body.message).toContain(`Reply:\n${result}\n\n`);
+    expect(body.message).not.toContain("preview");
+    expect(body.message).not.toContain("clipped");
+    expect(body.message).not.toContain("…");
+  });
+
+  it("clips replies over 128,000 characters with an honest recovery instruction", async () => {
+    const result = `${"x".repeat(128_000)}z`;
     const child = makeSession();
 
     notifyParentSession(child, { result });
@@ -463,7 +493,7 @@ describe("notifyParentSession", () => {
     expect(fetchSpy).toHaveBeenCalledOnce();
     const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
     expect(body.message).toContain(
-      `Reply (clipped to first 4,000 of 4,001 characters):\n${"x".repeat(4_000)}…\n\n`,
+      `Reply (clipped to first 128,000 of 128,001 characters):\n${"x".repeat(128_000)}…\n\n`,
     );
     expect(body.message).not.toContain(result);
     expect(body.message).toContain("The full reply is intact in child session child-001; nothing was lost.");
