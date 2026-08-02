@@ -1007,8 +1007,6 @@ export const api = {
     get<{ needed: boolean; onboarded: boolean; sessionsCount: number; hasEmployees: boolean; companyName: string | null; companyPrefix: string | null; todoPrefix: string | null; todoPrefixFrozen: boolean; portalName: string | null; operatorName: string | null }>("/api/onboarding"),
   completeOnboarding: (data: { companyName?: string; companyPrefix?: string | null; portalName?: string; operatorName?: string; language?: string; engine?: string; model?: string; effortLevel?: string }) =>
     post<{ status: string; portal: { companyName?: string; companyPrefix?: string; portalName?: string; operatorName?: string; language?: string } }>("/api/onboarding", data),
-  getActivity: () =>
-    get<Array<{ event: string; payload: unknown; ts: number }>>("/api/activity"),
   updateDepartmentBoard: (name: string, data: unknown) =>
     put<Record<string, unknown>>(`/api/org/departments/${name}/board`, data),
   sttStatus: () =>
