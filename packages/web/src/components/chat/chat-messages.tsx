@@ -1495,7 +1495,7 @@ export function ChatMessages({
         {blockAnnouncement}
       </span>
       <div ref={setScrollContainerRef} style={{ overflowAnchor: 'auto' }} className="chat-messages-scroll h-full overflow-y-auto overflow-x-hidden bg-[var(--bg)] min-h-0">
-        <div className={`mx-auto w-full max-w-[var(--chat-measure)] pt-[72px] lg:pt-[88px] ${footer ? 'pb-0' : 'pb-[var(--space-6)]'}`}>
+        <div className={`mx-auto w-full max-w-[var(--chat-measure)] pt-[72px] lg:pt-[88px] ${footer ? 'flex min-h-full flex-col justify-end pb-0' : 'pb-[var(--space-6)]'}`}>
           {loadingOlderMessages && (
             <div role="status" aria-label="Loading older messages" className="flex h-8 items-center justify-center">
               <span className="size-3 rounded-full bg-[var(--fill-tertiary)] animate-[jinn-pulse_1.4s_infinite]" />

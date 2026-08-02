@@ -896,7 +896,8 @@ export function isSensitiveConfigKey(key: string): boolean {
  * deepMerge round-trips the sentinel back to the original value on PUT.
  */
 export function sanitizeConfigForApi<T>(value: T, key = ""): T {
-  if (isSensitiveConfigKey(key) && value !== undefined && value !== null && value !== "") {
+  const isNumericTokenThreshold = key === "tokenThreshold" && typeof value === "number";
+  if (isSensitiveConfigKey(key) && !isNumericTokenThreshold && value !== undefined && value !== null && value !== "") {
     return REDACTED_SECRET as T;
   }
   if (Array.isArray(value)) {

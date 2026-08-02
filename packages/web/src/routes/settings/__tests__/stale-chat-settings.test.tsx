@@ -73,6 +73,7 @@ describe('Settings stale chat controls', () => {
     const toggle = await screen.findByRole('switch', { name: 'Suggest fresh chats' })
     const tokenThreshold = screen.getByRole('spinbutton', { name: 'Context token threshold' })
     const idleMinutes = screen.getByRole('spinbutton', { name: 'Idle minutes' })
+    expect(toggle.className).toContain('h-[34px]')
     expect(tokenThreshold.hasAttribute('disabled')).toBe(true)
     expect(idleMinutes.hasAttribute('disabled')).toBe(true)
 

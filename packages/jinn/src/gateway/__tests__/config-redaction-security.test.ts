@@ -37,4 +37,12 @@ describe("GET /api/config redaction", () => {
     expect(sanitized.remotes[0].token).toBe("***");
     expect(sanitized.remotes[0].url).toBe("http://127.0.0.1:7777");
   });
+
+  it("preserves the numeric stale-chat token threshold", () => {
+    const sanitized = sanitizeConfigForApi({
+      sessions: { staleChat: { tokenThreshold: 1_500 } },
+    });
+
+    expect(sanitized.sessions.staleChat.tokenThreshold).toBe(1_500);
+  });
 });
