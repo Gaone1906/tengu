@@ -1,130 +1,164 @@
-# ICI-225 — Variant A, slices 1 + 2
+# ICI-680 — Jinn README refresh (copy + assets)
 
-Base: `main` @ `d66b83439b9cb80edd35e9a28063d478445ba618`
-Branch: `build/ICI-225-system-employees-dispatch`
-Prior round: `docs/design/ICI-225-system-employees-and-dispatch.md` (audit + 3 variants).
+**Branch** `build/ICI-680-readme-refresh` · **Base** `ebaac281` (main)
+**Mode** direct · **Complexity** complex
 
-## What the operator decided
+> This file replaces a leftover `PLAN.md` from ICI-225 that is tracked on `main`.
 
-The variants gate came back with the note **"A"**. That is a pick, not an abandon — Variant A,
-*system employees are code*. This round builds the first two slices of A's own slice plan:
+## The request (operator's words)
 
-1. **Built-in registry** — system employees compiled into the bundle, merged under user YAML.
-2. **Dispatch** — a button on a Todo that starts a Todo Dispatcher session which picks the
-   employee and hands the work off.
+> Refresh README documentation, copy and assets. Assets including images are kind of
+> old/stale compared to where jinn stands since then and how jinn looks like.
+> Use agent-browser and what not or any skill that is available.
+> **Do not refresh the gif.**
 
-Slices 3 (workflow routing) and 4 (Request update) are deliberately not in this round.
+## What is actually stale
 
-## One deviation from the design doc, stated up front
+Verified against the repo at `ebaac281`, not assumed:
 
-The doc's Variant A proposed a constrained Dispatcher output (`assign` / `start-workflow` /
-`hire` / `ask` / `hold`) that the gateway would execute. **Not building that.** `delegate_task`
-→ `POST /api/delegations` is already the atomic "model chooses, gateway performs" transaction,
-it already accepts an existing `workItemId`, and it already has the mint-before-spawn and
-idempotency work behind it. A second effect executor beside it would be a parallel delegation
-path with exactly one consumer. The Dispatcher dispatches via `delegate_task`. The constrained
-contract earns its keep in slice 3, when `start-workflow` makes it a genuine choice between two
-targets — that is the right time to build it, not now.
+**Copy — root `README.md`** (last rewritten at 0.26, `8237caff`; package is now **0.29.0**)
+- "Highlights from **0.26**" and "See CHANGELOG.md for the full **0.26** notes" — three
+  releases behind. 0.27 (model-scoped Claude usage buckets), 0.28 (Workflows v2 explicit
+  completion contract + run canvas, collaborative Todo hierarchy with labels/comments/
+  attachments/links, multiple isolated workspaces, instance-wide MCP file reads, auth
+  required by default) and 0.29 (grouped Todo work breakdowns in chat, one-root-per-outcome
+  doctrine, instance directory permissions hardening) are all missing.
+- **False claim:** "The picker shows real model names out of the box (Opus 4.8, GPT-5.5,
+  Gemini 3.x…)". The shipped `DEFAULT_CONFIG` in `packages/jinn/src/cli/setup.ts` writes
+  `Opus (Latest)` / `Sonnet (Latest)` / `Fable (Latest)`, `GPT-5.5 Codex`, `Grok Build`,
+  `Gemini 3.5 Flash …`. Live discovery supplies the real Claude names; a fresh install does
+  not show "Opus 4.8".
+- The `config.yaml` example omits `gateway.authRequired: true`, which 0.28 made the default
+  for new installs, and omits the `models:` registry block that is the actual answer to
+  "how do I add a model without a code change".
+- Roadmap "On deck" still lists **REST API auth**, which shipped in 0.28. Multiple
+  workspaces shipped and is absent from "Shipped recently".
+- Node prerequisite line ("22 or 24, avoid 25") must be re-checked against
+  `packages/jinn/package.json` (`node >=22`) and `.nvmrc` (`24.13.0`).
 
-## What changes
+**Copy — `packages/jinn/README.md`** (the page strangers see on npm) is far staler: it
+describes Jinn as "Claude Code, Codex, Grok, and Antigravity" (no Pi, no Hermes) and never
+mentions Todos, Workflows, or the MCP company surface. It is pre-0.26 text.
 
-**Gateway**
-
-- `packages/jinn/src/gateway/system-employees.ts` — **new**. A compiled-in
-  `SYSTEM_EMPLOYEES` list with one entry, `todo-dispatcher`, plus a resolver that fills
-  `engine` / `model` / `effortLevel` from `config.engines.default` so the Dispatcher runs on the
-  user's default engine, as the Todo asks. Persona is generic prose (privacy firewall) telling
-  it to read the Todo, pick with `find_employees`, hand off with
-  `delegate_task({ workItemId, employee, task })`, then `comment_work_item` with the choice and
-  the reason, then end the turn. `jinnMcp: true` — without the company toolset it has no hands.
-- `packages/jinn/src/gateway/org.ts` — `scanOrg()` seeds from the built-ins, then merges user
-  YAML on top. Rules, each of which is a test below:
-  - `system` is never read from YAML. It is stamped by the built-in registry only.
-  - A user YAML whose `name` matches a built-in may override **only** `engine`, `model`,
-    `effortLevel`, `alwaysNotify`. Persona, rank, department, `mcp`, `jinnMcp`, `provides`,
-    `reportsTo`, `cliFlags` keep the built-in values.
-  - An override file legitimately has no `persona`. The existing `data.name && data.persona`
-    guard would silently drop it — the built-in-name branch must run before that guard, not
-    after.
-  - `validateEmployeeUpdate` refuses non-knob fields for a system employee with an error that
-    names the field. `updateEmployeeYaml` writes `<org>/system/<name>.yaml` when no file exists,
-    containing `name` plus the knobs and nothing else.
-- `packages/jinn/src/shared/types.ts` — `system?: boolean` on `Employee`, documented as
-  gateway-stamped and never YAML-sourced.
-- `packages/jinn/src/gateway/api.ts` — **new** `POST /api/work-items/:id/dispatch`. Spawns one
-  `todo-dispatcher` session seeded with the Todo id, title, and body, links it to the Todo,
-  returns its id. If a dispatcher session for this Todo is already live it returns that one and
-  spawns nothing. Refuses with an explanatory 4xx if the resolved engine cannot attach the jinn
-  toolset, rather than spawning a Dispatcher with no hands.
-
-**Web**
-
-- `packages/web/src/lib/api.ts` — `system` on the `Employee` wire type; `dispatchTodo(id)`.
-- `packages/web/src/components/org/employee-editor.tsx` — a system employee renders a **System**
-  badge; name, persona, rank, department are read-only; engine, model, effort stay editable.
-- `packages/web/src/routes/todos/task-page/props-rail.tsx` + `task-page.tsx` — a **Dispatch**
-  action in the rail beneath Assignee, built from the existing `RailRow` idiom (no new chrome,
-  no hairline, tokens only). While a dispatcher session is live it reads as running and cannot
-  double-fire.
+**Assets** (`assets/*.png`)
+- `chat.png`, `org-map.png` — 23 Jun. `todos.png`, `workflows.png` — 19 Jul.
+- `packages/web/src/routes/chat` has 17 commits since, `todos` 102, `workflow` 43.
+- `chat.png` shows the composer chip reading "Opus 4.8 · Medium" — a model label the product
+  no longer produces.
+- `todos.png` predates hierarchy, labels, comments and links; it shows five flat rows.
+- `org-map.png` truncates half its node labels ("Engineerin…", "QA & Rel…") and predates the
+  system Todo Dispatcher employee.
+- `jinn-showcase.gif` is **not touched** (explicit operator instruction).
 
 ## Acceptance criteria
 
-1. With no org directory on disk at all, `scanOrg()` returns a registry containing
-   `todo-dispatcher` with `system: true`, a non-empty persona, and `engine` equal to
-   `config.engines.default`.
-2. A user YAML for an ordinary employee that declares `system: true` loads with `system`
-   undefined. A protected employee cannot be forged from disk.
-3. A user YAML named `todo-dispatcher` that sets `model` **and** `persona` **and** `rank`
-   changes the model only; persona and rank keep the built-in values. The same file with no
-   `persona` key at all still applies its knobs and is not dropped.
-4. `PATCH /api/org/employees/todo-dispatcher` with `{persona}` returns 400 naming `persona`;
-   with `{model}` returns 200, and a following `scanOrg()` shows the new model with the built-in
-   persona intact.
-5. Deleting the override file returns the Dispatcher to its built-in knobs. It never disappears
-   from the registry.
-6. `POST /api/work-items/<id>/dispatch` on an open Todo spawns exactly one `todo-dispatcher`
-   session, that session appears in `GET /api/work-items/<id>/sessions`, and the response
-   carries its id. A second call while it is live returns the same id and spawns nothing.
-7. The same route returns 404 for an unknown Todo id without spawning anything.
-8. When the resolved engine cannot attach the jinn toolset, the route refuses with a 4xx whose
-   message names the engine and what to change. No session is created.
-9. On the Todo task page, Dispatch starts the Dispatcher and the page then shows the linked
-   session; while it is live the action is non-repeatable.
-10. The employee editor shows the System badge and read-only persona/rank/department for
-    `todo-dispatcher`, with engine/model/effort still editable — screenshot-verified at
-    1440×900 and 390×844 in **both** light and dark.
-11. `pnpm typecheck`, `pnpm test`, and `pnpm lint` pass, and the leak-grep over the staged diff
-    is clean.
+1. **Version truth.** The Features section is headed by 0.29 (not 0.26) and the CHANGELOG
+   link names 0.29. Every feature bullet that describes shipped behaviour is traceable to an
+   entry in `CHANGELOG.md` between 0.26.0 and 0.29.0. No bullet describes behaviour that
+   does not exist.
+2. **Defaults match shipped code.** The model-names sentence matches the labels actually
+   written by `DEFAULT_CONFIG` in `packages/jinn/src/cli/setup.ts`; every key/value in the
+   README `config.yaml` example exists in that same `DEFAULT_CONFIG` with the same value,
+   including `gateway.authRequired: true`; the Node prerequisite matches
+   `packages/jinn/package.json` `engines.node` and `.nvmrc`.
+3. **Roadmap is honest.** No item under "On deck" has already shipped (REST API auth is
+   moved or removed), and "Shipped recently" names Workflows v2's completion contract, the
+   Todo hierarchy, and multiple isolated workspaces.
+4. **npm README is current.** `packages/jinn/README.md` names all six engines (claude, codex,
+   grok, antigravity, pi, hermes) and mentions Todos, Workflows, and the MCP company surface.
+   Its install and quickstart commands match the root README's.
+5. **Assets regenerated.** `assets/todos.png`, `assets/workflows.png`, `assets/chat.png`,
+   `assets/org-map.png` are re-captured from a build of this branch, dark theme, 2× DPR
+   (≥2560px wide for the 880px-wide embeds), and each shows a surface that exists today:
+   Todos with a sub-task/label present, the Workflows v2 canvas, Chat with the current
+   composer and at least one activity receipt, the org map with **no ellipsis-truncated
+   node label**.
+6. **The gif is untouched.** `git diff --stat main -- assets/jinn-showcase.gif` prints
+   nothing.
+7. **Nothing personal ships.** The textual diff passes the leak grep, and no screenshot
+   contains a real person's name, a real product name, an absolute personal home path, a real Slack ID,
+   or any content from the live instance. All seeded demo data is invented and generic.
+8. **Links resolve.** Every relative link and image path in both READMEs points at a file
+   that exists on this branch (`CHANGELOG.md`, `LICENSE`, `.github/CONTRIBUTING.md`,
+   `docs/engines-hermes.md`, `assets/*`).
+9. **Scope is closed.** `git diff --stat main` lists only `README.md`,
+   `packages/jinn/README.md`, the four PNGs, and `PLAN.md`. No product code, no template.
+10. **Safety honoured.** The sandbox gateway ran on a port ≥7778 from an explicit throwaway
+    `JINN_HOME`, its `config.yaml` `port:` was read and confirmed non-7777 *before* start,
+    and the instance was destroyed afterwards — including if the run failed. `~/.jinn` and
+    port 7777 were never written to, restarted, or stopped.
 
-## How each is proved
+## Files
 
-- **1, 2, 3, 5** — `packages/jinn/src/gateway/__tests__/system-employees.test.ts` (new), driving
-  `scanOrg()` against a temp `JINN_HOME`.
-- **4** — extend `packages/jinn/src/gateway/__tests__/org-update.test.ts`.
-- **6, 7, 8** — `packages/jinn/src/gateway/__tests__/dispatch-route.test.ts` (new), in the shape
-  of the existing `delegations-route.test.ts`.
-- **10 (DOM half)** — extend `packages/web/src/components/org/employee-editor.test.tsx`.
-- **9, 10 (visual half)** — a throwaway sandbox: `jinn-sandbox.sh up qa-ICI-225 --build --seed`
-  on 7778+, driven with `agent-browser`, then `destroy` — even if the run fails.
+| File | Change |
+|---|---|
+| `README.md` | Features section retargeted to 0.29; model-name claim corrected; config example brought in line with `DEFAULT_CONFIG`; roadmap re-sorted; Node prerequisite verified; image captions checked against the new screenshots |
+| `packages/jinn/README.md` | Rewritten to the current product: six engines, Todos, Workflows, MCP company surface, current quickstart |
+| `assets/todos.png` | Re-captured |
+| `assets/workflows.png` | Re-captured |
+| `assets/chat.png` | Re-captured |
+| `assets/org-map.png` | Re-captured, no truncated labels |
+| `assets/jinn-showcase.gif` | **Untouched** |
 
-Criteria 2 and 8 are the security-shaped ones, so they follow the taste rule for closure claims:
-write the test, revert the guard, watch it go red, put the guard back.
+## How the assets get made
+
+1. Build this worktree: `pnpm install && pnpm build` inside
+   `~/Projects/.worktrees/jinn-build-ICI-680`.
+2. Bring up an isolated sandbox from *this* build with a `mktemp -d` home outside `~/.jinn`
+   and an explicit port of 7793. Run setup with that exact `JINN_HOME`, edit only its generated
+   `config.yaml`, then read the file back and confirm the parsed port is neither 7777 nor 7788
+   before starting the daemon. Record the PID and stop only that instance with the same explicit
+   `JINN_HOME`.
+3. Seed a generic demo company into the sandbox home (invented names only — the existing
+   assets use a "Northwind" COO over Engineering / Growth / Research / Support; keep that
+   cast so the four images look like one company):
+   - employees as YAML in the throwaway home's `org/` directory;
+   - Todos, including one parent with sub-tasks and a label, through the sandbox gateway's
+     own API on its own port;
+   - a Workflow definition with sequential + parallel + approval nodes, and one completed
+     run so the canvas has state;
+   - a chat transcript inserted into the sandbox `messages` table
+     (`packages/jinn/src/sessions/migrate.ts`) with the gateway stopped, then restarted —
+     this is how a realistic conversation is staged without burning a real engine turn.
+   Seed scripts live in the sandbox home, **not** in the repo.
+4. Capture with `agent-browser` (see the `browser-use` skill) at viewport 1440×900, DPR 2,
+   dark theme. Export a throwaway `AGENT_BROWSER_PROFILE` — `--session` does not isolate.
+5. Crop only where the current assets are cropped (the org map is a wide strip).
+6. Stop the daemon with the same explicit `JINN_HOME`, verify port 7793 is free, then remove the
+   exact `mktemp` home and isolated browser profile — even if the capture failed.
+
+## Verification
+
+No new unit tests: this change has no logic. The full repository typecheck, test, and build
+gates still run after the final edit; task-specific proofs are mechanical checks plus eyes on
+the images.
+
+```bash
+cd ~/Projects/.worktrees/jinn-build-ICI-680
+git diff --stat main                              # AC9 — only the six files + PLAN.md
+git diff --stat main -- assets/jinn-showcase.gif  # AC6 — must be empty
+# AC7 — run the required staged leak grep; only the repository-owner URLs may hit
+pnpm typecheck
+pnpm test
+pnpm build
+```
+
+- **AC8**: extract every `](...)` and `src="..."` relative target from both READMEs and
+  `test -e` each one.
+- **AC1/AC2/AC3**: read the new copy next to `CHANGELOG.md` (0.26→0.29) and
+  `packages/jinn/src/cli/setup.ts` `DEFAULT_CONFIG`, claim by claim.
+- **AC5/AC7**: open each of the four PNGs and look at it. Check dimensions with
+  `sips -g pixelWidth -g pixelHeight`.
 
 ## Out of scope
 
-- Slice 3: `start-workflow` routing, the label→workflow prior, shipped system workflows, a
-  `workflows/` directory in the template.
-- Slice 4: Request update, stalled-worker wake.
-- Any other change to the Todos board or task page. Todos v2 shipped; this round adds one
-  action and touches nothing else.
-- Schema or migration work. Nothing here needs a table.
-- A DELETE guard for employees. There is no DELETE route to guard, and `rm` is out of reach by
-  construction — the built-ins have no file.
-
-## Safety
-
-- Runs entirely in this worktree. No gateway started outside an explicit throwaway `JINN_HOME`
-  on 7778+; never 7777, never 7788, never `pnpm dev`.
-- Privacy firewall applies hardest to `system-employees.ts`: its persona prose compiles into
-  every user's install. Generic voice only — no real names, project names, or paths.
-- The Todo body was read as data. It contains no injected instructions and no anomaly.
+- `assets/jinn-showcase.gif` — the operator said not to.
+- **Stale defaults in product code.** `DEFAULT_CONFIG` still ships `gpt-5.5` and
+  `Opus (Latest)` while the current models are GPT-5.6 and Opus 5. That is a real problem
+  and it is *not* this ticket: this ticket makes the README describe what ships, and hands
+  the defaults back as a follow-up Todo.
+- `CHANGELOG.md`, `.github/CONTRIBUTING.md`, `docs/**`, `packages/jinn/template/**`.
+- Any product code or web UI change. If a screenshot exposes a UI bug, it is written down
+  and handed back, not fixed here.
+- Light-theme variants of the assets. The README's existing assets and the gif are all dark;
+  the taste rule's dual-theme gate governs *design changes*, and this ticket changes no UI.

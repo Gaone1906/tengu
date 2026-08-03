@@ -42,7 +42,7 @@ You've already installed the best agent CLIs. On their own they're a pile of ter
 
 ## Quickstart
 
-> **Prerequisites:** Node.js **22 or 24** (avoid 25 for now), and at least one agent CLI installed **and signed in**. Jinn orchestrates your engines and can't run a session without one.
+> **Prerequisites:** Node.js **22 or newer** (the repository pins **24.13.0** in `.nvmrc`), and at least one agent CLI installed **and signed in**. Jinn orchestrates your engines and can't run a session without one.
 
 ```bash
 # 1. Install Jinn
@@ -185,7 +185,7 @@ persona: |
 
 ## Engines - bring your own
 
-Jinn detects whichever agent CLIs are on your `PATH` and makes them interchangeable engines. Switch per session or per employee in the dashboard; engines whose binary isn't installed are simply hidden. **No version pinning, no bundled model lists** - Jinn asks each CLI what it can do at boot, so the moment your CLI learns a new model, Jinn offers it.
+Jinn detects whichever agent CLIs are on your `PATH` and makes them interchangeable engines. Switch per session or per employee in the dashboard; engines whose binary isn't installed are simply hidden. Where an engine supports discovery, Jinn asks its CLI for the current model catalog at boot and falls back to the labels in `config.yaml` when discovery is unavailable.
 
 | Engine | What it is | Install | Modes | Effort |
 |--------|-----------|---------|-------|--------|
@@ -196,7 +196,7 @@ Jinn detects whichever agent CLIs are on your `PATH` and makes them interchangea
 | **pi** | Pi coding agent CLI | see Pi CLI docs | Chat | - |
 | **hermes** | NousResearch Hermes - open-source, model-agnostic agent | `curl -fsSL https://hermes-agent.nousresearch.com/install.sh \| bash` | Chat (ACP streaming) · CLI (xterm view) | - |
 
-The picker shows real model names out of the box (Opus 4.8, GPT-5.5, Gemini 3.x…). Those labels live in your `config.yaml`, so a fresh install looks polished day one - while Grok, Pi, and Hermes report their model lists live at session start.
+A fresh setup writes fallback labels for **Opus (Latest)**, **Sonnet (Latest)**, **Fable (Latest)**, **GPT-5.5 Codex**, **Grok Build**, and **Gemini 3.5 Flash Medium / High / Low**. Live discovery replaces those fallbacks with the engine's current catalog when available; Pi and Hermes report their model lists at session start.
 
 > **Hermes cost note.** Unlike the subscription-wrapped engines, Hermes owns its own model loop and bills **per token** on the provider configured in `~/.hermes`. It streams over the Agent Client Protocol (ACP) and runs fully auto-approved. See [`docs/engines-hermes.md`](docs/engines-hermes.md).
 
@@ -219,28 +219,17 @@ Codex, Grok, and Pi use a simpler spawn-per-turn model; Hermes streams over ACP.
 
 ## Features
 
-Highlights from **0.26**, where Jinn grows from an orchestration layer into a full company operating system:
+Highlights through **0.29**, where the company operating system becomes more explicit, collaborative, and observable:
 
-- **🔌 Six engines, one picker** - Claude Code, Codex, Grok, Antigravity, Pi, Hermes; pick engine + model + effort per session or per employee, switchable mid-chat.
-- **🏢 AI org system** - employees, departments, ranks, managers, and a reporting hierarchy of any depth, all in editable YAML.
-- **🧩 Real delegation** - parent/child sessions with persisted, restart-safe callbacks and a COO-review pattern that filters noise before it reaches you.
-- **📋 Todos - the durable work ledger** - assignment, priorities, ranking, approval requests, manual start/cancel, archival, and manager visibility. Delegation is task-bound and completion is reviewer-driven, not disposable session state.
-- **🔀 Workflow engine** - author reusable graph workflows with sequential, conditional, parallel, and switch paths; per-phase engine/model/effort and prompt overrides; native approvals; idempotent runs; evidence; and durable run history. A visual LTR canvas editor with a node inspector and live run status ships in the web app.
-- **⏰ Triggers & cron** - schedules, webhooks, polls, and Todo-status events bind to workflows; hot-reloadable background jobs keep run history and optional failure alerts.
-- **🛠️ Company surface over MCP** - a built-in Jinn MCP gives every capable engine a typed surface for org, sessions, delegation, Todos, Workflows, Triggers, approvals, Notes, cron/cost reads, connectors, and files. Discovery is compact and capability-scoped, so employees get the right hands without the whole platform manual each turn.
-- **🗒️ Notes (opt-in)** - an Apple Notes-style workspace with folders, search, Markdown editing, and dictation, backed by MCP note operations. Enable it with `gateway.notesEnabled`; the existing git-backed knowledge base stays available either way.
-- **🧾 Activity receipts in Chat** - delegations, callbacks, follow-ups, Todo mutations, and Workflow operations render as structured, durable activity with previews and deep links; live turn evidence folds cleanly into the final answer.
-- **📦 Skills** - reusable markdown playbooks auto-synced into the underlying CLIs and browsable/editable as raw `SKILL.md`; install community skills with one command.
-- **💬 Connectors** - Slack (threads + ✅ reaction approvals), Discord, Telegram (with voice notes), WhatsApp.
-- **🌐 Web dashboard** - chat, interactive org map, Todos, Workflows, cron, Notes, skills catalog, usage & limits, activity logs, and settings, with a calmer responsive layout and stronger mobile behavior.
-- **🖥️ Chat or raw terminal** - toggle any session between rendered chat and a live `xterm` view of the engine.
-- **📎 Attachments** - drag, drop, or paste files and images into chat; passed through to the engine and rendered inline.
-- **🎙️ Voice** - push-to-talk dictation (local Whisper) and a hands-free "Talk" mission-control mode with streaming TTS.
-- **💰 Cost governance** - per-employee monthly budgets and per-session cost/time caps.
-- **🔄 Hot-reload & self-modification** - edit config, cron, org, or skills and the daemon reloads live; agents can edit those files too.
-- **🚚 Version-aware migrations** - `jinn migrate` composes only the guidance your installed version needs, preserves your customized instance files, and stamps YAML safely.
+- **📋 One outcome, one Todo tree** - related creation receipts collapse into a compact work breakdown in Chat, while sub-tasks retain their parent and depth. The operating doctrine now keeps one root Todo per durable outcome instead of turning every checklist step into a separate ticket.
+- **✅ Workflows v2 completion contract** - employee nodes finish by submitting schema-validated output, can request bounded deadline extensions, and receive reminders that account for active child work. A read-only run canvas, inspector, live activity, and safe operator messages keep long runs steerable.
+- **🌳 Collaborative Todo hierarchy** - department-scoped identifiers, three-level sub-tasks with roll-up gates, threaded comments, typed links, labels, attachments, provenance, approval history, and conflict-safe editing share one model across the ledger and MCP.
+- **🗂️ Multiple isolated workspaces** - create, discover, start, and open separate Jinn instances with their own homes, ports, access settings, and authentication from one launcher.
+- **🛠️ Company operations over MCP** - capable engines get typed hands for employees, sessions, delegation, Todos, Workflows, Triggers, approvals, Notes, cron, connectors, attachments, and managed files, including authorized instance-wide reads.
+- **📊 Model-scoped Claude limits** - the Limits tab shows per-model weekly usage buckets alongside the five-hour and all-model windows, with a safe offline fallback.
+- **🧾 A durable company layer** - Todos, production Workflows, Triggers, opt-in Notes, first-class Skills and Cron documents, activity receipts, version-aware migrations, and restart-safe callbacks all persist beyond a single agent turn.
 
-See [CHANGELOG.md](CHANGELOG.md) for the full 0.26 notes.
+See [CHANGELOG.md](CHANGELOG.md) for the full 0.29 notes and the 0.26–0.29 release history.
 
 ---
 
@@ -256,44 +245,71 @@ See [CHANGELOG.md](CHANGELOG.md) for the full 0.26 notes.
 
 ## Configuration
 
-Jinn reads `~/.jinn/config.yaml`. A minimal file only needs `engines.claude`; everything else falls back to sensible defaults:
+Jinn reads `~/.jinn/config.yaml`. A fresh setup writes this core shape; the values below match the generated defaults:
 
 ```yaml
 gateway:
   port: 7777
   host: "127.0.0.1"
-  # notesEnabled: true       # opt in to the Notes workspace (optional)
+  authRequired: true
+  notesEnabled: false
 
 engines:
-  default: claude            # claude | codex | grok | antigravity | pi | hermes
+  default: claude
   claude:
-    bin: claude              # binary on your PATH (override to point elsewhere)
+    bin: claude
     model: opus
     effortLevel: medium
   codex:
     bin: codex
     model: gpt-5.5
-    effortLevel: high
+  grok:
+    bin: grok
+    model: grok-build
+  hermes:
+    bin: hermes
+    model: openai-codex:gpt-5.5
 
-mcp:
-  gateway:
-    enabled: true            # built-in Jinn company surface for employees
-  fetch:
-    enabled: true
-  search:
-    enabled: false           # set true and add a Brave key to enable web search
+models:
+  claude:
+    default: opus
+    effortMechanism: claude-flag
+    models:
+      - { id: opus, label: "Opus (Latest)", supportsEffort: true, effortLevels: [low, medium, high, xhigh, max] }
+      - { id: sonnet, label: "Sonnet (Latest)", supportsEffort: true, effortLevels: [low, medium, high, xhigh, max] }
+      - { id: fable, label: "Fable (Latest)", supportsEffort: true, effortLevels: [low, medium, high, xhigh, max] }
+  codex:
+    default: gpt-5.5
+    effortMechanism: codex-config
+    models:
+      - { id: gpt-5.5, label: "GPT-5.5 Codex", supportsEffort: true, effortLevels: [low, medium, high, xhigh], contextWindow: 258400 }
+  grok:
+    default: grok-build
+    effortMechanism: grok-flag
+    models:
+      - { id: grok-build, label: "Grok Build", supportsEffort: true, effortLevels: [low, medium, high, xhigh, max], contextWindow: 256000 }
+      - { id: grok-composer-2.5-fast, label: "Grok Composer 2.5 Fast", supportsEffort: true, effortLevels: [low, medium, high, xhigh, max], contextWindow: 256000 }
+  antigravity:
+    default: "Gemini 3.5 Flash (Medium)"
+    effortMechanism: none
+    models:
+      - { id: "Gemini 3.5 Flash (Medium)", label: "Gemini 3.5 Flash Medium", supportsEffort: false, effortLevels: [], contextWindow: 1000000 }
+      - { id: "Gemini 3.5 Flash (High)", label: "Gemini 3.5 Flash High", supportsEffort: false, effortLevels: [], contextWindow: 1000000 }
+      - { id: "Gemini 3.5 Flash (Low)", label: "Gemini 3.5 Flash Low", supportsEffort: false, effortLevels: [], contextWindow: 1000000 }
 
-connectors:
-  slack:
-    shareSessionInChannel: false
-    ignoreOldMessagesOnBoot: true
+connectors: {}
+portal:
+  companyName: "Jinn"
 
-sessions:
-  maxDurationMinutes: 30
-  maxCostUsd: 10.00
+logging:
+  file: true
+  stdout: true
+  level: info
 ```
 
-- **Engines** point at a CLI `bin` and a default `model`; `engines.default` selects which one new sessions use. `claude` and `codex` ship in the default config; `grok`, `antigravity`, `pi`, and `hermes` are optional blocks you add when you install those CLIs.
+- **Engines** point at a CLI `bin` and a default `model`; `engines.default` selects which one new sessions use.
+- **Models** are the capability registry behind the UI selectors. Add a model id, label, and capability flags here - no code change required. Engine discovery can replace fallback entries at runtime.
+- **MCP servers** are optional blocks. Enable `mcp.gateway` to give employees the built-in typed company surface, or configure search, fetch, and other servers as needed.
 - **Cron jobs** live in `~/.jinn/cron/jobs.json` (hot-reloaded).
 - **Employees** live as YAML files in `~/.jinn/org/` (registry rebuilds on change).
 - **Skills** live in `~/.jinn/skills/<name>/SKILL.md`.
@@ -307,18 +323,16 @@ Everything is human-readable files you own - `cat` it, edit it, commit it. Upgra
 
 Jinn is in active development (honest beta). Shipped recently:
 
-- **Company operating system** - the Todos work ledger, the Workflow engine with a visual editor, Triggers, and the MCP company surface.
-- **Six-engine support** and mid-chat engine switching.
-- **Notes workspace**, first-class Skills and Cron documents, and activity receipts in Chat.
-- File attachments, in-app file viewer, agent-to-agent messaging, shared memory, mobile UI, and live streaming.
+- **Workflows v2 completion contract** - schema-validated node output, bounded extensions, reminders, and an observable run canvas.
+- **Collaborative Todo hierarchy** - sub-tasks, roll-up gates, labels, comments, links, attachments, provenance, and durable approval history.
+- **Multiple isolated workspaces** - separate homes, ports, access settings, and authentication managed from one launcher.
+- **Grouped Todo work breakdowns in Chat**, model-scoped Claude usage limits, instance-wide MCP file reads, and authentication required by default for new installs.
 
 On deck:
 
 - **Engines** - local models (Ollama / llama.cpp), engine fallback chains.
-- **Connectors** - iMessage, email (IMAP/SMTP), generic webhooks.
-- **Dashboard** - approve/reject agent actions from the UI, per-employee cost analytics.
-- **Platform** - installable plugins, REST API auth, multi-user roles, Docker image.
-- **Skills** - community marketplace, versioning, scaffolding templates.
+- **Connectors** - iMessage and email (IMAP/SMTP).
+- **Platform** - installable plugins, multi-user roles, and a Docker image.
 
 Want to suggest something? [Open an issue](https://github.com/hristo2612/jinn/issues).
 
@@ -348,7 +362,7 @@ pnpm lint        # lint every package
 pnpm test:e2e    # Playwright end-to-end tests
 ```
 
-> **Prerequisites:** Node.js **24.13.0** (the repo pins it via `.nvmrc` + `engine-strict`; native modules like `better-sqlite3` are ABI-locked), pnpm **10.6+**, and at least one engine CLI. See [CONTRIBUTING.md](.github/CONTRIBUTING.md) for the full setup.
+> **Prerequisites:** Node.js **22 or newer**; contributors should use **24.13.0**, pinned by `.nvmrc` + `engine-strict` because native modules like `better-sqlite3` are ABI-locked. You also need pnpm **10.6+** and at least one engine CLI. See [CONTRIBUTING.md](.github/CONTRIBUTING.md) for the full setup.
 
 ---
 
