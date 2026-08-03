@@ -881,3 +881,25 @@ describe('inherited adversarial public seams', () => {
     expect(ownGraph).toEqual(snapshot);
   });
 });
+
+describe('Schedule trigger cron and timezone', () => {
+  function scheduled(cron: string, timezone: string): WorkflowDefinition {
+    return definition(
+      [{ id: 'trigger', type: 'trigger', name: 'trigger', config: { kind: 'schedule', cron, timezone } }, end()],
+      [edge('e1', 'trigger', 'end')],
+    );
+  }
+
+  it('accepts a parseable cron expression paired with a real IANA timezone', () => {
+    expect(validateExecutableWorkflow(scheduled('0 9 * * 1-5', 'Europe/Sofia'))).toEqual({ ok: true, issues: [] });
+  });
+
+  it.each([
+    ['every weekday please', 'UTC', 'config.cron', 'schedule must be a valid cron expression'],
+    ['0 9 * * 1-5', 'Mars/Olympus', 'config.timezone', 'timezone "Mars/Olympus" is not a valid IANA timezone'],
+  ])('reports %j / %j as an invalid-schedule issue on its trigger node', (cron, timezone, path, message) => {
+    const result = validateExecutableWorkflow(scheduled(cron, timezone));
+    expect(result.ok).toBe(false);
+    expect(issue(result, 'invalid-schedule')).toEqual({ code: 'invalid-schedule', message, nodeId: 'trigger', path });
+  });
+});
