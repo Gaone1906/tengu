@@ -2,11 +2,11 @@ import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode 
 import { ChevronDown, Settings } from 'lucide-react'
 
 /**
- * The post-turn fold: once a turn's final answer lands, EVERYTHING between
- * the user message and that answer — tool groups, interim prose, callbacks,
+ * The post-turn fold: once the user moves on from an answered turn, EVERYTHING
+ * between the user message and that answer — tool groups, interim prose, callbacks,
  * relays, delegation and dispatch rows — files itself away into ONE ledger
  * summary line ("Worked for 7m · 6 tools · 3 teammates"), expandable at any
- * time. Only the final answer (and system banners) stay outside.
+ * time. The final answer, system banners, and media-bearing messages stay outside.
  *
  * The premium detail: the fold happens ABOVE the answer the user is reading,
  * so a naive collapse would yank the answer up. Both directions are
@@ -45,7 +45,6 @@ export function foldSummaryWords(summary: FoldSummaryData): string[] {
 }
 
 const FOLD_MS = 420
-const FOLD_BEAT_MS = 400
 const ANCHOR_WINDOW_MS = 480
 /** Resting height of the summary ledger line (min-h-8). */
 export const FOLD_SUMMARY_PX = 32
@@ -53,9 +52,9 @@ export const FOLD_SUMMARY_PX = 32
 /**
  * The anchored live fold only plays when the scroller can absorb the shrink:
  * compensation scrolls UP by (region height - summary height), and scrollTop
- * cannot go below 0. Without that slack the clamp yanks the answer up by the
- * remainder — so the region stays open for this session instead, and rests
- * folded on the next mount. Pure; exported for tests.
+ * cannot go below 0. Without that slack the animated path would yank content
+ * up by the remainder, so callers use an instant fold instead. Pure; exported
+ * for tests.
  */
 export function canAnchorFold(scrollSlack: number, regionHeight: number, summaryHeight = FOLD_SUMMARY_PX): boolean {
   return scrollSlack + 2 >= regionHeight - summaryHeight
@@ -99,21 +98,22 @@ interface FoldRegionProps {
   /** Whether the turn already produced its final answer (fold-eligible). */
   answered: boolean
   /** The final answer arrived while this chat was mounted. Start open so the
-   *  existing delayed collapse choreography can run on this first mount. */
+   *  work remains visible until the user sends the next message. */
   liveCompletion?: boolean
+  /** Variant B trigger: a later user message now exists after this answer. */
+  collapseRequested?: boolean
   summary: FoldSummaryData
   /** Whether this region plays the anchored live-fold choreography. False for
-   *  the earlier siblings of a banner-split turn: they answer at the same
+   *  the earlier siblings of a banner/media-split turn: they answer at the same
    *  instant, and two concurrent anchor loops would double-compensate the
    *  shared scroller — so siblings fold with the instant path. */
   animated?: boolean
   children: ReactNode
 }
 
-export function FoldRegion({ answered, liveCompletion = false, summary, animated = true, children }: FoldRegionProps) {
-  // Historical turns rest folded; the live turn folds with choreography when
-  // its answer lands. A live region is now created only at final-answer time,
-  // so `liveCompletion` supplies the same open → answered transition on mount.
+export function FoldRegion({ answered, liveCompletion = false, collapseRequested = false, summary, animated = true, children }: FoldRegionProps) {
+  // Historical turns rest folded; a live completion stays open until its next
+  // user message. `liveCompletion` distinguishes those cases on first mount.
   const startsAnswered = answered && !liveCompletion
   const [folded, setFolded] = useState(startsAnswered)
   const [landed, setLanded] = useState(startsAnswered)
@@ -129,7 +129,6 @@ export function FoldRegion({ answered, liveCompletion = false, summary, animated
   const [closing, setClosing] = useState(false)
   const wrapRef = useRef<HTMLDivElement | null>(null)
   const regionRef = useRef<HTMLDivElement | null>(null)
-  const answeredRef = useRef(startsAnswered)
   const foldedRef = useRef(folded)
   foldedRef.current = folded
   const animatedRef = useRef(animated)
@@ -139,11 +138,9 @@ export function FoldRegion({ answered, liveCompletion = false, summary, animated
   const manualTimerRef = useRef<number | undefined>(undefined)
   const anchorCancelRef = useRef<(() => void) | null>(null)
 
-  // Live fold: a beat after the answer registers, the evidence files away.
+  // Live fold: the evidence files away only when the user sends the next ask.
   useEffect(() => {
-    const wasAnswered = answeredRef.current
-    answeredRef.current = answered
-    if (wasAnswered || !answered || foldedRef.current) return
+    if (!collapseRequested || foldedRef.current) return
 
     const region = regionRef.current
     const wrap = wrapRef.current
@@ -155,8 +152,7 @@ export function FoldRegion({ answered, liveCompletion = false, summary, animated
     }
     const scroller = wrap.closest('.chat-messages-scroll')
 
-    if (prefersReducedMotion() || !animatedRef.current) {
-      if (!canAnchorFold(scroller?.scrollTop ?? 0, region.offsetHeight)) return
+    if (prefersReducedMotion() || !animatedRef.current || !canAnchorFold(scroller?.scrollTop ?? 0, region.offsetHeight)) {
       const bottom0 = wrap.getBoundingClientRect().bottom
       setFolded(true)
       setLanded(true)
@@ -169,36 +165,28 @@ export function FoldRegion({ answered, liveCompletion = false, summary, animated
       return
     }
 
-    const beat = window.setTimeout(() => {
-      // No auto-fold without scroll slack: on a short thread scrollTop cannot
-      // absorb the shrink (it clamps at 0) and the answer would slide up by
-      // the remainder. The evidence stays open for this session and rests
-      // folded on the next mount.
-      if (!canAnchorFold(scroller?.scrollTop ?? 0, region.offsetHeight)) return
-      // Anchor reference captured BEFORE the summary mounts, so its insertion
-      // is compensated along with the region collapse.
-      const bottom0 = wrap.getBoundingClientRect().bottom
-      setLanding(true)
-      setSummaryVisible(true)
+    // Anchor reference captured BEFORE the summary mounts, so its insertion
+    // is compensated along with the region collapse.
+    const bottom0 = wrap.getBoundingClientRect().bottom
+    setLanding(true)
+    setSummaryVisible(true)
+    requestAnimationFrame(() => {
+      region.style.height = `${region.offsetHeight}px`
+      region.style.overflow = 'hidden'
       requestAnimationFrame(() => {
-        region.style.height = `${region.offsetHeight}px`
-        region.style.overflow = 'hidden'
-        requestAnimationFrame(() => {
-          region.style.transition = `height ${FOLD_MS}ms var(--ease-smooth), opacity 260ms var(--ease-smooth)`
-          region.style.height = '0px'
-          region.style.opacity = '0'
-          anchorCancelRef.current = anchorScrollDuring(scroller, wrap, ANCHOR_WINDOW_MS, undefined, undefined, bottom0)
-          window.setTimeout(() => {
-            setFolded(true)
-            setLanded(true)
-            setLanding(false)
-            region.style.transition = ''
-          }, FOLD_MS + 10)
-        })
+        region.style.transition = `height ${FOLD_MS}ms var(--ease-smooth), opacity 260ms var(--ease-smooth)`
+        region.style.height = '0px'
+        region.style.opacity = '0'
+        anchorCancelRef.current = anchorScrollDuring(scroller, wrap, ANCHOR_WINDOW_MS, undefined, undefined, bottom0)
+        window.setTimeout(() => {
+          setFolded(true)
+          setLanded(true)
+          setLanding(false)
+          region.style.transition = ''
+        }, FOLD_MS + 10)
       })
-    }, FOLD_BEAT_MS)
-    return () => window.clearTimeout(beat)
-  }, [answered])
+    })
+  }, [collapseRequested])
 
   // A stale manual timer or anchor loop must not outlive the component.
   useEffect(() => () => {
