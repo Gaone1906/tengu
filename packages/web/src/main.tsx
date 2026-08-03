@@ -14,6 +14,8 @@ const CronDetailPage = lazyRoute(() => import('./routes/cron/detail'), 'cron-det
 const TodoBoardPage = lazyRoute(() => import('./routes/todos/board/board-page'), 'todo-board')
 const TaskPage = lazyRoute(() => import('./routes/todos/task-page/task-page'), 'todo-task')
 const NotesPage = lazyRoute(() => import('./routes/notes/page'), 'notes')
+const ExperimentsPage = lazyRoute(() => import('./routes/experiments/page'), 'experiments')
+const ExperimentDetailPage = lazyRoute(() => import('./routes/experiments/detail'), 'experiment-detail')
 const LogsPage = lazyRoute(() => import('./routes/logs/page'), 'logs')
 const LimitsPage = lazyRoute(() => import('./routes/limits/page'), 'limits')
 const OrgPage = lazyRoute(() => import('./routes/org/page'), 'org')
@@ -31,6 +33,7 @@ registerRoutePrefetch('/', ChatPage.prefetch)
 registerRoutePrefetch('/cron', CronPage.prefetch)
 registerRoutePrefetch('/todos', TodoBoardPage.prefetch)
 registerRoutePrefetch('/notes', NotesPage.prefetch)
+registerRoutePrefetch('/experiments', ExperimentsPage.prefetch)
 registerRoutePrefetch('/logs', LogsPage.prefetch)
 registerRoutePrefetch('/limits', LimitsPage.prefetch)
 registerRoutePrefetch('/org', OrgPage.prefetch)
@@ -114,6 +117,8 @@ const router = createBrowserRouter([
       { path: '/notes', element: <NotesFeatureRoute /> },
       // Folder/note deep links: /notes/f/<folder>, /notes/n/<rel>, or both.
       { path: '/notes/*', element: <NotesFeatureRoute /> },
+      { path: '/experiments', element: <ExperimentsPage /> },
+      { path: '/experiments/:id', element: <ExperimentDetailPage /> },
       // GRS-021d: Kanban became Todos. Old links redirect.
       { path: '/kanban', element: <Navigate to="/todos" replace /> },
       { path: '/logs', element: <LogsPage /> },

@@ -5,6 +5,7 @@ import type {
   NotesListResponse,
   UpdateNoteInput,
 } from "@/routes/notes/types"
+import type { ExperimentResponse, ExperimentsResponse } from "@/routes/experiments/types"
 
 export interface TranscriptContentBlock {
   type: 'text' | 'tool_use' | 'tool_result' | 'thinking'
@@ -866,6 +867,10 @@ export const api = {
     post<NoteDocumentResponse>("/api/notes", input),
   updateNote: (input: UpdateNoteInput) =>
     put<NoteDocumentResponse>("/api/notes", input),
+  listExperiments: (status?: "running" | "concluded") =>
+    get<ExperimentsResponse>(`/api/experiments${status ? `?status=${status}` : ""}`),
+  getExperiment: (id: string) =>
+    get<ExperimentResponse>(`/api/experiments/${encodeURIComponent(id)}`),
   getFeatures: () => get<{ notesEnabled: boolean }>("/api/features"),
   getStatus: () => get<Record<string, unknown>>("/api/status"),
   listWorkflowDefinitionsV2: () =>

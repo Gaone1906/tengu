@@ -174,10 +174,10 @@ describe("template company doctrine", () => {
     expect(template).not.toContain("provides:");
   });
 
-  it("ships exactly five public blocks and keeps Triggers a Workflow detail", () => {
+  it("ships exactly six public blocks and keeps Triggers a Workflow detail", () => {
     for (const rel of ["CLAUDE.md", "docs/company-doctrine.md", "docs/overview.md"]) {
       const content = readTemplate(rel);
-      expect(content, rel).toContain("Employees, Todos, Workflows, Chats, and Notes");
+      expect(content, rel).toContain("Employees, Todos, Workflows, Chats, Notes, and Experiments");
       expect(content, rel).not.toContain("Employees, Todos, Workflows, Triggers, and Notes");
     }
     const template = readTemplate("CLAUDE.md");
