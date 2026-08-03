@@ -15,6 +15,7 @@ import { logger } from "../../shared/logger.js";
 
 export class SlackConnector implements Connector {
   name = "slack";
+  id: string;
   private app: App;
   private handler: ((msg: IncomingMessage) => void) | null = null;
   private readonly allowedUsers: Set<string> | null;
@@ -58,6 +59,7 @@ export class SlackConnector implements Connector {
   }
 
   constructor(config: SlackConnectorConfig) {
+    this.id = config.id || "slack";
     this.app = new App({
       token: config.botToken,
       appToken: config.appToken,
@@ -129,7 +131,7 @@ export class SlackConnector implements Connector {
         return;
       }
 
-      const sessionKey = deriveSessionKey(event as any);
+      const sessionKey = deriveSessionKey(event as any, this.id);
       const replyContext = buildReplyContext(event as any);
 
       // Fetch parent message for thread replies so the session has full context
@@ -177,7 +179,7 @@ export class SlackConnector implements Connector {
       const channelName = await this.resolveChannelName((event as any).channel);
 
       const msg: IncomingMessage = {
-        connector: this.name,
+        connector: this.id,
         source: "slack",
         sessionKey,
         replyContext,
@@ -228,7 +230,7 @@ export class SlackConnector implements Connector {
         return;
       }
 
-      const sessionKey = deriveSessionKey(event as any);
+      const sessionKey = deriveSessionKey(event as any, this.id);
       const replyContext = buildReplyContext(event as any);
       const channelName = await this.resolveChannelName(event.channel);
 
@@ -255,7 +257,7 @@ export class SlackConnector implements Connector {
       }
 
       const msg: IncomingMessage = {
-        connector: this.name,
+        connector: this.id,
         source: "slack",
         sessionKey,
         replyContext,
@@ -368,10 +370,10 @@ export class SlackConnector implements Connector {
       // Build the prompt with reaction context
       const prompt = `[Reaction :${emoji}: on message in ${channelDisplay}]\n\nOriginal message:\n"${messageText}"\n\nThe user reacted with :${emoji}: to this message. Interpret and act on the reaction.`;
 
-      const sessionKey = `slack:reaction:${channelId}:${messageTs}`;
+      const sessionKey = `${this.id}:reaction:${channelId}:${messageTs}`;
 
       const msg: IncomingMessage = {
-        connector: this.name,
+        connector: this.id,
         source: "slack",
         sessionKey,
         replyContext: {

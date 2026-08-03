@@ -7,12 +7,9 @@ export interface TelegramMessageLike {
   date?: number;
 }
 
-/**
- * Derive a session key from a Telegram message.
- * Format: telegram:<chatId>
- */
-export function deriveSessionKey(msg: TelegramMessageLike): string {
-  return `telegram:${msg.chat.id}`;
+/** Derive a session key from a Telegram message. Format: `<prefix>:<chatId>`. */
+export function deriveSessionKey(msg: TelegramMessageLike, prefix = "telegram"): string {
+  return `${prefix}:${msg.chat.id}`;
 }
 
 /**

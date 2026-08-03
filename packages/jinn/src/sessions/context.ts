@@ -396,7 +396,7 @@ export function buildContext(opts: BuildContextOptions): string {
       content: buildConnectorContext(opts.connectors, gatewayUrl, opts.jinnMcpAttached),
       summary: opts.jinnMcpAttached
         ? `## Available connectors: ${opts.connectors.join(", ")}\nUse Jinn MCP/company routing for company operations; connector configuration lives in config.`
-        : `## Available connectors: ${opts.connectors.join(", ")}\nUse \`curl POST ${gatewayUrl}/api/connectors/<name>/send\` to send messages.`,
+        : `## Available connectors: ${opts.connectors.join(", ")}\nUse \`curl POST ${gatewayUrl}/api/connectors/<id>/send\` to send messages.`,
     });
   }
 
@@ -996,7 +996,7 @@ function buildConnectorContext(connectors: string[], gatewayUrl: string, jinnMcp
   }
   return [
     `## Available connectors: ${connectors.join(", ")}`,
-    `Send a message: \`curl -X POST ${gatewayUrl}/api/connectors/<name>/send -H "Authorization: Bearer $JINN_GATEWAY_TOKEN" -H 'Content-Type: application/json' -d '{"channel":"CHANNEL_ID","text":"message"}'\` (add \`"thread":"THREAD_TS"\` for a threaded reply).`,
+    `Send a message: \`curl -X POST ${gatewayUrl}/api/connectors/<id>/send -H "Authorization: Bearer $JINN_GATEWAY_TOKEN" -H 'Content-Type: application/json' -d '{"channel":"CHANNEL_ID","text":"message"}'\` (add \`"thread":"THREAD_TS"\` for a threaded reply).`,
     `Channel IDs are in \`~/.jinn/config.yaml\`. You may send proactively (completed tasks, errors, status updates). Details: CLAUDE.md / AGENTS.md.`,
   ].join("\n");
 }

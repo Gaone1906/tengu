@@ -98,6 +98,7 @@ function connectorStub(): Connector {
   const target: Target = { channel: "test" };
   return {
     name: "test",
+    id: "test",
     start: async () => {},
     stop: async () => {},
     getCapabilities: () => ({ threading: false, messageEdits: false, reactions: false, attachments: false }),

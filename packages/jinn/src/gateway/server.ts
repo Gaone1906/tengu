@@ -419,7 +419,7 @@ export function createConnector(instance: NormalizedConnector): Connector {
     case "discord":
       // Remote mode proxies all Discord I/O through the primary instance.
       return config.proxyVia
-        ? new RemoteDiscordConnector({ proxyVia: String(config.proxyVia), channelId: config.channelId as string | undefined })
+        ? new RemoteDiscordConnector({ id: instance.id, proxyVia: String(config.proxyVia), channelId: config.channelId as string | undefined })
         : new DiscordConnector(config as unknown as DiscordConnectorConfig);
     case "telegram":
       return new TelegramConnector(config as unknown as TelegramConnectorConfig);
@@ -723,7 +723,6 @@ export async function startGateway(
   const sessionManager = new SessionManager(config, engines, bootId, (id) => employeeRegistry.get(id));
 
   // Start connectors — one normalized list covers both config forms.
-  const connectors: Connector[] = [];
   const connectorMap = new Map<string, Connector>();
 
   /**
@@ -745,7 +744,6 @@ export async function startGateway(
         logger.error(`${instance.id} route error: ${err instanceof Error ? err.message : err}`);
       });
     });
-    connectors.push(connector);
     connectorMap.set(instance.id, connector);
     return connector.start();
   };
@@ -753,7 +751,7 @@ export async function startGateway(
   const describeConnector = (instance: NormalizedConnector): string =>
     `connector "${instance.id}" (type: ${instance.type}, employee: ${instance.employee || "default"})`;
 
-  // Session context reads connector names off this map, so publish it before the
+  // Session context reads connector ids off this map, so publish it before the
   // first connector can deliver a message.
   sessionManager.setConnectorProvider(() => connectorMap);
 
@@ -779,8 +777,6 @@ export async function startGateway(
       try {
         await connector.stop();
         connectorMap.delete(id);
-        const idx = connectors.indexOf(connector);
-        if (idx >= 0) connectors.splice(idx, 1);
         stopped.push(id);
         logger.info(`Stopped connector "${id}" for reload`);
       } catch (err) {
@@ -1414,7 +1410,7 @@ export async function startGateway(
     setTodoApprovalDecisionListener(null);
 
     // Stop connectors
-    for (const connector of connectors) {
+    for (const connector of connectorMap.values()) {
       try {
         await connector.stop();
       } catch (err) {

@@ -18,6 +18,7 @@ const capabilities: ConnectorCapabilities = {
 
 export class CronConnector implements Connector {
   name = "cron";
+  id = "cron";
   private handler: ((msg: IncomingMessage) => void) | null = null;
 
   constructor(

@@ -2552,9 +2552,7 @@ export async function handleApiRequest(
       // on status!=='running'), so hydrate just those (~handful, idx_sessions_status)
       // instead of materializing + JSON-parsing every session to count them.
       const running = listSessions({ status: "running" }).filter((s) => isSessionLiveRunning(s, context)).length;
-      const connectors = Object.fromEntries(
-        Array.from(context.connectors.values()).map((connector) => [connector.name, connector.getHealth()]),
-      );
+      const connectors = Object.fromEntries(Array.from(context.connectors, ([id, connector]) => [id, connector.getHealth()]));
       let migration: Pick<PendingInstanceMigration, "required" | "fromVersion" | "toVersion" | "versions"> & { error?: string };
       try {
         const pending = pendingInstanceMigration(context);
@@ -6269,7 +6267,7 @@ export async function handleApiRequest(
       return json(res, { status: "ok", messageId });
     }
 
-    // POST /api/connectors/:name/send — send a message via a connector
+    // POST /api/connectors/:name/send — send via the connector with that instance id
     params = matchRoute("/api/connectors/:name/send", pathname);
     if (method === "POST" && params) {
       const connector = context.connectors.get(params.name);
@@ -6866,7 +6864,10 @@ export async function deliverConnectorReply(
   if (!text || NON_CONNECTOR_SOURCES.has(session.source)) return;
   if (!session.connector || !session.replyContext) return;
   const connector = connectors.get(session.connector);
-  if (!connector) return;
+  if (!connector) {
+    logger.warn(`Connector reply dropped for session ${session.id ?? "?"}: no connector registered as "${session.connector}"`);
+    return;
+  }
   try {
     const target = connector.reconstructTarget(session.replyContext);
     await connector.replyMessage(target, text);

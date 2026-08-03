@@ -21,7 +21,7 @@ interface IncomingMessage {
   text: string;          // Message content
   userId: string;        // Platform user ID
   userName: string;      // Display name
-  connector: string;     // Connector name
+  connector: string;     // Connector instance id
 }
 ```
 

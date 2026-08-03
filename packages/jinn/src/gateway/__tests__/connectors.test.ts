@@ -74,6 +74,13 @@ describe("createConnector", () => {
     expect(build("whatsapp")).toBeInstanceOf(WhatsAppConnector);
   });
 
+  it("carries the instance id on id while name stays the type literal", () => {
+    const slack = build("slack", { appToken: "xapp-test", botToken: "xoxb-test" });
+    expect([slack.id, slack.name]).toEqual(["slack-1", "slack"]);
+    const discord = build("discord", { botToken: "d-test" });
+    expect([discord.id, discord.name]).toEqual(["discord-1", "discord"]);
+  });
+
   it("rejects an unknown type", () => {
     expect(() => build("carrier-pigeon")).toThrow(/Unknown connector type "carrier-pigeon"/);
   });

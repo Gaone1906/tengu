@@ -11,6 +11,7 @@ export interface RemoteDiscordConfig {
   /** URL of the primary Jinn instance that holds the Discord WebSocket connection */
   proxyVia: string;
   channelId?: string;
+  id?: string;
 }
 
 /**
@@ -20,10 +21,12 @@ export interface RemoteDiscordConfig {
  */
 export class RemoteDiscordConnector implements Connector {
   name = "discord";
+  id: string;
   private handler: ((msg: IncomingMessage) => void) | null = null;
   private baseUrl: string;
 
   constructor(config: RemoteDiscordConfig) {
+    this.id = config.id || "discord";
     this.baseUrl = config.proxyVia.replace(/\/+$/, "");
   }
 

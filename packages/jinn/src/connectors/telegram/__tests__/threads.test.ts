@@ -19,6 +19,12 @@ describe("deriveSessionKey", () => {
       deriveSessionKey({ chat: { id: -1001234, type: "supergroup" }, message_id: 1 }),
     ).toBe("telegram:-1001234");
   });
+
+  it("honours a custom instance prefix", () => {
+    expect(
+      deriveSessionKey({ chat: { id: 12345, type: "private" }, message_id: 1 }, "telegram-support"),
+    ).toBe("telegram-support:12345");
+  });
 });
 
 describe("buildReplyContext", () => {

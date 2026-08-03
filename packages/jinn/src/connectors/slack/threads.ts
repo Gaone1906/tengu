@@ -8,18 +8,11 @@ export interface SlackMessageEventLike {
   channel_type?: string;
 }
 
-export function deriveSessionKey(event: SlackMessageEventLike): string {
-  if (event.channel_type === "im") {
-    return `slack:dm:${event.user || "unknown"}`;
-  }
-
-  // Thread reply — use thread_ts (which is the root message's ts)
-  if (event.thread_ts && event.thread_ts !== event.ts) {
-    return `slack:${event.channel}:${event.thread_ts}`;
-  }
-
-  // Root channel message — use ts so thread replies will match
-  return `slack:${event.channel}:${event.ts}`;
+export function deriveSessionKey(event: SlackMessageEventLike, prefix = "slack"): string {
+  if (event.channel_type === "im") return `${prefix}:dm:${event.user || "unknown"}`;
+  // Thread replies key off thread_ts (the root's ts), so they land on the root's session.
+  const ts = event.thread_ts && event.thread_ts !== event.ts ? event.thread_ts : event.ts;
+  return `${prefix}:${event.channel}:${ts}`;
 }
 
 export function buildReplyContext(event: SlackMessageEventLike): ReplyContext {
