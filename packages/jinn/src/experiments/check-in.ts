@@ -116,6 +116,8 @@ export function concludeExperimentAndDisableCheckIn(
   const existing = getExperiment(id);
   if (!existing.ok) return existing;
   if (existing.value.status !== "running") return failure("conflict", "experiment is already concluded");
+  const concluded = concludeExperiment(id, input);
+  if (!concluded.ok) return concluded;
   if (existing.value.checkInCronJobId) disableExperimentCheckIn(existing.value.checkInCronJobId);
-  return concludeExperiment(id, input);
+  return concluded;
 }

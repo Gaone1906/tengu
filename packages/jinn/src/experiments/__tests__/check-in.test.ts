@@ -88,4 +88,19 @@ describe("experiment check-in scheduling", () => {
     expect(concluded).toMatchObject({ ok: true, value: { status: "concluded" } });
     expect(jobs.loadJobs()).toMatchObject([{ id: created.value.checkInCronJobId, enabled: false }]);
   });
+
+  it("leaves the registered job enabled when conclusion validation fails", () => {
+    const created = checkIn.createExperimentWithCheckIn(input, { schedule: "0 9 * * 1" });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+
+    const concluded = checkIn.concludeExperimentAndDisableCheckIn(created.value.id, {
+      outcome: "win",
+      note: "x".repeat(8_001),
+    });
+
+    expect(concluded).toMatchObject({ ok: false, reason: "invalid" });
+    expect(store.getExperiment(created.value.id)).toMatchObject({ ok: true, value: { status: "running" } });
+    expect(jobs.loadJobs()).toMatchObject([{ id: created.value.checkInCronJobId, enabled: true }]);
+  });
 });
