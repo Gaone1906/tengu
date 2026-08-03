@@ -2,8 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import { STT_MODELS_DIR, TMP_DIR } from "../shared/paths.js";
+import { LEGACY_STT_MODELS_DIR, STT_MODELS_DIR, TMP_DIR } from "../shared/paths.js";
 import { logger } from "../shared/logger.js";
+import { adoptLegacyModels, findModelFile } from "./model-store.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -56,14 +57,23 @@ let downloadProgress = 0;
 /** Ensure models directory exists. */
 export function initStt(): void {
   fs.mkdirSync(STT_MODELS_DIR, { recursive: true });
+  try {
+    const adopted = adoptLegacyModels({
+      sharedDir: STT_MODELS_DIR,
+      legacyDir: LEGACY_STT_MODELS_DIR,
+      filenames: Object.values(MODEL_FILES),
+    });
+    if (adopted.length > 0) logger.info(`Adopted ${adopted.length} legacy STT model(s) into ${STT_MODELS_DIR}`);
+  } catch (error) {
+    logger.warn(`Could not adopt legacy STT models: ${error instanceof Error ? error.message : String(error)}`);
+  }
   logger.info(`STT initialized, models dir: ${STT_MODELS_DIR}`);
 }
 
 export function getModelPath(model: string): string | null {
   const filename = MODEL_FILES[model];
   if (!filename) return null;
-  const filePath = path.join(STT_MODELS_DIR, filename);
-  return fs.existsSync(filePath) ? filePath : null;
+  return findModelFile(filename, [STT_MODELS_DIR, LEGACY_STT_MODELS_DIR]);
 }
 
 export interface SttStatus {
@@ -115,7 +125,7 @@ export async function downloadModel(
 
   const filename = MODEL_FILES[model]!;
   const destPath = path.join(STT_MODELS_DIR, filename);
-  const tmpPath = destPath + ".downloading";
+  const tmpPath = `${destPath}.downloading.${process.pid}`;
   const expectedSize = EXPECTED_SIZES[model] || 466_000_000;
 
   try {
