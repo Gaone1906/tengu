@@ -24,6 +24,24 @@ export const ANTIGRAVITY_HOME = path.join(os.homedir(), ".gemini", "antigravity-
 export const ANTIGRAVITY_BRAIN_DIR = path.join(ANTIGRAVITY_HOME, "brain");
 export const ANTIGRAVITY_SETTINGS_PATH = path.join(ANTIGRAVITY_HOME, "settings.json");
 
+export interface StartupBlocker {
+  retryable: boolean;
+  message: string;
+}
+
+const ANSI_CSI_SEQUENCE = new RegExp(String.raw`\u001B\[[0-?]*[ -/]*[@-~]`, "g");
+const ACCOUNT_VERIFICATION_BLOCKER = /finishing\s+verifying\s+your\s+account\s+eligibility[\s\S]{0,160}?try\s+again\s+shortly/i;
+
+/** Identify startup-only TUI responses that reject a submit before a conversation exists. */
+export function detectStartupBlocker(ptyText: string): StartupBlocker | null {
+  const plainText = ptyText.replace(ANSI_CSI_SEQUENCE, "");
+  if (!ACCOUNT_VERIFICATION_BLOCKER.test(plainText)) return null;
+  return {
+    retryable: true,
+    message: "We're finishing verifying your account eligibility. Please try again shortly.",
+  };
+}
+
 /** Absolute path to a conversation's streaming transcript. */
 export function transcriptPathFor(convId: string, brainDir: string = ANTIGRAVITY_BRAIN_DIR): string {
   return path.join(brainDir, convId, ".system_generated", "logs", "transcript.jsonl");

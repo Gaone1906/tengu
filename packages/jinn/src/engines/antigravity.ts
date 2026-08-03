@@ -17,6 +17,8 @@ import {
   estimateContextTokens,
   ensureWorkspaceTrusted,
   listConvDirs,
+  detectStartupBlocker,
+  type StartupBlocker,
 } from "./antigravity-protocol.js";
 import { neutralizeForPaste } from "../shared/skill-commands.js";
 import {
@@ -48,8 +50,11 @@ const TURN_TIMEOUT_MS = 14 * 24 * 60 * 60 * 1000;
 const TURN_FINAL_QUIET_MS = 1200;      // terminal text/no-tool row: finish promptly
 const TURN_QUIET_DONE_MS = 6000;       // fallback: wait longer around tool/ambiguous rows
 const TAIL_POLL_MS = 200;
-const CONV_DISCOVER_TIMEOUT_MS = 30 * 1000;
+const CONV_DISCOVER_TIMEOUT_MS = 45 * 1000;
 const CONV_POLL_MS = 150;
+const STARTUP_RETRY_BACKOFF_MS = 3000;
+const MAX_STARTUP_RETRIES = 2;
+const STARTUP_OUTPUT_TAIL_CHARS = 16 * 1024;
 /** Accepted by agy without a startup error (verified); harmless in chat mode,
  *  bypasses approvals in agent mode. */
 const SKIP_PERMISSIONS_FLAG = "--dangerously-skip-permissions";
@@ -71,6 +76,7 @@ interface ActiveTurn {
   convWatch?: { stop: () => void };
   doneTimer?: NodeJS.Timeout;
   hardTimeout?: NodeJS.Timeout;
+  startupSubmit?: { stop: () => void };
   /** The PTY serving this turn. A stale PTY's onExit (after a kill->respawn race)
    *  must NOT interrupt the active turn unless it owns this exact proc. */
   boundProc?: pty.IPty;
@@ -116,6 +122,7 @@ export class AntigravityEngine implements InterruptibleEngine, PtyViewEngine {
     let convId = opts.resumeSessionId; // known iff resuming an existing conversation
     let latestAnswer: string | undefined;
     let lastContextEstimate = 0; // est. context tokens (chars/4 of the running transcript)
+    let lastStartupBlocker: StartupBlocker | undefined;
     let settled = false;
 
     let resolveFn!: (r: EngineResult) => void;
@@ -128,6 +135,7 @@ export class AntigravityEngine implements InterruptibleEngine, PtyViewEngine {
       if (turn.hardTimeout) clearTimeout(turn.hardTimeout);
       turn.tailer?.stop();
       turn.convWatch?.stop();
+      turn.startupSubmit?.stop();
       this.active.delete(jinnSessionId);
       this.lifecycle.turnEnded(jinnSessionId); // lifecycle decides keep-warm vs reap
     };
@@ -219,6 +227,7 @@ export class AntigravityEngine implements InterruptibleEngine, PtyViewEngine {
         if (fresh.length === 1) {
           clearInterval(interval);
           convId = fresh[0];
+          turn.startupSubmit?.stop();
           logger.info(`AntigravityEngine discovered conversation ${convId} for session ${jinnSessionId}`);
           attachTail(convId, true);
         } else if (fresh.length > 1) {
@@ -230,7 +239,13 @@ export class AntigravityEngine implements InterruptibleEngine, PtyViewEngine {
           }
         } else if (Date.now() - startedAt > CONV_DISCOVER_TIMEOUT_MS) {
           clearInterval(interval);
-          finish({ sessionId: "", result: "", error: "Antigravity: no conversation transcript appeared" });
+          finish({
+            sessionId: "",
+            result: "",
+            error: lastStartupBlocker
+              ? `Antigravity: ${lastStartupBlocker.message}`
+              : "Antigravity: no conversation transcript appeared",
+          });
           this.lifecycle.releaseSession(jinnSessionId);
         }
       }, CONV_POLL_MS);
@@ -255,8 +270,19 @@ export class AntigravityEngine implements InterruptibleEngine, PtyViewEngine {
       this.lifecycle.turnStarted(jinnSessionId);
       this.injectPrompt(warm, opts);
     } else {
-      const handle = this.spawn(jinnSessionId, opts, cwd, convId);
-      turn.boundProc = (handle as any)._proc as pty.IPty | undefined;
+      const handle = this.spawn(jinnSessionId, opts, cwd, convId, (proc) => {
+        turn.boundProc = proc;
+        turn.startupSubmit = this.scheduleColdInject(
+          proc,
+          opts,
+          opts.resumeSessionId
+            ? undefined
+            : {
+                shouldRetry: () => !settled && convId === undefined,
+                onBlocker: (blocker) => { lastStartupBlocker = blocker; },
+              },
+        );
+      });
       this.lifecycle.adopt(jinnSessionId, handle, { turnRunning: true });
       this.lifecycle.turnStarted(jinnSessionId);
     }
@@ -299,7 +325,13 @@ export class AntigravityEngine implements InterruptibleEngine, PtyViewEngine {
     if (prev && !prev.resumeSessionId) this.spawnParams.set(jinnSessionId, { ...prev, resumeSessionId });
   }
 
-  private spawn(jinnSessionId: string, opts: EngineRunOpts, cwd: string, resumeConvId: string | undefined): PtyHandle {
+  private spawn(
+    jinnSessionId: string,
+    opts: EngineRunOpts,
+    cwd: string,
+    resumeConvId: string | undefined,
+    onSpawn: (proc: pty.IPty) => void,
+  ): PtyHandle {
     const bin = resolveBin("agy", opts.bin);
     const args = this.buildArgs(resumeConvId, opts.model);
     const geom = this.lastGeom.get(jinnSessionId);
@@ -328,39 +360,70 @@ export class AntigravityEngine implements InterruptibleEngine, PtyViewEngine {
       bin: opts.bin,
       mcpAttached: mcpConfig.attached,
     });
-    // Inject once the TUI is ready. A fixed delay is unreliable — agy needs a
-    // few seconds to render and start accepting input. Gate on output quiescence:
-    // inject after the PTY has emitted something and then gone quiet (TUI settled),
-    // with a hard cap so we never wait forever.
-    this.scheduleColdInject(proc, opts);
+    onSpawn(proc);
     return this.wireProcToStream(jinnSessionId, proc, () => {
       this.active.get(jinnSessionId)?.interrupt("Interrupted: agy process exited");
     });
   }
 
-  /** Wait for agy's TUI to settle (first output, then ~1.2s quiet) before sending
-   *  the prompt; fall back to a hard cap. Prevents dropping the prompt into a
-   *  not-yet-ready terminal (the cause of "no conversation transcript appeared"). */
-  private scheduleColdInject(proc: pty.IPty, opts: EngineRunOpts): void {
+  /** Wait for agy's TUI to settle before submitting. A fresh TUI can still be
+   *  verifying the account after it settles, so retry that explicit rejection. */
+  private scheduleColdInject(
+    proc: pty.IPty,
+    opts: EngineRunOpts,
+    retry?: {
+      shouldRetry: () => boolean;
+      onBlocker: (blocker: StartupBlocker) => void;
+    },
+  ): { stop: () => void } {
     const QUIET_MS = 1200;
     const HARD_CAP_MS = 12000;
     const startedAt = Date.now();
     let lastData = Date.now();
     let sawData = false;
     let injected = false;
-    const sub = proc.onData(() => { lastData = Date.now(); sawData = true; });
+    let stopped = false;
+    let retryCount = 0;
+    let retryTimer: NodeJS.Timeout | undefined;
+    let outputTail = "";
+    const sub = proc.onData((data) => {
+      lastData = Date.now();
+      sawData = true;
+      if (!injected || !retry || stopped) return;
+      outputTail = (outputTail + data).slice(-STARTUP_OUTPUT_TAIL_CHARS);
+      const blocker = detectStartupBlocker(outputTail);
+      if (!blocker) return;
+      retry.onBlocker(blocker);
+      if (!blocker.retryable || retryTimer || retryCount >= MAX_STARTUP_RETRIES || !retry.shouldRetry()) return;
+      retryTimer = setTimeout(() => {
+        retryTimer = undefined;
+        if (stopped || !retry.shouldRetry()) return;
+        retryCount++;
+        outputTail = "";
+        this.injectPromptToProc(proc, opts);
+      }, STARTUP_RETRY_BACKOFF_MS);
+      retryTimer.unref?.();
+    });
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      clearInterval(timer);
+      if (retryTimer) clearTimeout(retryTimer);
+      try { sub.dispose(); } catch { /* ignore */ }
+    };
     const timer = setInterval(() => {
-      if (injected) return;
+      if (stopped || injected) return;
       const idleFor = Date.now() - lastData;
       const elapsed = Date.now() - startedAt;
       if ((sawData && idleFor > QUIET_MS) || elapsed > HARD_CAP_MS) {
         injected = true;
         clearInterval(timer);
-        try { sub.dispose(); } catch { /* ignore */ }
         this.injectPromptToProc(proc, opts);
+        if (!retry) stop();
       }
     }, 250);
     timer.unref?.();
+    return { stop };
   }
 
   private injectPromptToProc(proc: pty.IPty, opts: EngineRunOpts): void {

@@ -8,6 +8,7 @@ import {
   isTerminalAnswerLine,
   newToolCardState,
   ensureWorkspaceTrusted,
+  detectStartupBlocker,
 } from "../antigravity-protocol.js";
 
 const USER_LINE = `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"<USER_REQUEST>\\nhi\\n</USER_REQUEST>"}`;
@@ -137,6 +138,25 @@ describe("isTerminalAnswerLine", () => {
   it("does not treat planner tool-call rows as terminal", () => {
     expect(isTerminalAnswerLine(PLANNER_TOOL_ONLY)).toEqual({ terminal: false });
     expect(isTerminalAnswerLine(PLANNER_TEXT_AND_TOOL)).toEqual({ terminal: false });
+  });
+});
+
+describe("detectStartupBlocker", () => {
+  it("detects the ANSI-wrapped account-verification banner as retryable", () => {
+    const frame = [
+      "\u001b[33mVerifying your account...\u001b[0m",
+      "\u001b[2mWe're finishing verifying your account eligibility.\u001b[0m",
+      "This usually takes a moment. Please try again shortly.",
+    ].join("\r\n");
+
+    expect(detectStartupBlocker(frame)).toEqual({
+      retryable: true,
+      message: "We're finishing verifying your account eligibility. Please try again shortly.",
+    });
+  });
+
+  it("returns null for a normal idle TUI frame", () => {
+    expect(detectStartupBlocker("Welcome to Antigravity\r\n> Type your message")).toBeNull();
   });
 });
 
