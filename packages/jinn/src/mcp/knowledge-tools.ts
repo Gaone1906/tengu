@@ -9,7 +9,7 @@ import { hasControlBytes } from "../shared/sanitize.js";
  * sessions/context.ts).
  *
  * Domain rules this module owns:
- *   - INSTANCE-ROOT INVARIANT (enforced in knowledge/store.ts behind the
+ *   - INSTANCE-ROOT INVARIANT (enforced in notes/store.ts behind the
  *     routes): reads accept any relative instance file, while realpath
  *     containment rejects `..`, absolute paths, and symlink escapes.
  *   - CONTEXT-BOMB GUARDS: search returns ≤20 {path,title,snippet,matchCount}
