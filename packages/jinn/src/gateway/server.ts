@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
-import type { JinnConfig, Connector, Employee, Engine, JsonObject, Session } from "../shared/types.js";
+import type { JinnConfig, Connector, Employee, Engine, JsonObject, Session, SlackConnectorConfig, TelegramConnectorConfig, WhatsAppConnectorConfig } from "../shared/types.js";
 import { loadConfig, normalizeClaudeEngineConfig } from "../shared/config.js";
 import {
   getModelRegistry,
@@ -351,6 +351,84 @@ export function serveStatic(
   return true;
 }
 
+/** A connector declaration with its id resolved — the one runtime shape. */
+export interface NormalizedConnector {
+  id: string;
+  type: string;
+  employee?: string;
+  /** Config handed to the connector constructor (always carries `id`). */
+  config: Record<string, unknown>;
+}
+
+/** When a legacy top-level connector counts as configured. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const LEGACY_ENABLED: Record<string, (config: any) => boolean> = {
+  slack: (config) => Boolean(config.appToken && config.botToken),
+  discord: (config) => Boolean(config.botToken || config.proxyVia),
+  telegram: (config) => Boolean(config.botToken),
+  whatsapp: () => true,
+};
+
+/**
+ * Flatten both config forms into one list: the legacy top-level connectors
+ * (`connectors.slack`, …) become instances whose id defaults to their type,
+ * followed by the explicitly named `connectors.instances[]`.
+ */
+export function connectorInstancesFromConfig(config: JinnConfig): NormalizedConnector[] {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const declared = (config.connectors ?? {}) as Record<string, any>;
+  const instances: NormalizedConnector[] = [];
+  const seen = new Set<string>();
+
+  const add = (id: string, type: string, raw: Record<string, unknown>): void => {
+    if (seen.has(id)) {
+      logger.warn(`Duplicate connector instance id "${id}", skipping`);
+      return;
+    }
+    seen.add(id);
+    const connectorConfig: Record<string, unknown> = { ...raw, id };
+    // Speech-to-text is a global setting the telegram connector reads from its own config.
+    if (type === "telegram") connectorConfig.stt = config.stt;
+    instances.push({ id, type, employee: raw.employee as string | undefined, config: connectorConfig });
+  };
+
+  for (const [type, enabled] of Object.entries(LEGACY_ENABLED)) {
+    const raw = declared[type];
+    if (raw && enabled(raw)) add(type, type, raw);
+  }
+
+  for (const instance of declared.instances ?? []) {
+    const { id, type, ...rest } = instance;
+    if (!id || !type) {
+      logger.warn(`Skipping connector instance without id or type`);
+      continue;
+    }
+    add(id, type, rest);
+  }
+
+  return instances;
+}
+
+/** The only place a connector is constructed. Throws on an unknown type. */
+export function createConnector(instance: NormalizedConnector): Connector {
+  const config = instance.config;
+  switch (instance.type) {
+    case "slack":
+      return new SlackConnector(config as unknown as SlackConnectorConfig);
+    case "discord":
+      // Remote mode proxies all Discord I/O through the primary instance.
+      return config.proxyVia
+        ? new RemoteDiscordConnector({ proxyVia: String(config.proxyVia), channelId: config.channelId as string | undefined })
+        : new DiscordConnector(config as unknown as DiscordConnectorConfig);
+    case "telegram":
+      return new TelegramConnector(config as unknown as TelegramConnectorConfig);
+    case "whatsapp":
+      return new WhatsAppConnector(config as unknown as WhatsAppConnectorConfig);
+    default:
+      throw new Error(`Unknown connector type "${instance.type}" for instance "${instance.id}"`);
+  }
+}
+
 export type GatewayCleanup = () => Promise<void>;
 
 export async function startGateway(
@@ -638,359 +716,87 @@ export async function startGateway(
     hermes: hermesInteractiveEngine,
   };
 
-  // Derive connector names from config
-  const connectorNames: string[] = [];
-  if (config.connectors?.slack?.appToken && config.connectors?.slack?.botToken) {
-    connectorNames.push("slack");
-  }
-  if (config.connectors?.discord?.botToken || config.connectors?.discord?.proxyVia) {
-    connectorNames.push("discord");
-  }
-  if (config.connectors?.telegram?.botToken) {
-    connectorNames.push("telegram");
-  }
-  if (config.connectors?.whatsapp) {
-    connectorNames.push("whatsapp");
-  }
-
   // Build employee registry
   let employeeRegistry = scanOrg();
   logger.info(`Loaded ${employeeRegistry.size} employee(s) from org directory`);
-  const sessionManager = new SessionManager(config, engines, connectorNames, bootId, (id) => employeeRegistry.get(id));
+  const sessionManager = new SessionManager(config, engines, bootId, (id) => employeeRegistry.get(id));
 
-  // Start connectors
+  // Start connectors — one normalized list covers both config forms.
   const connectors: Connector[] = [];
   const connectorMap = new Map<string, Connector>();
-  /** IDs of connectors created from config.connectors.instances[] (vs legacy top-level connectors) */
-  const instanceConnectorIds = new Set<string>();
 
   /**
-   * Shared boilerplate for legacy top-level connectors: create, wire onMessage
-   * routing, register, and fire-and-forget start. Per-connector config guards
-   * and construction stay explicit at the call sites.
+   * Create one connector, wire its message routing, and register it. Registration
+   * happens before start so shutdown can clean up even while a handshake is in
+   * flight. Returns the start() promise so the caller decides: boot
+   * fire-and-forgets it (a slow handshake must not delay HTTP listen), reload
+   * awaits it to report start failures in its response.
    */
-  const initConnector = (opts: {
-    id: string;
-    label: string;
-    create: () => Connector;
-    /** Read at message time so it tracks the captured config like before. */
-    employee: () => string | undefined;
-    startMsg?: string;
-  }): void => {
-    try {
-      const connector = opts.create();
-      connector.onMessage((msg) => {
-        const routeOpts: RouteOptions = {};
-        const employeeName = opts.employee();
-        if (employeeName) {
-          const emp = employeeRegistry.get(employeeName);
-          if (emp) routeOpts.employee = emp;
-        }
-        sessionManager.route(msg, connector, routeOpts).catch((err) => {
-          logger.error(`${opts.label} route error: ${err instanceof Error ? err.message : err}`);
-        });
+  const initConnector = (instance: NormalizedConnector): Promise<void> => {
+    const connector = createConnector(instance);
+    connector.onMessage((msg) => {
+      const routeOpts: RouteOptions = {};
+      if (instance.employee) {
+        const emp = employeeRegistry.get(instance.employee);
+        if (emp) routeOpts.employee = emp;
+      }
+      sessionManager.route(msg, connector, routeOpts).catch((err) => {
+        logger.error(`${instance.id} route error: ${err instanceof Error ? err.message : err}`);
       });
-      // Push to registry before starting so shutdown can clean up even if start is in-flight.
-      connectors.push(connector);
-      connectorMap.set(opts.id, connector);
-      // Fire-and-forget: don't block boot — a slow handshake must not delay HTTP listen.
-      connector.start().catch((err) => {
-        logger.error(`Failed to start ${opts.label} connector: ${err instanceof Error ? err.message : err}`);
-      });
-      if (opts.startMsg) logger.info(opts.startMsg);
-    } catch (err) {
-      logger.error(`Failed to initialize ${opts.label} connector: ${err instanceof Error ? err.message : err}`);
-    }
+    });
+    connectors.push(connector);
+    connectorMap.set(instance.id, connector);
+    return connector.start();
   };
 
-  if (config.connectors?.slack?.appToken && config.connectors?.slack?.botToken) {
-    const slackConfig = config.connectors.slack;
-    initConnector({
-      id: "slack",
-      label: "Slack",
-      create: () =>
-        new SlackConnector({
-          appToken: slackConfig.appToken,
-          botToken: slackConfig.botToken,
-          allowFrom: slackConfig.allowFrom,
-          ignoreOldMessagesOnBoot: slackConfig.ignoreOldMessagesOnBoot,
-        }),
-      employee: () => config.connectors.slack?.employee,
-    });
-  }
+  const describeConnector = (instance: NormalizedConnector): string =>
+    `connector "${instance.id}" (type: ${instance.type}, employee: ${instance.employee || "default"})`;
 
-  if (config.connectors?.discord?.proxyVia) {
-    // Remote mode: proxy all Discord operations through the primary instance
-    const discordConfig = config.connectors.discord;
-    initConnector({
-      id: "discord",
-      label: "remote Discord",
-      create: () =>
-        new RemoteDiscordConnector({
-          proxyVia: discordConfig.proxyVia!,
-          channelId: discordConfig.channelId,
-        }),
-      employee: () => config.connectors.discord?.employee,
-      startMsg: "Discord remote connector starting",
-    });
-  } else if (config.connectors?.discord?.botToken) {
-    // Primary mode: direct Discord bot connection
-    initConnector({
-      id: "discord",
-      label: "Discord",
-      create: () => new DiscordConnector(config.connectors.discord as DiscordConnectorConfig),
-      employee: () => config.connectors.discord?.employee,
-      startMsg: "Discord connector starting",
-    });
-  }
+  // Session context reads connector names off this map, so publish it before the
+  // first connector can deliver a message.
+  sessionManager.setConnectorProvider(() => connectorMap);
 
-  if (config.connectors?.telegram?.botToken) {
-    const telegramConfig = config.connectors.telegram;
-    initConnector({
-      id: "telegram",
-      label: "Telegram",
-      create: () =>
-        new TelegramConnector({
-          botToken: telegramConfig.botToken,
-          allowFrom: telegramConfig.allowFrom,
-          ignoreOldMessagesOnBoot: telegramConfig.ignoreOldMessagesOnBoot,
-          stt: config.stt,
-        }),
-      employee: () => config.connectors.telegram?.employee,
-    });
-  }
-
-  if (config.connectors?.whatsapp) {
-    initConnector({
-      id: "whatsapp",
-      label: "WhatsApp",
-      create: () => new WhatsAppConnector(config.connectors.whatsapp ?? {}),
-      employee: () => config.connectors.whatsapp?.employee,
-      startMsg: "WhatsApp connector starting (scan QR code if first run)",
-    });
-  }
-
-  // Process named connector instances (allows multiple connectors of the same type)
-  if (config.connectors?.instances) {
-    for (const instance of config.connectors.instances) {
-      const { id, type, employee, ...typeConfig } = instance;
-      if (!id || !type) {
-        logger.warn(`Skipping connector instance without id or type`);
-        continue;
-      }
-      if (connectorMap.has(id)) {
-        logger.warn(`Duplicate connector instance id "${id}", skipping`);
-        continue;
-      }
-
-      try {
-        let connector: Connector;
-        switch (type) {
-          case "discord": {
-            const discordConfig = { ...typeConfig, id } as DiscordConnectorConfig;
-            const discord = new DiscordConnector(discordConfig);
-            discord.onMessage((msg) => {
-              const routeOpts: RouteOptions = {};
-              if (employee) {
-                const emp = employeeRegistry.get(employee);
-                if (emp) routeOpts.employee = emp;
-              }
-              sessionManager.route(msg, discord, routeOpts).catch((err) => {
-                logger.error(`${id} route error: ${err instanceof Error ? err.message : err}`);
-              });
-            });
-            await discord.start();
-            connector = discord;
-            break;
-          }
-          case "slack": {
-            const slackConfig = { ...typeConfig, id } as any;
-            const slack = new SlackConnector(slackConfig);
-            slack.onMessage((msg) => {
-              const routeOpts: RouteOptions = {};
-              if (employee) {
-                const emp = employeeRegistry.get(employee);
-                if (emp) routeOpts.employee = emp;
-              }
-              sessionManager.route(msg, slack, routeOpts).catch((err) => {
-                logger.error(`${id} route error: ${err instanceof Error ? err.message : err}`);
-              });
-            });
-            await slack.start();
-            connector = slack;
-            break;
-          }
-          case "whatsapp": {
-            const whatsapp = new WhatsAppConnector({ ...typeConfig } as any);
-            whatsapp.onMessage((msg) => {
-              const routeOpts: RouteOptions = {};
-              if (employee) {
-                const emp = employeeRegistry.get(employee);
-                if (emp) routeOpts.employee = emp;
-              }
-              sessionManager.route(msg, whatsapp, routeOpts).catch((err) => {
-                logger.error(`${id} route error: ${err instanceof Error ? err.message : err}`);
-              });
-            });
-            await whatsapp.start();
-            connector = whatsapp;
-            break;
-          }
-          case "telegram": {
-            const telegramConfig = { ...typeConfig, id, stt: config.stt } as any;
-            const tg = new TelegramConnector(telegramConfig);
-            tg.onMessage((msg) => {
-              const routeOpts: RouteOptions = {};
-              if (employee) {
-                const emp = employeeRegistry.get(employee);
-                if (emp) routeOpts.employee = emp;
-              }
-              sessionManager.route(msg, tg, routeOpts).catch((err) => {
-                logger.error(`${id} route error: ${err instanceof Error ? err.message : err}`);
-              });
-            });
-            await tg.start();
-            connector = tg;
-            break;
-          }
-          default:
-            logger.warn(`Unknown connector type "${type}" for instance "${id}"`);
-            continue;
-        }
-        connectors.push(connector);
-        connectorMap.set(id, connector);
-        instanceConnectorIds.add(id);
-        logger.info(`Connector instance "${id}" (type: ${type}, employee: ${employee || "default"}) started`);
-      } catch (err) {
-        logger.error(`Failed to start connector instance "${id}": ${err instanceof Error ? err.message : err}`);
-      }
+  for (const instance of connectorInstancesFromConfig(config)) {
+    try {
+      // Fire-and-forget: don't block boot — a slow handshake must not delay HTTP listen.
+      initConnector(instance).catch((err) => {
+        logger.error(`Failed to start ${describeConnector(instance)}: ${err instanceof Error ? err.message : err}`);
+      });
+      logger.info(`Starting ${describeConnector(instance)}`);
+    } catch (err) {
+      logger.error(`Failed to initialize ${describeConnector(instance)}: ${err instanceof Error ? err.message : err}`);
     }
   }
 
-  sessionManager.setConnectorProvider(() => connectorMap);
-
-  // Reload connector instances from config (stop old instances, start new ones)
+  /** Stop every running connector and restart from fresh config (POST /api/connectors/reload). */
   async function reloadConnectorInstances(): Promise<{ started: string[]; stopped: string[]; errors: string[] }> {
-    const freshConfig = loadConfig();
     const started: string[] = [];
     const stopped: string[] = [];
     const errors: string[] = [];
 
-    // Find instance-based connectors (keys that came from instances array)
-    const instanceIds = new Set<string>();
-    if (freshConfig.connectors?.instances) {
-      for (const inst of freshConfig.connectors.instances) {
-        if (inst.id) instanceIds.add(inst.id);
-      }
-    }
-
-    // Stop old instance connectors that are no longer in config or need refresh
-    for (const [id, connector] of connectorMap.entries()) {
-      // Skip legacy (top-level) connectors — only reload instance-based ones
-      if (!instanceConnectorIds.has(id)) continue;
+    for (const [id, connector] of [...connectorMap.entries()]) {
       try {
         await connector.stop();
         connectorMap.delete(id);
-        instanceConnectorIds.delete(id);
         const idx = connectors.indexOf(connector);
         if (idx >= 0) connectors.splice(idx, 1);
         stopped.push(id);
-        logger.info(`Stopped connector instance "${id}" for reload`);
+        logger.info(`Stopped connector "${id}" for reload`);
       } catch (err) {
         errors.push(`Failed to stop ${id}: ${err instanceof Error ? err.message : err}`);
       }
     }
 
-    // Start new instances from fresh config
-    if (freshConfig.connectors?.instances) {
-      for (const instance of freshConfig.connectors.instances) {
-        const { id, type, employee, ...typeConfig } = instance;
-        if (!id || !type) continue;
-        if (connectorMap.has(id)) continue;
-
-        try {
-          let connector: Connector;
-          switch (type) {
-            case "discord": {
-              const discordConfig = { ...typeConfig, id } as DiscordConnectorConfig;
-              const discord = new DiscordConnector(discordConfig);
-              discord.onMessage((msg) => {
-                const routeOpts: RouteOptions = {};
-                if (employee) {
-                  const emp = employeeRegistry.get(employee);
-                  if (emp) routeOpts.employee = emp;
-                }
-                sessionManager.route(msg, discord, routeOpts).catch((err) => {
-                  logger.error(`${id} route error: ${err instanceof Error ? err.message : err}`);
-                });
-              });
-              await discord.start();
-              connector = discord;
-              break;
-            }
-            case "slack": {
-              const slackConfig = { ...typeConfig, id } as any;
-              const slack = new SlackConnector(slackConfig);
-              slack.onMessage((msg) => {
-                const routeOpts: RouteOptions = {};
-                if (employee) {
-                  const emp = employeeRegistry.get(employee);
-                  if (emp) routeOpts.employee = emp;
-                }
-                sessionManager.route(msg, slack, routeOpts).catch((err) => {
-                  logger.error(`${id} route error: ${err instanceof Error ? err.message : err}`);
-                });
-              });
-              await slack.start();
-              connector = slack;
-              break;
-            }
-            case "whatsapp": {
-              const whatsapp = new WhatsAppConnector({ ...typeConfig } as any);
-              whatsapp.onMessage((msg) => {
-                const routeOpts: RouteOptions = {};
-                if (employee) {
-                  const emp = employeeRegistry.get(employee);
-                  if (emp) routeOpts.employee = emp;
-                }
-                sessionManager.route(msg, whatsapp, routeOpts).catch((err) => {
-                  logger.error(`${id} route error: ${err instanceof Error ? err.message : err}`);
-                });
-              });
-              await whatsapp.start();
-              connector = whatsapp;
-              break;
-            }
-            case "telegram": {
-              const telegramConfig = { ...typeConfig, id, stt: config.stt } as any;
-              const tg = new TelegramConnector(telegramConfig);
-              tg.onMessage((msg) => {
-                const routeOpts: RouteOptions = {};
-                if (employee) {
-                  const emp = employeeRegistry.get(employee);
-                  if (emp) routeOpts.employee = emp;
-                }
-                sessionManager.route(msg, tg, routeOpts).catch((err) => {
-                  logger.error(`${id} route error: ${err instanceof Error ? err.message : err}`);
-                });
-              });
-              await tg.start();
-              connector = tg;
-              break;
-            }
-            default:
-              errors.push(`Unknown connector type "${type}" for instance "${id}"`);
-              continue;
-          }
-          connectors.push(connector);
-          connectorMap.set(id, connector);
-          instanceConnectorIds.add(id);
-          started.push(id);
-          logger.info(`Connector instance "${id}" (type: ${type}, employee: ${employee || "default"}) started`);
-        } catch (err) {
-          errors.push(`Failed to start "${id}": ${err instanceof Error ? err.message : err}`);
-          logger.error(`Failed to start connector instance "${id}": ${err instanceof Error ? err.message : err}`);
-        }
+    for (const instance of connectorInstancesFromConfig(loadConfig())) {
+      // A connector that refused to stop is still live — leave it alone.
+      if (connectorMap.has(instance.id)) continue;
+      try {
+        await initConnector(instance);
+        started.push(instance.id);
+        logger.info(`Started ${describeConnector(instance)}`);
+      } catch (err) {
+        errors.push(`Failed to start "${instance.id}": ${err instanceof Error ? err.message : err}`);
+        logger.error(`Failed to start ${describeConnector(instance)}: ${err instanceof Error ? err.message : err}`);
       }
     }
 
