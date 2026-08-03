@@ -88,7 +88,7 @@ describe("work-item tools — registry + schemas", () => {
     expect(names).toContain("fire_workflow_event");
     expect(names).toContain("cancel_workflow_run");
     expect(names.some((n) => /cancel/i.test(n) && /work_item/.test(n))).toBe(false);
-    expect(names).toHaveLength(63);
+    expect(names).toHaveLength(69);
   });
 
   it("positions list as recent/filter summaries and search as text/filter hits", () => {

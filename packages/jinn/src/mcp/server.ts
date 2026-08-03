@@ -10,6 +10,7 @@ import { buildSessionTools } from "./session-tools.js";
 import { buildSearchTools } from "./search-tools.js";
 import { buildKnowledgeTools } from "./knowledge-tools.js";
 import { buildNoteTools } from "./note-tools.js";
+import { buildExperimentTools } from "./experiment-tools.js";
 import { buildDelegationTools } from "./delegation-tools.js";
 import { buildOrgTools } from "./org-tools.js";
 import { buildWorkItemTools } from "./work-item-tools.js";
@@ -103,14 +104,14 @@ export { gatewayGet, gatewayRequest, JinnMcpToolError, type JinnMcpContext, type
 /**
  * Build the full tool set: the GRS-017b org group + the GRS-017a sessions
  * group + the GRS-020a company-reference search group + the GRS-020b scoped
- * knowledge group + GRS-020c cost-only read + GRS-020d cron reads + the
+ * knowledge group + Experiments ledger + GRS-020c cost-only read + GRS-020d cron reads + the
  * GRS-017d delegation transaction + the GRS-021c Todo/work-item group + the
  * COO-default approval decision group + managed-file reads + the GRS-015
  * workflow group.
  * Growth discipline: the belt budget lives in the GRS-017 design §7 and the
  * GRS-020 design §4 (net context diet positive — measured in
  * mcp/__tests__/context-diet.test.ts and knowledge-diet.test.ts); at this
- * size (52) the hand-rolled protocol below is still comfortably sufficient —
+ * current size the hand-rolled protocol below is still comfortably sufficient —
  * revisit the SDK question only if a future group needs capabilities beyond
  * tools/list + tools/call (resources, prompts, progress).
  */
@@ -122,6 +123,7 @@ export function buildTools(opts?: { notesEnabled?: boolean; workflowAttempt?: bo
     ...buildSearchTools(),
     ...buildKnowledgeTools(),
     ...(notesEnabled ? buildNoteTools() : []),
+    ...buildExperimentTools(),
     ...buildCostTools(),
     ...buildCronTools(),
     ...buildDelegationTools(),

@@ -10,6 +10,7 @@ import {
   Settings,
   MoreHorizontal,
   NotebookPen,
+  FlaskConical,
 } from "lucide-react"
 import type { LucideIcon } from "lucide-react"
 
@@ -23,6 +24,7 @@ const BASE_NAV_ITEMS: NavItem[] = [
   { href: "/", label: "Chat", icon: MessageSquare },
   { href: "/todos", label: "Todos", icon: ListChecks },
   { href: "/workflow", label: "Workflows", icon: Workflow },
+  { href: "/experiments", label: "Experiments", icon: FlaskConical },
   { href: "/org", label: "Organization", icon: Users },
   { href: "/cron", label: "Cron", icon: Clock },
   { href: "/limits", label: "Limits", icon: Gauge },
@@ -37,8 +39,9 @@ const NOTES_NAV_ITEM: NavItem = { href: "/notes", label: "Notes", icon: Notebook
 // hamburger is gone). HIG caps a tab bar at ~4–5 self-explanatory items, so we
 // carry the 4 primary destinations and hand everything else to a "More" tab that
 // opens the grouped overflow screen (/more). Chat + Todos + Workflows are the
-// day-to-day phone surfaces; Organization/Cron/Skills/Activity/Limits/Settings
-// live one tap deep under More. The bar is icon-only (see mobile-tab-bar.tsx).
+// day-to-day phone surfaces; Experiments/Organization/Cron/Skills/Activity/
+// Limits/Settings live one tap deep under More. The bar is icon-only (see
+// mobile-tab-bar.tsx).
 
 // The "More" tab is not a NAV_ITEMS destination — it's the overflow entry point.
 export const MORE_NAV_ITEM: NavItem = { href: "/more", label: "More", icon: MoreHorizontal }
