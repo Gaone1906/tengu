@@ -1398,9 +1398,20 @@ export function ChatMessages({
   // The hook owns terminal-response lifecycle independently of `loading`, which
   // can clear for waiting/idle/stopped states. Until a real final response lands,
   // the latest turn remains ordinary stream content with no fold DOM.
+  const previousTurnPendingRef = useRef(turnPending)
+  const turnJustCompleted = previousTurnPendingRef.current && !turnPending
+  useEffect(() => {
+    previousTurnPendingRef.current = turnPending
+  }, [turnPending])
+  const latestMessage = messages.at(-1)
+  const effectiveLiveFinalResponseId = liveFinalResponseId ?? (
+    turnJustCompleted && latestMessage?.role === 'assistant' && !latestMessage.partial
+      ? latestMessage.id ?? null
+      : null
+  )
   const currentTurnId = latestTurnId(messages)
-  const liveFinalPresent = liveFinalResponseId === null
-    || messages.some((message) => message.id === liveFinalResponseId)
+  const liveFinalPresent = effectiveLiveFinalResponseId === null
+    || messages.some((message) => message.id === effectiveLiveFinalResponseId)
   const incompleteTurnIds = (turnPending || !liveFinalPresent) && currentTurnId
     ? new Set([currentTurnId])
     : new Set<string>()
@@ -1411,7 +1422,7 @@ export function ChatMessages({
     groupedMessages,
     messages,
     incompleteTurnIds,
-    liveFinalResponseId,
+    effectiveLiveFinalResponseId,
     liveTerminalDelegationIds,
   )
 

@@ -723,6 +723,25 @@ describe('fold region boundary (turn structure)', () => {
     expect(container.querySelector('[data-fold-region]')?.getAttribute('aria-hidden')).toBe('true')
     expect(screen.getByRole('button', { name: /Worked for 5s, 1 tool, 1 teammate\. Show the work\./ })).toBeTruthy()
   })
+
+  it('keeps the current answered turn open without live-completion provenance', () => {
+    vi.useFakeTimers()
+    const running: Message[] = [
+      { id: 'u1', role: 'user', content: 'Go.', timestamp: T0 },
+      { id: 't1', role: 'assistant', content: 'Used grep', timestamp: T0 + 1_000, toolCall: 'grep' },
+    ]
+    const done: Message[] = [
+      ...running,
+      { id: 'a1', role: 'assistant', content: 'All done.', timestamp: T0 + 2_000 },
+    ]
+
+    const { container, rerender } = render(<ChatMessages messages={running} loading turnPending />)
+    rerender(<ChatMessages messages={done} loading={false} turnPending={false} />)
+    act(() => vi.advanceTimersByTime(3_000))
+
+    expect(container.querySelector('[data-fold-region]')?.getAttribute('aria-hidden')).toBeNull()
+    expect(container.querySelector('[data-fold-summary]')).toBeNull()
+  })
 })
 
 describe('streaming → final structural parity', () => {
