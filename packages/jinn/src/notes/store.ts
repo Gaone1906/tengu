@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { JINN_HOME } from "../shared/paths.js";
-import { hasControlBytes, stripControlChars } from "../sessions/registry.js";
+import { hasControlBytes, stripControlChars } from "../shared/sanitize.js";
 import type {
   NoteDocument,
   NoteFolder,
