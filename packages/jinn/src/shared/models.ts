@@ -54,6 +54,8 @@ import {
 /** Engines registered in this build (mirrors server.ts engine map). */
 const ENGINE_NAMES = ["claude", "codex", "antigravity", "grok", "pi", "hermes"] as const;
 export type EngineName = (typeof ENGINE_NAMES)[number];
+export const PTY_VIEW_ENGINE_NAMES = ["claude", "codex", "antigravity", "grok", "hermes"] as const; // engines with a /ws/pty view
+export type PtyViewEngineName = (typeof PTY_VIEW_ENGINE_NAMES)[number];
 
 /** Binary name probed for each engine's availability (override via engines.<name>.bin). */
 const ENGINE_BIN: Record<EngineName, string> = {
@@ -366,7 +368,7 @@ export function buildRegistry(config: JinnConfig): ModelRegistry {
       ? fromEngineModelsConfig(name, engineBlock, available)
       : synthesized[name]; // engine omitted from the block → keep the synthesized entry
   }
-  return registry;
+  return Object.fromEntries(ENGINE_NAMES.map((n) => [n, { ...registry[n], supportsPty: (PTY_VIEW_ENGINE_NAMES as readonly string[]).includes(n) }])) as ModelRegistry;
 }
 
 /**

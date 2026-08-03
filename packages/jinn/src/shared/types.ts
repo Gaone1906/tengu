@@ -768,6 +768,7 @@ export interface EngineRegistryEntry {
   defaultModel: string;
   effortMechanism: EffortMechanism;
   models: ModelInfo[];
+  supportsPty?: boolean; // interactive PTY/CLI view (`/ws/pty`) — stamped by buildRegistry
 }
 
 /** Resolved registry, keyed by engine name. */

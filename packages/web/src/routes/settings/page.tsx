@@ -213,7 +213,7 @@ function SettingsSelect({
 }: {
   value: string
   onChange: (v: string) => void
-  options: { value: string; label: string }[]
+  options: { value: string; label: string; disabled?: boolean }[]
 }) {
   return (
     <select
@@ -222,7 +222,7 @@ function SettingsSelect({
       className={`${CONTROL_CLASS} cursor-pointer`}
     >
       {options.map((o) => (
-        <option key={o.value} value={o.value}>
+        <option key={o.value} value={o.value} disabled={o.disabled}>
           {o.label}
         </option>
       ))}
@@ -1047,11 +1047,7 @@ export default function SettingsPage() {
                   <SettingsSelect
                     value={config.engines?.default ?? "claude"}
                     onChange={(v) => updateConfig(["engines", "default"], v)}
-                    options={[
-                      { value: "claude", label: "Claude" },
-                      { value: "codex", label: "Codex" },
-                      { value: "grok", label: "Grok" },
-                    ]}
+                    options={Object.values(modelRegistry?.engines ?? {}).map((e) => ({ value: e.name, label: e.name.charAt(0).toUpperCase() + e.name.slice(1), disabled: !e.available }))}
                   />
                 </FieldRow>
               </Section>
@@ -1307,7 +1303,7 @@ export default function SettingsPage() {
 
                 <FieldRow label="When Claude Hits Usage Limit">
                   <SettingsSelect
-                    value={config.sessions?.rateLimitStrategy ?? "fallback"}
+                    value={config.sessions?.rateLimitStrategy ?? "wait"}
                     onChange={(v) =>
                       updateConfig(["sessions", "rateLimitStrategy"], v)
                     }

@@ -11,6 +11,7 @@ import { loadConfig, normalizeClaudeEngineConfig } from "../shared/config.js";
 import {
   getModelRegistry,
   invalidateModelRegistry,
+  type PtyViewEngineName,
   refreshAntigravityModels,
   refreshClaudeModels,
   refreshCodexModels,
@@ -629,7 +630,7 @@ export async function startGateway(
 
   // PTY-capable engines, keyed by engine name — the /ws/pty handler routes by
   // session.engine so the xterm view attaches to the right engine.
-  const ptyViewEngines: Record<string, Engine & PtyViewEngine> = {
+  const ptyViewEngines: Record<PtyViewEngineName, Engine & PtyViewEngine> = {
     claude: interactiveClaudeEngine,
     codex: codexInteractiveEngine,
     antigravity: antigravityEngine,
@@ -1375,7 +1376,7 @@ export async function startGateway(
       // PTY view, and attaching the claude TUI to a codex session showed the wrong
       // engine. No view engine for this engine → refuse the upgrade (FE hides the
       // CLI toggle for codex so this only catches stragglers).
-      const ptyEngine = ptySession ? ptyViewEngines[ptySession.engine] : undefined;
+      const ptyEngine = ptySession ? ptyViewEngines[ptySession.engine as PtyViewEngineName] : undefined;
       if (!ptyEngine) { socket.destroy(); return; }
       ptyWss.handleUpgrade(req, socket, head, (ws) => {
         trackHeartbeat(ws);

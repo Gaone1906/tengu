@@ -12,6 +12,7 @@ import {
   type ThreadOrigin,
 } from '@/components/chat/chat-route-helpers'
 import { useGateway } from '@/hooks/use-gateway'
+import { useModelRegistry } from '@/hooks/use-model-registry'
 import { PageLayout } from '@/components/page-layout'
 import { ChatSidebar, pickDeleteFallbackId, type SidebarOrder } from '@/components/chat/chat-sidebar'
 import { ChatHeaderPills } from '@/components/chat/chat-tabs'
@@ -205,6 +206,7 @@ function ChatPage() {
   const [focusTrigger, setFocusTrigger] = useState(0)
   const sessionPickerRef = useRef<HTMLDivElement>(null)
   const { events, connectionSeq, skillsVersion, subscribe } = useGateway()
+  const { data: engineRegistry } = useModelRegistry() // PTY capability per engine — drives the CLI view toggle
   const chatTabs = useChatTabs()
   const deleteSessionMutation = useDeleteSession()
   const archiveSessionMutation = useArchiveSession()
@@ -881,7 +883,7 @@ function ChatPage() {
     // instead of ChatPane, but the underlying session selection is preserved.
   }, [chatTabs.hydrated, chatTabs.activeTab, selectedId, handleSelect, navigate])
 
-  const cliModeAvailable = !sessionMeta?.engine || ['claude', 'codex', 'antigravity', 'grok'].includes(sessionMeta.engine)
+  const cliModeAvailable = !sessionMeta?.engine || engineRegistry?.engines?.[sessionMeta.engine]?.supportsPty === true
   const activeSessionTab = chatTabs.activeTab?.kind === 'session' ? chatTabs.activeTab : null
   const viewSwitchLocked = sessionMeta?.engine === 'codex' && activeSessionTab?.sessionId === selectedId && activeSessionTab.status === 'running'
   const cliTitle = viewSwitchLocked
@@ -1146,6 +1148,7 @@ function ChatPage() {
                 onRefresh={handleRefresh}
                 portalName={portalName}
                 subscribe={subscribe}
+                engineRegistry={engineRegistry}
                 connectionSeq={connectionSeq}
                 skillsVersion={skillsVersion}
                 events={events}
