@@ -827,7 +827,7 @@ const FlatSessionRow = React.memo(function FlatSessionRow({
       <ContextMenuTrigger asChild>
         <div
           className={cn(
-            "group/flat relative flex w-full items-center gap-3 border-l-2 px-4 py-2 text-left transition-colors",
+            "group/flat relative flex w-full items-center gap-3 border-l-2 px-4 py-2 text-left transition-colors lg:pr-11",
             isActive
               ? "border-l-[var(--text-tertiary)] bg-[var(--fill-secondary)]"
               : "border-l-transparent hover:bg-[var(--fill-tertiary)]"
