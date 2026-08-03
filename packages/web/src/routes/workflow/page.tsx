@@ -19,7 +19,6 @@ import {
   TRIGGER_KIND_LABEL,
   formatDuration,
   formatStarted,
-  isLiveRunStatus,
   statusMeta,
 } from "./run-support"
 
@@ -65,8 +64,6 @@ function RunsSection({ workflowId }: { workflowId: string }) {
     queryKey: queryKeys.workflows.runs(workflowId),
     queryFn: () => api.listWorkflowRunsV2(workflowId),
     enabled: Boolean(workflowId),
-    refetchInterval: (current) =>
-      current.state.data?.items.some((run) => isLiveRunStatus(run.status)) ? 2500 : false,
   })
 
   return (

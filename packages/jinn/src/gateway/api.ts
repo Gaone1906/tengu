@@ -4,7 +4,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import yaml from "js-yaml";
-import type { ChatBlock, ChatBlockEnvelope, CronJob, DelegatedActivity, Employee, Engine, IncomingMessage, JinnConfig, JsonObject, Session, StreamDelta, Target } from "../shared/types.js";
+import type { ChatBlock, ChatBlockEnvelope, CronJob, DelegatedActivity, Employee, Engine, GatewayEmit, IncomingMessage, JinnConfig, JsonObject, Session, StreamDelta, Target } from "../shared/types.js";
 import { isInterruptibleEngine, reportsTurnProgress, STRUCTURED_MESSAGE_BODY_MAX_CHARS } from "../shared/types.js";
 import { compactEmployeeRole } from "../shared/employee-role.js";
 export { compactEmployeeRole } from "../shared/employee-role.js";
@@ -346,7 +346,7 @@ export interface ApiContext {
   /** Opaque process-generation id used only in platform-context fingerprints. */
   gatewayBootId?: string;
   getConfig: () => JinnConfig;
-  emit: (event: string, payload: unknown) => void;
+  emit: GatewayEmit;
   connectors: Map<string, import("../shared/types.js").Connector>;
   reloadConnectorInstances?: () => Promise<{ started: string[]; stopped: string[]; errors: string[] }>;
   /** Re-read config.yaml into memory immediately (same as the file-watcher does,
@@ -3042,13 +3042,6 @@ export async function handleApiRequest(
       });
     }
 
-    // GET /api/sessions/interrupted — list sessions that can be resumed after a restart
-    if (method === "GET" && pathname === "/api/sessions/interrupted") {
-      const { getInterruptedSessions } = await import("../sessions/registry.js");
-      const interrupted = getInterruptedSessions();
-      return json(res, serializeSessionList(interrupted, context));
-    }
-
     // GET /api/sessions/:id/messages?before=<messageId>&limit=N
     // Bounded older-history page for seamless transcript prepending in the web UI.
     let params = matchRoute("/api/sessions/:id/messages", pathname);
@@ -5621,7 +5614,6 @@ export async function handleApiRequest(
           lastError: null,
         });
         session = getSession(session.id) ?? session;
-        context.emit("session:resumed", { sessionId: session.id });
       }
 
       // If a turn is already running, check whether we should interrupt or queue.
@@ -5633,8 +5625,6 @@ export async function handleApiRequest(
           // SessionQueue serializes per-session; the new turn enqueued below will
           // wait for the killed run()'s promise to settle before starting.
           context.emit("session:interrupted", { sessionId: session.id, reason: "new message" });
-        } else if (!isNotification) {
-          context.emit("session:queued", { sessionId: session.id, message: prompt });
         }
       }
 
@@ -5646,7 +5636,6 @@ export async function handleApiRequest(
           lastActivity: new Date().toISOString(),
           lastError: null,
         });
-        context.emit("session:resumed", { sessionId: session.id });
       }
 
       // Clear any pending cancellation so the new message runs normally.
@@ -5898,7 +5887,6 @@ export async function handleApiRequest(
       // G1: synchronously refresh the in-memory registry (and drop warm PTYs) so an
       // immediate session spawn sees the new persona/model — don't wait for the watcher.
       context.reloadOrg?.();
-      context.emit("org:updated", { employee: params.name });
 
       const updated = scanOrg(context.getConfig()).get(params.name);
       return json(res, { status: "ok", employee: updated ?? null });
@@ -5973,7 +5961,6 @@ export async function handleApiRequest(
       const result = updateSkillContent(params.name, body.content);
       if (!result.ok) return json(res, { error: result.error }, result.status);
       skillDescriptionCache.delete(params.name);
-      context.emit("skills:updated", { name: params.name });
       logger.info(`Skill updated via API: ${params.name}`);
       return json(res, { status: "updated", name: params.name, content: result.content });
     }
@@ -6123,7 +6110,6 @@ export async function handleApiRequest(
       }
       try {
         const result = await context.reloadConnectorInstances();
-        context.emit("connectors:reloaded", result);
         return json(res, result);
       } catch (err) {
         return json(res, { error: err instanceof Error ? err.message : String(err) }, 500);
@@ -6387,8 +6373,6 @@ export async function handleApiRequest(
       if (fs.existsSync(agentsMdPath) && !fs.lstatSync(agentsMdPath).isSymbolicLink()) {
         personalizeManual(agentsMdPath);
       }
-
-      context.emit("config:updated", { portal: updated.portal });
       return json(res, { status: "ok", portal: updated.portal });
     }
 
@@ -7367,12 +7351,6 @@ async function runWebSession(
                 : undefined,
             );
 
-            context.emit("session:rate-limited", {
-              sessionId: currentSession.id,
-              employee: currentSession.employee,
-              error: result.error,
-              resetsAt: rateLimit.resetsAt ?? null,
-            });
           },
           onRetryStream: emitDelta,
           onRetrySuccess: (retryResult) => {

@@ -29,7 +29,6 @@ const READ_ROUTES = [
   { method: "GET", path: "/api/search/work-items?status=backlog", label: "work-items search" },
   { method: "GET", path: "/api/work-items/wi_missing/sessions", label: "work-item sessions" },
   { method: "GET", path: "/api/sessions", label: "sessions list" },
-  { method: "GET", path: "/api/sessions/interrupted", label: "interrupted sessions list" },
   { method: "GET", path: "/api/sessions/nope", label: "session read" },
   { method: "GET", path: "/api/sessions/nope/children", label: "session children" },
   { method: "GET", path: "/api/sessions/nope/context?message=msg", label: "message context" },

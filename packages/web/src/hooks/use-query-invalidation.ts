@@ -7,7 +7,7 @@ import { patchSessionBackgroundActivity, removeFromSessionsCache } from '@/hooks
 import { mergeTodoIntoCaches } from '@/routes/todos/todo-edit-request'
 import type { BackgroundActivity, SessionsResponse } from '@/lib/api'
 
-/** The one company mutation event (Todo, Workflow definition, run, trigger). */
+/** The one company mutation event (Todo, Workflow definition, run). */
 function handleCompanyChanged(
   qc: ReturnType<typeof useQueryClient>,
   p: Record<string, unknown>,
@@ -36,10 +36,6 @@ function handleCompanyChanged(
       qc.invalidateQueries({ queryKey: queryKeys.workflows.runs(workflowId) })
       if (runId) qc.invalidateQueries({ queryKey: queryKeys.workflows.run(workflowId, runId) })
     }
-  } else if (entity === 'workflow-trigger') {
-    const workflowId = typeof p.workflowId === 'string' ? p.workflowId : ''
-    qc.invalidateQueries({ queryKey: queryKeys.workflows.triggers })
-    if (workflowId) qc.invalidateQueries({ queryKey: queryKeys.workflows.definition(workflowId) })
   }
   // Loss recovery for the invoking transcript; normal session:delta stays the
   // surgical live path when the session is streaming.
@@ -102,7 +98,10 @@ export function useQueryInvalidation() {
             qc.invalidateQueries({ queryKey: ['work-item-sessions'] })
             break
           case 'cron':
+            // The cron routes query a raw ['cron-jobs'] key that ['cron'] does
+            // not prefix-match, so the visible list needs its own invalidation.
             qc.invalidateQueries({ queryKey: queryKeys.cron.all })
+            qc.invalidateQueries({ queryKey: queryKeys.cron.jobs })
             break
           case 'skills':
             qc.invalidateQueries({ queryKey: queryKeys.skills.all })
@@ -198,15 +197,13 @@ export function useQueryInvalidation() {
           }
           return
         case 'session:completed':
-        case 'session:error':
           pendingRef.current.add('sessions')
           pendingRef.current.add('work-item-sessions')
           if (p?.sessionId) {
             qc.invalidateQueries({ queryKey: queryKeys.sessions.detail(p.sessionId as string) })
           }
           break
-        case 'cron:completed':
-        case 'cron:error':
+        case 'cron:reloaded':
           pendingRef.current.add('cron')
           break
         case 'skills:changed':

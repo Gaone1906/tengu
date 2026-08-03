@@ -3,6 +3,7 @@ import type {
   ActivityReceipt,
   ChatBlockEnvelope,
   CompanyChangedEvent,
+  GatewayEmit,
 } from "../shared/types.js";
 import { blockFallbackText } from "../shared/blocks.js";
 
@@ -16,7 +17,7 @@ export interface ChatActivityContext {
   hasBlock?: (sessionId: string, blockId: string) => boolean;
   nextActivityOrder?: (sessionId: string, blockId: string) => number;
   applyBlock: (sessionId: string, envelope: ChatBlockEnvelope, fallback: string) => unknown;
-  emit: (event: string, payload: unknown) => void;
+  emit: GatewayEmit;
   log?: (message: string) => void;
 }
 

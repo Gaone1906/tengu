@@ -300,10 +300,6 @@ function ChatPage() {
           updateTabStatus(sid, { status: 'idle' })
           invalidateLiveSessionSnapshot(sid)
           break
-        case 'session:error':
-          updateTabStatus(sid, { status: 'error' })
-          invalidateLiveSessionSnapshot(sid)
-          break
         case 'session:deleted':
           closeTabBySessionId(sid)
           invalidateLiveSessionSnapshot(sid)

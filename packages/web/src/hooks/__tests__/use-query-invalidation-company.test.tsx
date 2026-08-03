@@ -119,7 +119,7 @@ describe('company + session:created invalidation', () => {
   it('invalidates workflow list + definition on a definition change', async () => {
     const { invalidate } = setup()
     act(() => listener?.('company:changed', {
-      entity: 'workflow-definition', action: 'updated', id: 'release-review', version: 4,
+      entity: 'workflow-definition', id: 'release-review', revision: 4,
     }))
     await act(async () => vi.advanceTimersByTimeAsync(1_000))
     expect(calledWithKey(invalidate, queryKeys.workflows.all)).toBe(true)
@@ -129,28 +129,17 @@ describe('company + session:created invalidation', () => {
   it('invalidates run list + detail on a run change', async () => {
     const { invalidate } = setup()
     act(() => listener?.('company:changed', {
-      entity: 'workflow-run', action: 'started', id: 'run-1', workflowId: 'release-review', runId: 'run-1', version: 3,
+      entity: 'workflow-run', workflowId: 'release-review', runId: 'run-1',
     }))
     await act(async () => vi.advanceTimersByTimeAsync(1_000))
     expect(calledWithKey(invalidate, queryKeys.workflows.runs('release-review'))).toBe(true)
     expect(calledWithKey(invalidate, queryKeys.workflows.run('release-review', 'run-1'))).toBe(true)
   })
 
-  it('invalidates trigger list + owning definition on a trigger change', async () => {
-    const { invalidate } = setup()
-    act(() => listener?.('company:changed', {
-      entity: 'workflow-trigger', action: 'created', id: 'nightly', workflowId: 'release-review', revision: 'r2',
-    }))
-    await act(async () => vi.advanceTimersByTimeAsync(1_000))
-    expect(calledWithKey(invalidate, queryKeys.workflows.triggers)).toBe(true)
-    expect(calledWithKey(invalidate, queryKeys.workflows.definition('release-review'))).toBe(true)
-  })
-
   it('invalidates the invoking session detail + transcript when sessionId is present', async () => {
     const { invalidate } = setup()
     act(() => listener?.('company:changed', {
-      entity: 'workflow-run', action: 'parked', id: 'run-1', workflowId: 'release-review', runId: 'run-1',
-      version: 3, sessionId: 'session-a',
+      entity: 'todo', action: 'delegated', id: 'wi_delegated', version: 3, sessionId: 'session-a',
     }))
     await act(async () => vi.advanceTimersByTimeAsync(1_000))
     expect(calledWithKey(invalidate, queryKeys.sessions.detail('session-a'))).toBe(true)

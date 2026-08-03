@@ -37,7 +37,7 @@ describe('mounted surface refresh on company:changed', () => {
     await waitFor(() => expect(queryFn).toHaveBeenCalledTimes(1))
 
     act(() => listener?.('company:changed', {
-      entity: 'workflow-definition', action: 'updated', id: 'release-review', version: 5,
+      entity: 'workflow-definition', id: 'release-review', revision: 5,
     }))
 
     await waitFor(() => expect(queryFn).toHaveBeenCalledTimes(2))

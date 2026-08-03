@@ -13,7 +13,6 @@ import {
   TRIGGER_KIND_LABEL,
   formatDuration,
   formatStarted,
-  isLiveRunStatus,
   mergeRunDetail,
   missingPromptAttempt,
 } from "./run-support"
@@ -35,7 +34,6 @@ export default function WorkflowRunPage() {
       return mergeRunDetail(snapshot, await api.getWorkflowRunV2(id, runId))
     },
     enabled: Boolean(id && runId),
-    refetchInterval: (current) => (isLiveRunStatus(current.state.data?.status) ? 2000 : false),
   })
   useBreadcrumbs([
     { label: "Workflows", href: "/workflow" },

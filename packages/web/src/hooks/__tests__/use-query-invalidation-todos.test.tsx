@@ -39,7 +39,7 @@ describe("Todo linked-session invalidation", () => {
   beforeEach(() => vi.useFakeTimers())
   afterEach(() => vi.useRealTimers())
 
-  it.each(["session:started", "session:updated", "session:completed", "session:error", "session:deleted"])(
+  it.each(["session:started", "session:updated", "session:completed", "session:deleted"])(
     "invalidates item-specific session queries on %s",
     async (event) => {
       const { invalidate } = setup()

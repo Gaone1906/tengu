@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { RouterProvider, createMemoryRouter } from "react-router-dom"
+import { queryKeys } from "@/lib/query-keys"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 const getWorkflowRun = vi.fn()
@@ -98,8 +99,11 @@ function renderRun() {
       <RouterProvider router={router} />
     </QueryClientProvider>,
   )
-  return router
+  return client
 }
+
+/** What use-query-invalidation does on a company:changed workflow-run frame. */
+const runChanged = (c: QueryClient) => c.invalidateQueries({ queryKey: queryKeys.workflows.run("morning-digest", "run-1") })
 
 function statusOf(name: string): string | null {
   const card = screen.getByText(name).closest("[data-node-status]")
@@ -268,12 +272,13 @@ describe("workflow run canvas", () => {
     expect(await screen.findByText(/Approved by operator/)).toBeTruthy()
   })
 
-  it("fetches the snapshot once and keeps the canvas painted off lean polls", async () => {
+  it("fetches the snapshot once and keeps the canvas painted off lean refreshes", async () => {
     serveRun(baseDetail({ nodeRuns: [nodeRun("trigger", "completed"), nodeRun("writer", "running")] }))
-    renderRun()
+    const client = renderRun()
 
     expect(await screen.findByText("Writer")).toBeTruthy()
-    // The 2s poll loop must not pay for the definition snapshot again.
+    // A run event refreshes the run; it must not pay for the definition snapshot again.
+    await runChanged(client)
     await waitFor(() => expect(getWorkflowRun).toHaveBeenCalled(), { timeout: 4000 })
     expect(getWorkflowRunFull).toHaveBeenCalledTimes(1)
     expect(screen.getByText("Quality gate")).toBeTruthy()
@@ -294,12 +299,13 @@ describe("workflow run canvas", () => {
     const lean = baseDetail({ nodeRuns, attempts: [attempt(1), attempt(2)] }) as Record<string, unknown>
     delete lean.definition
     getWorkflowRun.mockResolvedValue(lean)
-    renderRun()
+    const client = renderRun()
 
     fireEvent.click(await screen.findByText("Writer"))
+    await runChanged(client)
 
-    // The retry surfaces on the next lean poll; opening the node then pulls the
-    // prompt the snapshot predates, instead of dropping the section silently.
+    // The retry surfaces on the event-driven lean refresh; opening the node then
+    // pulls the prompt the snapshot predates, instead of dropping it silently.
     const inspector = within(await screen.findByTestId("run-inspector"))
     expect(await inspector.findByText(/Retried prompt\./, {}, { timeout: 6000 })).toBeTruthy()
     expect(getWorkflowRunFull).toHaveBeenCalledTimes(2)

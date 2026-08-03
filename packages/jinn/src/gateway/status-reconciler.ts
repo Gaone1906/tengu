@@ -1,4 +1,4 @@
-import type { Engine } from "../shared/types.js";
+import type { Engine, GatewayEmit } from "../shared/types.js";
 import { listSessions, updateSession } from "../sessions/registry.js";
 import { logger } from "../shared/logger.js";
 
@@ -16,7 +16,7 @@ const DEFAULT_STALE_MS = 45_000;
 
 export interface StatusReconcilerDeps {
   engines: Map<string, Engine>;
-  emit: (event: string, payload: unknown) => void;
+  emit: GatewayEmit;
   intervalMs?: number;
   staleMs?: number;
   /** Test override. */
