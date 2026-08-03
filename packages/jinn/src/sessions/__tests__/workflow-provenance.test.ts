@@ -12,13 +12,13 @@ let registry: Registry;
 
 beforeAll(async () => {
   registry = await import('../registry.js');
-  registry.initDb();
+  (await import('../../shared/db.js')).initDb();
 });
 
-afterAll(() => {
+afterAll(async () => {
   // Close the database before removing its directory: Windows refuses to unlink
   // a file with an open handle, so the sqlite connection has to go first.
-  registry.__closeDbForTest();
+  (await import('../../shared/db.js')).__closeDbForTest();
   removeTempDir(home);
 });
 

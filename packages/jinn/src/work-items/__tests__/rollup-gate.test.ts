@@ -17,7 +17,7 @@ beforeAll(async () => {
   store = await import("../store.js");
   transitions = await import("../transitions.js");
   approvals = await import("../approvals.js");
-  (await import("../../sessions/registry.js")).initDb();
+  (await import("../../shared/db.js")).initDb();
 });
 
 describe("roll-up close gate", () => {

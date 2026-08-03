@@ -103,7 +103,7 @@ beforeEach(() => {
 afterEach(() => { service.dispose(); vi.useRealTimers(); database.close(); fs.rmSync(root, { recursive: true, force: true }); });
 afterAll(async () => {
   const registry = await import("../../sessions/registry.js");
-  registry.__closeDbForTest();
+  (await import("../../shared/db.js")).__closeDbForTest();
   fs.rmSync(sessionHome, { recursive: true, force: true });
 });
 describe("Workflow retry, cancellation, and restart recovery", () => {
@@ -377,7 +377,7 @@ describe("Workflow retry, cancellation, and restart recovery", () => {
     ]);
     expect(await service.recover(now.toISOString())).toEqual({ resumedRuns: 0, resumedWaits: 0 });
     expect(service.getRun(definition.id, created.id)?.attempts).toHaveLength(1);
-    expect(registry.initDb().prepare("SELECT COUNT(*) AS count FROM sessions WHERE session_key = ?").get(key))
+    expect((await import("../../shared/db.js")).initDb().prepare("SELECT COUNT(*) AS count FROM sessions WHERE session_key = ?").get(key))
       .toEqual({ count: 1 });
     expect(engine.calls).toBe(1);
   });

@@ -6,12 +6,13 @@ import path from "node:path";
 // Throwaway DB before importing the registry (SESSIONS_DB resolves from JINN_HOME).
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-getpartial-"));
 process.env.JINN_HOME = tmp;
+const dbModule = await import("../../shared/db.js");
 
 type Reg = typeof import("../registry.js");
 let reg: Reg;
 
 function newSession(id: string): void {
-  reg.initDb().prepare(
+  dbModule.initDb().prepare(
     "INSERT INTO sessions (id, engine, source, source_ref, status, created_at, last_activity) VALUES (?, 'claude','web',?, 'running','t','t')",
   ).run(id, `web:${id}`);
 }
@@ -47,7 +48,7 @@ describe("getPartialMessages (bounded turn-settle read)", () => {
   });
 
   it("reads via an index seek, never a full messages table scan", () => {
-    const db = reg.initDb();
+    const db = dbModule.initDb();
     const plan = db
       .prepare(
         "EXPLAIN QUERY PLAN SELECT rowid, id, role, content, timestamp, media, partial, seq, tool_call, blocks, meta FROM messages WHERE session_id = ? AND partial = 1 ORDER BY timestamp ASC, COALESCE(seq, 0) ASC, rowid ASC",

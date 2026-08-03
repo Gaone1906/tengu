@@ -31,7 +31,7 @@ function fakeEngine(turnRunning: boolean) {
 beforeAll(async () => {
   reg = await import("../../sessions/registry.js");
   rec = await import("../status-reconciler.js");
-  db = reg.initDb();
+  db = (await import("../../shared/db.js")).initDb();
 });
 
 beforeEach(() => {

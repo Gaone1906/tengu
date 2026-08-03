@@ -1,4 +1,5 @@
-import { initDb, listSessionsByWorkItem } from '../sessions/registry.js';
+import { listSessionsByWorkItem } from '../sessions/registry.js';
+import { initDb } from '../shared/db.js';
 import {
   appendWorkItemEvent,
   effectiveMaxRounds,

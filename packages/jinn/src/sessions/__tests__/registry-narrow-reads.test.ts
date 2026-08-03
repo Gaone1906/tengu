@@ -6,6 +6,7 @@ import path from "node:path";
 // Throwaway DB before importing the registry (SESSIONS_DB resolves from JINN_HOME).
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-narrow-"));
 process.env.JINN_HOME = tmp;
+const dbModule = await import("../../shared/db.js");
 
 type Reg = typeof import("../registry.js");
 let reg: Reg;
@@ -15,7 +16,7 @@ beforeAll(async () => {
 });
 
 function seed(id: string, status: string, lastActivity: string): void {
-  reg.initDb().prepare(
+  dbModule.initDb().prepare(
     "INSERT INTO sessions (id, engine, source, source_ref, status, created_at, last_activity) VALUES (?, 'claude','web',?, ?, 't', ?)",
   ).run(id, `web:${id}`, status, lastActivity);
 }
@@ -27,7 +28,7 @@ describe("narrow read primitives for polled endpoints", () => {
     seed("c3", "error", "2026-07-03T00:00:00Z");
     expect(reg.countSessions()).toBe(3);
 
-    const plan = reg
+    const plan = dbModule
       .initDb()
       .prepare("EXPLAIN QUERY PLAN SELECT COUNT(*) AS n FROM sessions")
       .all() as Array<{ detail: string }>;
@@ -40,7 +41,7 @@ describe("narrow read primitives for polled endpoints", () => {
     expect(recent.map((s) => s.id)).toEqual(["c3", "c2"]);
 
     // LIMIT is respected in SQL, not sliced in JS.
-    const plan = reg
+    const plan = dbModule
       .initDb()
       .prepare("EXPLAIN QUERY PLAN SELECT * FROM sessions ORDER BY last_activity DESC LIMIT 2")
       .all() as Array<{ detail: string }>;

@@ -19,6 +19,7 @@ import path from "node:path";
 // Point the DB at a throwaway dir BEFORE importing the registry.
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-ref-search-"));
 process.env.JINN_HOME = tmp;
+const dbModule = await import("../../shared/db.js");
 
 type Reg = typeof import("../registry.js");
 let reg: Reg;
@@ -28,7 +29,7 @@ function mkSession(
   id: string,
   fields: { employee?: string; engine?: string; status?: string; source?: string; title?: string; promptExcerpt?: string; parent?: string; lastActivity?: string; createdAt?: string } = {},
 ): void {
-  const db = reg.initDb();
+  const db = dbModule.initDb();
   db.prepare(
     `INSERT INTO sessions (id, engine, employee, source, source_ref, status, title, prompt_excerpt, parent_session_id, created_at, last_activity)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -48,7 +49,7 @@ function mkSession(
 }
 function mkMessage(sessionId: string, role: string, content: string, ts: number): string {
   const id = `m${seq++}`;
-  reg.initDb()
+  dbModule.initDb()
     .prepare("INSERT INTO messages (id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)")
     .run(id, sessionId, role, content, ts);
   return id;
@@ -56,7 +57,7 @@ function mkMessage(sessionId: string, role: string, content: string, ts: number)
 
 beforeAll(async () => {
   reg = await import("../registry.js");
-  reg.initDb();
+  dbModule.initDb();
 });
 
 describe("searchMessages — filters + messageId anchor (GRS-020a)", () => {
@@ -303,7 +304,7 @@ describe("getMessageContext (GRS-020a)", () => {
 
   it("keeps getMessages ordering under timestamp ties (NULL seq vs numbered seq) — the bounded-window rewrite (finding 6)", () => {
     mkSession("ctx-tie");
-    const db = reg.initDb();
+    const db = dbModule.initDb();
     const ins = db.prepare("INSERT INTO messages (id, session_id, role, content, timestamp, seq) VALUES (?, ?, ?, ?, ?, ?)");
     // Same timestamp: NULL seq sorts before numbered seqs (getMessages: timestamp ASC, seq ASC).
     ins.run("tie-null", "ctx-tie", "assistant", "tie null", 9500, null);

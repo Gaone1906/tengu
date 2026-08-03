@@ -11,7 +11,7 @@ import {
 import vitestConfig from '../../../vitest.config.js';
 import setupVitest from '../../../vitest.global-setup.js';
 import { JINN_HOME, SESSIONS_DB, assertTestRunIsIsolated } from '../paths.js';
-import { initDb } from '../../sessions/registry.js';
+import { initDb } from '../db.js';
 import { createWorkItem } from '../../work-items/store.js';
 
 const createdHomes: string[] = [];

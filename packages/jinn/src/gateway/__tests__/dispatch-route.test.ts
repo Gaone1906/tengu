@@ -30,6 +30,8 @@ fs.writeFileSync(
   ].join("\n"),
 );
 
+const dbModule = await import("../../shared/db.js");
+
 type Api = typeof import("../api.js");
 type Registry = typeof import("../../sessions/registry.js");
 type WorkItems = typeof import("../../work-items/store.js");
@@ -162,7 +164,7 @@ beforeAll(async () => {
   registry = await import("../../sessions/registry.js");
   workItems = await import("../../work-items/store.js");
   org = await import("../org.js");
-  registry.initDb();
+  dbModule.initDb();
   const { setJinnAttachGate } = await import("../../mcp/attachment.js");
   setJinnAttachGate({ ok: true });
 });

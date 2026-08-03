@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
-import { initDb } from '../sessions/registry.js';
+import { initDb } from '../shared/db.js';
 import { loadConfig } from '../shared/config.js';
 import { CONFIG_PATH } from '../shared/paths.js';
 import { parseTodoId, resolveTodoIdPrefix } from './id.js';

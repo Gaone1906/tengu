@@ -125,7 +125,7 @@ beforeAll(async () => {
   reg = await import("../../sessions/registry.js");
   store = await import("../../work-items/store.js");
   feed = await import("../../work-items/workflow-event-feed.js");
-  reg.initDb();
+  (await import("../../shared/db.js")).initDb();
 });
 
 describe("POST /api/work-items/:id/status — asOperator", () => {

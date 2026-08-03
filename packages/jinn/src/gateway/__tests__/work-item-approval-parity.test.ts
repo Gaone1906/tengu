@@ -18,14 +18,13 @@ import type { ServerResponse } from "node:http";
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-wi-parity-"));
 process.env.JINN_HOME = tmp;
+const dbModule = await import("../../shared/db.js");
 
 type Api = typeof import("../api.js");
-type Reg = typeof import("../../sessions/registry.js");
 type Store = typeof import("../../work-items/store.js");
 type Approvals = typeof import("../../work-items/approvals.js");
 type Migrate = typeof import("../../work-items/migrate.js");
 let api: Api;
-let reg: Reg;
 let store: Store;
 let approvals: Approvals;
 let migrate: Migrate;
@@ -92,7 +91,7 @@ interface LegacyApprovalColumns {
 /** Simulate a pre-slice-4 database row: write the approval COLUMNS directly
  *  (the write path no longer does), exactly what the backfill later consumes. */
 function seedLegacyColumns(id: string, legacy: LegacyApprovalColumns): void {
-  reg
+  dbModule
     .initDb()
     .prepare(
       `UPDATE work_items SET approval_state = ?, approval_request = ?, approval_ref = ?, approval_target = ?,
@@ -201,17 +200,16 @@ const itemIds = new Map<string, string>();
 
 beforeAll(async () => {
   api = await import("../api.js");
-  reg = await import("../../sessions/registry.js");
   store = await import("../../work-items/store.js");
   approvals = await import("../../work-items/approvals.js");
   migrate = await import("../../work-items/migrate.js");
-  reg.initDb();
+  (await import("../../shared/db.js")).initDb();
   for (const fixture of FIXTURES) {
     const item = store.createWorkItem({ title: `parity ${fixture.name}`, department: "parity-fixture" });
     seedLegacyColumns(item.id, fixture.legacy);
     itemIds.set(fixture.name, item.id);
   }
-  migrate.backfillWorkItemApprovals(reg.initDb());
+  migrate.backfillWorkItemApprovals((await import("../../shared/db.js")).initDb());
 });
 
 describe("legacy approval-field byte-parity across the dual-read window", () => {

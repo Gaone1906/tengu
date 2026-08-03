@@ -8,6 +8,8 @@ import Database from "better-sqlite3";
 // resolved from JINN_HOME at module load).
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-media-"));
 process.env.JINN_HOME = tmp;
+const migrateModule = await import("../migrate.js");
+const dbModule = await import("../../shared/db.js");
 
 type Reg = typeof import("../registry.js");
 let reg: Reg;
@@ -18,14 +20,14 @@ beforeAll(async () => {
 
 describe("messages.media column", () => {
   it("adds a nullable media column on init", () => {
-    const db = reg.initDb();
+    const db = dbModule.initDb();
     const cols = db.prepare("PRAGMA table_info(messages)").all() as Array<{ name: string }>;
     expect(cols.map((c) => c.name)).toContain("media");
     expect(cols.map((c) => c.name)).toContain("meta");
   });
 
   it("round-trips media as parsed JSON, defaulting to undefined", () => {
-    const db = reg.initDb();
+    const db = dbModule.initDb();
     // a plain message has no media
     db.prepare(
       "INSERT INTO sessions (id, engine, source, source_ref, status, created_at, last_activity) VALUES ('s1','claude','web','web:s1','idle','t','t')",
@@ -62,7 +64,7 @@ describe("messages.media column", () => {
       "INSERT INTO messages (id, session_id, role, content, timestamp) VALUES ('m1','s','user','old',1)",
     ).run();
 
-    reg.migrateMessagesSchema(legacy);
+    migrateModule.migrateMessagesSchema(legacy);
 
     const cols = legacy.prepare("PRAGMA table_info(messages)").all() as Array<{ name: string }>;
     expect(cols.map((c) => c.name)).toContain("media");
@@ -78,7 +80,7 @@ describe("messages.media column", () => {
   });
 
   it("duplicateSession copies message media", () => {
-    const db = reg.initDb();
+    const db = dbModule.initDb();
     db.prepare(
       "INSERT INTO sessions (id, engine, engine_session_id, source, source_ref, status, created_at, last_activity) VALUES ('src','claude','eng-1','web','web:src','idle','t','t')",
     ).run();

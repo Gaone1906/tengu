@@ -8,6 +8,7 @@ import Database from "better-sqlite3";
 // resolved from JINN_HOME at module load).
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-sso-"));
 process.env.JINN_HOME = tmp;
+const migrateModule = await import("../migrate.js");
 
 type Reg = typeof import("../registry.js");
 let reg: Reg;
@@ -15,7 +16,7 @@ let resolveUserHeader: typeof import("../../gateway/api.js")["resolveUserHeader"
 
 beforeAll(async () => {
   reg = await import("../registry.js");
-  reg.initDb();
+  (await import("../../shared/db.js")).initDb();
   ({ resolveUserHeader } = await import("../../gateway/api.js"));
 });
 
@@ -97,14 +98,14 @@ describe("migrateSessionsSchema user_id migration", () => {
 
     expect(hasUserId()).toBe(false);
 
-    reg.migrateSessionsSchema(db);
+    migrateModule.migrateSessionsSchema(db);
     expect(hasUserId()).toBe(true);
     expect(
       (db.prepare("SELECT user_id FROM sessions WHERE id = ?").get("old-1") as { user_id: string | null }).user_id,
     ).toBeNull();
 
     // Re-running must not throw, must not duplicate the column, must not change data.
-    expect(() => reg.migrateSessionsSchema(db)).not.toThrow();
+    expect(() => migrateModule.migrateSessionsSchema(db)).not.toThrow();
     const userIdCols = (db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>).filter(
       (c) => c.name === "user_id",
     );

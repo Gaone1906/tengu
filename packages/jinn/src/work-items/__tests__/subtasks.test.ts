@@ -14,7 +14,7 @@ let transitions: Transitions;
 beforeAll(async () => {
   store = await import("../store.js");
   transitions = await import("../transitions.js");
-  (await import("../../sessions/registry.js")).initDb();
+  (await import("../../shared/db.js")).initDb();
 });
 
 describe("sub-tasks", () => {

@@ -239,7 +239,7 @@ beforeAll(async () => {
   approvals = await import("../../work-items/approvals.js");
   registry = await import("../../sessions/registry.js");
   callbacks = await import("../../sessions/callbacks.js");
-  registry.initDb();
+  (await import("../../shared/db.js")).initDb();
   globalThis.fetch = async () => {
     throw new Error("work-item approval route test callback transport is offline");
   };
@@ -254,9 +254,9 @@ afterEach(async () => {
   callbacks.__resetCallbackRetrySweepForTest();
 });
 
-afterAll(() => {
+afterAll(async () => {
   globalThis.fetch = processFetch;
-  registry.__closeDbForTest();
+  (await import("../../shared/db.js")).__closeDbForTest();
   fs.rmSync(tmpHome, { recursive: true, force: true });
 });
 

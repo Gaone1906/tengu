@@ -13,7 +13,7 @@ let reg: Reg;
 
 beforeAll(async () => {
   reg = await import("../registry.js");
-  reg.initDb();
+  (await import("../../shared/db.js")).initDb();
 });
 
 const base = { engine: "claude", source: "web", sourceRef: "web:pe" } as const;

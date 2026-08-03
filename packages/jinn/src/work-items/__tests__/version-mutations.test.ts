@@ -24,7 +24,7 @@ beforeAll(async () => {
   transitions = await import("../transitions.js");
   approvals = await import("../approvals.js");
   reconcile = await import("../reconcile.js");
-  registry.initDb();
+  (await import("../../shared/db.js")).initDb();
 });
 
 describe("Todo version mutation sensitivity", () => {

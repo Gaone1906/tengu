@@ -109,7 +109,7 @@ beforeAll(async () => {
   const paths = (await import("../../shared/paths.js")) as Paths;
   ({ ptySnapshotStore } = await import("../../engines/pty-snapshot.js"));
   CODEX_HOMES_DIR = paths.CODEX_HOMES_DIR;
-  registry.initDb();
+  (await import("../../shared/db.js")).initDb();
 });
 
 describe("session delete removes the per-session Codex CODEX_HOME overlay", () => {

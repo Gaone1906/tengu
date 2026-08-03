@@ -16,7 +16,7 @@ let db: import("better-sqlite3").Database;
 beforeAll(async () => {
   store = await import("../store.js");
   registry = await import("../../sessions/registry.js");
-  db = registry.initDb();
+  db = (await import("../../shared/db.js")).initDb();
 });
 
 describe("Phase A Todo identity", () => {

@@ -13,6 +13,7 @@ const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-budgets-"));
 process.env.JINN_HOME = tmpHome;
 fs.mkdirSync(path.join(tmpHome, "org"), { recursive: true });
 for (const n of ["over-cap", "under-cap"]) fs.writeFileSync(path.join(tmpHome, "org", `${n}.yaml`), `name: ${n}\nengine: codex\nmodel: gpt-5.5\npersona: Budget fixture\n`);
+const dbModule = await import("../../shared/db.js");
 const engineRuns: string[] = [];
 const engineStub = { name: "stub", run: async (o: { sessionId?: string }) => { engineRuns.push(String(o.sessionId)); return { result: "ok" }; }, isAlive: () => false, kill: () => {}, killAll: () => {} };
 const queueStub = { enqueue: async (_k: string, fn: () => Promise<void>) => { await fn(); }, clearCancelled: () => {}, clearQueue: () => {}, pauseQueue: () => {}, resumeQueue: () => {}, getPendingCount: () => 0, getTransportState: (_k: string, s: string) => s };
@@ -24,12 +25,12 @@ const apiCtx = {
 let api: typeof import("../api.js"), reg: typeof import("../../sessions/registry.js"), budgets: typeof import("../budgets.js");
 beforeAll(async () => {
   [api, reg, budgets] = await Promise.all([import("../api.js"), import("../../sessions/registry.js"), import("../budgets.js")]);
-  reg.initDb();
+  dbModule.initDb();
 });
 /** Bank prior spend for `employee` inside the current calendar month. */
 function seedSpend(employee: string, cost: number) {
   const now = new Date().toISOString();
-  reg.initDb().prepare("INSERT INTO sessions (id, engine, source, source_ref, employee, total_cost, created_at, last_activity) VALUES (?, 'codex', 'web', 'seed', ?, ?, ?, ?)").run(`seed-${employee}`, employee, cost, now, now);
+  dbModule.initDb().prepare("INSERT INTO sessions (id, engine, source, source_ref, employee, total_cost, created_at, last_activity) VALUES (?, 'codex', 'web', 'seed', ?, ?, ?, ?)").run(`seed-${employee}`, employee, cost, now, now);
 }
 /** The blocked-turn surface: an ⛔ assistant message on the session. */
 const blocked = (id: string) => reg.getMessages(id).some((m) => m.content.startsWith("⛔"));

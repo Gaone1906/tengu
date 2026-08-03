@@ -7,22 +7,20 @@ import path from "node:path";
 // keep the suite off the live DB. Set BEFORE importing the store.
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-wi-appr-"));
 process.env.JINN_HOME = tmp;
+const dbModule = await import("../../shared/db.js");
 
 type Store = typeof import("../store.js");
 type Approvals = typeof import("../approvals.js");
-type Reg = typeof import("../../sessions/registry.js");
 type ApprovalAuthority = typeof import("../../gateway/approval-authority.js");
 let store: Store;
 let approvals: Approvals;
-let reg: Reg;
 let approvalAuthority: ApprovalAuthority;
 
 beforeAll(async () => {
   store = await import("../store.js");
   approvals = await import("../approvals.js");
-  reg = await import("../../sessions/registry.js");
   approvalAuthority = await import("../../gateway/approval-authority.js");
-  reg.initDb();
+  (await import("../../shared/db.js")).initDb();
 });
 
 function kinds(id: string): string[] {
@@ -203,7 +201,7 @@ describe("decideWorkItemApproval — native consequence rules", () => {
 
 describe("approvals off-row — writes land in work_item_approvals, columns stay frozen", () => {
   function rawColumns(id: string): Record<string, unknown> {
-    return reg
+    return dbModule
       .initDb()
       .prepare(
         `SELECT approval_state, approval_request, approval_ref, approval_target,
@@ -299,7 +297,7 @@ describe("approvals off-row — writes land in work_item_approvals, columns stay
     const item = store.createWorkItem({ title: "Unique pending", status: "backlog", source: "human" });
     approvals.requestApproval(item.id, { request: "first", target: null });
     expect(() =>
-      reg
+      dbModule
         .initDb()
         .prepare(
           `INSERT INTO work_item_approvals (id, work_item_id, state, request, requested_by, requested_at)

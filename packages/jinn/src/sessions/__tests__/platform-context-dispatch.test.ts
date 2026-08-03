@@ -162,11 +162,11 @@ beforeAll(async () => {
   registry = await import("../registry.js");
   managerModule = await import("../manager.js");
   api = await import("../../gateway/api.js");
-  registry.initDb();
+  (await import("../../shared/db.js")).initDb();
 });
 
-beforeEach(() => {
-  registry.initDb().exec("DELETE FROM messages; DELETE FROM queue_items; DELETE FROM sessions;");
+beforeEach(async () => {
+  (await import("../../shared/db.js")).initDb().exec("DELETE FROM messages; DELETE FROM queue_items; DELETE FROM sessions;");
 });
 
 describe("SessionManager platform context dispatch", () => {

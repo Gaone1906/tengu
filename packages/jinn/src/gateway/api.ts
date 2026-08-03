@@ -27,6 +27,8 @@ import { buildDelegatedActivityIndex } from "../sessions/delegated-activity.js";
 import type { SessionManager } from "../sessions/manager.js";
 import { buildContext, buildPlatformContextSnapshot, type BuildContextOptions } from "../sessions/context.js";
 import { buildPlatformContextRefresh, fingerprintPlatformContext } from "../engines/platform-context.js";
+import { stripControlChars, hasControlBytes } from "../shared/sanitize.js";
+import { initDb } from "../shared/db.js";
 import {
   listSessions,
   listPinnedSessions,
@@ -44,8 +46,6 @@ import {
   searchSessionsFiltered,
   getMessageContext,
   getCostReport,
-  stripControlChars,
-  hasControlBytes,
   MESSAGE_CONTEXT_MAX_RADIUS,
   type MessageSearchFilter,
   type SearchSessionsFilter,
@@ -89,7 +89,6 @@ import {
   claimSessionDelivery,
   getFile,
   getSessionBySessionKey,
-  initDb,
   recordChildReportedToParent,
   recordTurnAccounting,
   RESTART_ACK_META_KEY,

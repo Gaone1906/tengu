@@ -10,8 +10,8 @@ process.env.JINN_HOME = tmp;
 const reg = await import("../registry.js");
 
 describe("updateSession persists model + effort_level (mid-chat switch backing store)", () => {
-  it("round-trips a model + effortLevel change", () => {
-    reg.initDb();
+  it("round-trips a model + effortLevel change", async () => {
+    (await import("../../shared/db.js")).initDb();
     const s = reg.createSession({
       engine: "claude",
       source: "web",

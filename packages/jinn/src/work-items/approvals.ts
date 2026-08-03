@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { initDb } from '../sessions/registry.js';
+import { initDb } from '../shared/db.js';
 import { resolveApprovalRouteTarget, resolveRootApprovalTarget } from '../gateway/approval-authority.js';
 import { parseTodoApprovalRef } from '../workflows/todo-approval-ref.js';
 import { currentApproval, type WorkItemApproval } from './approval-rows.js';

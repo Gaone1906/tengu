@@ -162,7 +162,7 @@ beforeAll(async () => {
   registry = await import("../../sessions/registry.js");
   store = await import("../../work-items/store.js");
   surface = await import("../workflow-todo-surface.js");
-  database = registry.initDb();
+  database = (await import("../../shared/db.js")).initDb();
 });
 
 beforeEach(() => {

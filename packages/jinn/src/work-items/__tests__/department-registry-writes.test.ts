@@ -23,7 +23,7 @@ beforeAll(async () => {
   transitions = await import("../transitions.js");
   departments = await import("../departments.js");
   migrate = await import("../migrate.js");
-  db = (await import("../../sessions/registry.js")).initDb();
+  db = (await import("../../shared/db.js")).initDb();
 });
 
 function registeredSlugs(): string[] {

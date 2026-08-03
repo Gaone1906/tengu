@@ -383,7 +383,7 @@ function seedSession(fields: { employee?: string; engine?: string; status?: stri
 beforeAll(async () => {
   api = await import("../../gateway/api.js");
   registry = await import("../../sessions/registry.js");
-  registry.initDb();
+  (await import("../../shared/db.js")).initDb();
   integrationCallerId = seedSession({ employee: "search-caller", engine: "codex", title: "Search caller" });
 });
 

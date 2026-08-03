@@ -228,7 +228,7 @@ beforeAll(async () => {
   fs.symlinkSync(outsideFile, path.join(home, "knowledge", "escape.md"));
   api = await import("../../gateway/api.js");
   registry = await import("../../sessions/registry.js");
-  registry.initDb();
+  (await import("../../shared/db.js")).initDb();
   integrationCallerId = registry.createSession({ engine: "codex", source: "web", sourceRef: "knowledge-caller", employee: "knowledge-caller" }).id;
 });
 

@@ -5,13 +5,14 @@ import path from "node:path";
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-pins-"));
 process.env.JINN_HOME = home;
+const dbModule = await import("../../shared/db.js");
 
 type Registry = typeof import("../registry.js");
 let registry: Registry;
 
 beforeAll(async () => {
   registry = await import("../registry.js");
-  registry.initDb();
+  dbModule.initDb();
 });
 
 describe("chat pins", () => {
@@ -56,7 +57,7 @@ describe("chat pins", () => {
       source: "web",
       sourceRef: "web:unpinned",
     });
-    const database = registry.initDb();
+    const database = dbModule.initDb();
     database.prepare("UPDATE sessions SET last_activity = ? WHERE id = ?").run("2026-01-01T00:00:00.000Z", older.id);
     database.prepare("UPDATE sessions SET last_activity = ? WHERE id = ?").run("2026-01-02T00:00:00.000Z", newer.id);
     database.prepare("UPDATE sessions SET last_activity = ? WHERE id = ?").run("2026-01-03T00:00:00.000Z", archived.id);
@@ -89,7 +90,7 @@ describe("chat pins", () => {
     expect(registry.deleteSession(single.id)).toBe(true);
     expect(registry.deleteSessions([bulk.id])).toBe(1);
 
-    const database = registry.initDb();
+    const database = dbModule.initDb();
     const rows = database
       .prepare("SELECT pin_key FROM chat_pins WHERE pin_key IN (?, ?)")
       .all(single.id, bulk.id);
@@ -100,11 +101,11 @@ describe("chat pins", () => {
   });
 
   it("creates chat_pins when opening a database that predates the table", () => {
-    const database = registry.initDb();
+    const database = dbModule.initDb();
     database.exec("DROP TABLE chat_pins");
-    registry.__closeDbForTest();
+    dbModule.__closeDbForTest();
 
-    const reopened = registry.initDb();
+    const reopened = dbModule.initDb();
     const table = reopened
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'chat_pins'")
       .get();

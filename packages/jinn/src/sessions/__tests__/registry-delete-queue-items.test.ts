@@ -7,6 +7,7 @@ import path from "node:path";
 // resolved from JINN_HOME at module load).
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-delq-"));
 process.env.JINN_HOME = tmp;
+const dbModule = await import("../../shared/db.js");
 
 type Reg = typeof import("../registry.js");
 let reg: Reg;
@@ -22,11 +23,11 @@ beforeAll(async () => {
   workItems = await import("../../work-items/store.js");
   managerModule = await import("../manager.js");
   ptySnapshots = await import("../../engines/pty-snapshot.js");
-  reg.initDb();
+  dbModule.initDb();
 });
 
 function queueRowCount(sessionId: string): number {
-  const db = reg.initDb();
+  const db = dbModule.initDb();
   const row = db
     .prepare("SELECT COUNT(*) as count FROM queue_items WHERE session_id = ?")
     .get(sessionId) as { count: number };
@@ -34,7 +35,7 @@ function queueRowCount(sessionId: string): number {
 }
 
 function queueStatus(itemId: string): string | null {
-  const db = reg.initDb();
+  const db = dbModule.initDb();
   const row = db
     .prepare("SELECT status FROM queue_items WHERE id = ?")
     .get(itemId) as { status: string } | undefined;

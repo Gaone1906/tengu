@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import { logger } from "../shared/logger.js";
-import { getSession, getMessages, insertMessage, updateMessageContent, updateSession, initDb, type SessionMessage } from "../sessions/registry.js";
+import { getSession, getMessages, insertMessage, updateMessageContent, updateSession, type SessionMessage } from "../sessions/registry.js";
+import { initDb } from "../shared/db.js";
 import { findTranscriptForSession } from "../engines/claude-interactive.js";
 import type { HookPayload } from "./hook-registry.js";
 

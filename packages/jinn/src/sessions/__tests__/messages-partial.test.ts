@@ -7,6 +7,8 @@ import Database from "better-sqlite3";
 // Throwaway DB before importing the registry (SESSIONS_DB resolves from JINN_HOME).
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-partial-"));
 process.env.JINN_HOME = tmp;
+const migrateModule = await import("../migrate.js");
+const dbModule = await import("../../shared/db.js");
 
 type Reg = typeof import("../registry.js");
 let reg: Reg;
@@ -16,7 +18,7 @@ let reg: Reg;
 let foldPartialText: typeof import("../../gateway/api.js").foldPartialText;
 
 function newSession(id: string): void {
-  reg.initDb().prepare(
+  dbModule.initDb().prepare(
     "INSERT INTO sessions (id, engine, source, source_ref, status, created_at, last_activity) VALUES (?, 'claude','web',?, 'running','t','t')",
   ).run(id, `web:${id}`);
 }
@@ -28,7 +30,7 @@ beforeAll(async () => {
 
 describe("messages partial (mid-turn streaming) blocks", () => {
   it("adds nullable partial/seq/tool_call/tool_id/blocks/meta columns on init", () => {
-    const db = reg.initDb();
+    const db = dbModule.initDb();
     const cols = (db.prepare("PRAGMA table_info(messages)").all() as Array<{ name: string }>).map((c) => c.name);
     expect(cols).toContain("partial");
     expect(cols).toContain("seq");
@@ -271,11 +273,11 @@ describe("messages partial (mid-turn streaming) blocks", () => {
       payload: { action: "trigger-approval-decided" },
     });
 
-    const beforeReplay = reg.initDb()
+    const beforeReplay = dbModule.initDb()
       .prepare("SELECT content, blocks FROM messages WHERE session_id = ?")
       .get("workflow-activity-order");
     reg.applyBlockEnvelope("workflow-activity-order", approvalDecided);
-    expect(reg.initDb().prepare("SELECT content, blocks FROM messages WHERE session_id = ?").get("workflow-activity-order"))
+    expect(dbModule.initDb().prepare("SELECT content, blocks FROM messages WHERE session_id = ?").get("workflow-activity-order"))
       .toEqual(beforeReplay);
   });
 
@@ -419,7 +421,7 @@ describe("messages partial (mid-turn streaming) blocks", () => {
 
   it("drops obsolete stored block types when reading messages", () => {
     newSession("block-legacy-types");
-    reg.initDb().prepare(
+    dbModule.initDb().prepare(
       "INSERT INTO messages (id, session_id, role, content, timestamp, blocks) VALUES ('legacy-blocks', ?, 'assistant', 'Mixed blocks', ?, ?)",
     ).run("block-legacy-types", Date.now(), JSON.stringify([
       {
@@ -442,7 +444,7 @@ describe("messages partial (mid-turn streaming) blocks", () => {
 
   it("removing a block from a mixed row preserves the row text", () => {
     newSession("block-mixed");
-    reg.initDb().prepare(
+    dbModule.initDb().prepare(
       "INSERT INTO messages (id, session_id, role, content, timestamp, blocks) VALUES ('mixed', ?, 'assistant', 'Keep this answer text', ?, ?)",
     ).run("block-mixed", Date.now(), JSON.stringify([{
       id: "plan",
@@ -465,7 +467,7 @@ describe("messages partial (mid-turn streaming) blocks", () => {
 
   it("patching a block on a mixed row preserves the row text", () => {
     newSession("block-mixed-patch");
-    reg.initDb().prepare(
+    dbModule.initDb().prepare(
       "INSERT INTO messages (id, session_id, role, content, timestamp, blocks) VALUES ('mixed-patch', ?, 'assistant', 'Keep this answer text', ?, ?)",
     ).run("block-mixed-patch", Date.now(), JSON.stringify([{
       id: "plan",
@@ -522,7 +524,7 @@ describe("messages partial (mid-turn streaming) blocks", () => {
     );
     legacy.prepare("INSERT INTO messages (id, session_id, role, content, timestamp) VALUES ('m1','s','user','old',1)").run();
 
-    reg.migrateMessagesSchema(legacy);
+    migrateModule.migrateMessagesSchema(legacy);
 
     const cols = (legacy.prepare("PRAGMA table_info(messages)").all() as Array<{ name: string }>).map((c) => c.name);
     expect(cols).toContain("partial");

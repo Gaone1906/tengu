@@ -20,7 +20,7 @@ import {
   CLAUDE_SKILLS_DIR,
   AGENTS_SKILLS_DIR,
 } from "../shared/paths.js";
-import { initDb } from "../sessions/registry.js";
+import { initDb } from "../shared/db.js";
 import { getPackageVersion } from "../shared/version.js";
 import { deriveTodoIdPrefix } from "../work-items/id.js";
 import {

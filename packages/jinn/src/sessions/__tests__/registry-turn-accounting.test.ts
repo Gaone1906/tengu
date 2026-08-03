@@ -6,6 +6,7 @@ import path from "node:path";
 // Throwaway DB before importing the registry (SESSIONS_DB resolves from JINN_HOME).
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-turn-accounting-"));
 process.env.JINN_HOME = tmp;
+const dbModule = await import("../../shared/db.js");
 
 type Reg = typeof import("../registry.js");
 let reg: Reg;
@@ -15,13 +16,13 @@ beforeAll(async () => {
 });
 
 function seed(id: string, source: string, engine = "claude"): void {
-  reg.initDb().prepare(
+  dbModule.initDb().prepare(
     "INSERT INTO sessions (id, engine, source, source_ref, status, created_at, last_activity) VALUES (?, ?, ?, ?, 'idle', '2026-07-25T00:00:00Z', '2026-07-25T00:00:00Z')",
   ).run(id, engine, source, `${source}:${id}`);
 }
 
 function totals(id: string): { cost: number; turns: number } {
-  const row = reg.initDb()
+  const row = dbModule.initDb()
     .prepare("SELECT total_cost AS cost, total_turns AS turns FROM sessions WHERE id = ?")
     .get(id) as { cost: number; turns: number };
   return row;

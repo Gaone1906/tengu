@@ -16,9 +16,9 @@ let reg: Reg;
 beforeAll(async () => {
   reg = await import("../../sessions/registry.js");
   files = await import("../files.js");
-  reg.initDb();
+  (await import("../../shared/db.js")).initDb();
   // Seed a session to attach to.
-  const db = reg.initDb();
+  const db = (await import("../../shared/db.js")).initDb();
   db.prepare(
     "INSERT INTO sessions (id, engine, source, source_ref, status, created_at, last_activity) VALUES ('sess-att','claude','web','web:sess-att','idle','t','t')",
   ).run();

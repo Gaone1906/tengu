@@ -18,7 +18,7 @@ beforeAll(async () => {
   paths = await import("../../shared/paths.js");
   reg = await import("../../sessions/registry.js");
   files = await import("../files.js");
-  reg.initDb();
+  (await import("../../shared/db.js")).initDb();
 });
 
 /** Simulate a first-message upload that landed in FILES_DIR before a session existed. */

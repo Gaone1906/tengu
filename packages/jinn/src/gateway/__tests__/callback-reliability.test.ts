@@ -8,6 +8,7 @@ import type { Engine, EngineRunOpts } from "../../shared/types.js";
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-callback-reliability-"));
 process.env.JINN_HOME = home;
+const dbModule = await import("../../shared/db.js");
 
 type Api = typeof import("../api.js");
 type Registry = typeof import("../../sessions/registry.js");
@@ -217,11 +218,11 @@ beforeAll(async () => {
   queueModule = await import("../../sessions/queue.js");
   callbacks = await import("../../sessions/callbacks.js");
   workItems = await import("../../work-items/store.js");
-  registry.initDb();
+  dbModule.initDb();
 });
 
 beforeEach(() => {
-  registry.initDb().exec(`
+  dbModule.initDb().exec(`
     DELETE FROM work_item_events;
     DELETE FROM callback_deliveries;
     DELETE FROM queue_items;
@@ -261,15 +262,15 @@ describe("parent callback reliability", () => {
         expect(queue.isRunning(manager.sessionKey)).toBe(false);
         expect(seenPrompts).toHaveLength(1);
       });
-      const accepted = registry.initDb().prepare(`
+      const accepted = dbModule.initDb().prepare(`
         SELECT id, status FROM callback_deliveries WHERE delivery_kind = 'manager-visibility'
       `).get();
       callbacks.notifyManagerVisibility(manager.id, details);
       await new Promise((resolve) => setTimeout(resolve, 25));
-      expect(registry.initDb().prepare(`
+      expect(dbModule.initDb().prepare(`
         SELECT COUNT(*) AS n FROM callback_deliveries WHERE delivery_kind = 'manager-visibility'
       `).get()).toEqual({ n: 1 });
-      expect(registry.initDb().prepare(`
+      expect(dbModule.initDb().prepare(`
         SELECT id, status FROM callback_deliveries WHERE delivery_kind = 'manager-visibility'
       `).get()).toEqual(accepted);
       expect(registry.getMessages(manager.id).filter((message) => message.role === "notification"))
@@ -338,7 +339,7 @@ describe("parent callback reliability", () => {
         expect(queue.isRunning(parent.sessionKey)).toBe(false);
         expect(seenPrompts).toHaveLength(1);
       });
-      const rateLimitedPayload = JSON.parse((registry.initDb().prepare(`
+      const rateLimitedPayload = JSON.parse((dbModule.initDb().prepare(`
         SELECT payload FROM callback_deliveries WHERE delivery_kind = 'rate-limited'
       `).get() as { payload: string }).payload) as Record<string, unknown>;
       expect(rateLimitedPayload).not.toHaveProperty("meta");
@@ -359,7 +360,7 @@ describe("parent callback reliability", () => {
         expect(queue.isRunning(parent.sessionKey)).toBe(false);
         expect(seenPrompts).toHaveLength(3);
       });
-      expect(registry.initDb().prepare(`
+      expect(dbModule.initDb().prepare(`
         SELECT delivery_kind AS kind, COUNT(*) AS n
         FROM callback_deliveries
         GROUP BY delivery_kind
@@ -441,7 +442,7 @@ describe("parent callback reliability", () => {
           expect(seenPrompts).toHaveLength(1);
         });
         expect(registry.getMessages(parent.id).filter((message) => message.role === "notification")).toHaveLength(1);
-        expect(registry.initDb().prepare(`
+        expect(dbModule.initDb().prepare(`
           SELECT COUNT(*) AS n FROM callback_deliveries WHERE delivery_kind = 'rate-limit-resumed'
         `).get()).toEqual({ n: 1 });
         expect(events.filter(({ event }) => event === "session:notification")).toHaveLength(1);
@@ -473,7 +474,7 @@ describe("parent callback reliability", () => {
       callbacks.notifyRateLimited(active);
       callbacks.notifyRateLimitResumed(active);
       await eventually(() => {
-        const rows = registry.initDb().prepare(`
+        const rows = dbModule.initDb().prepare(`
           SELECT delivery_kind AS kind FROM callback_deliveries ORDER BY delivery_kind
         `).all();
         expect(rows).toEqual([{ kind: "rate-limit-resumed" }, { kind: "rate-limited" }]);
@@ -543,7 +544,7 @@ describe("parent callback reliability", () => {
         expect(queue.isRunning(parent.sessionKey)).toBe(false);
         expect(seenPrompts).toEqual([expect.stringContaining("one immutable completion")]);
         expect(registry.getMessages(parent.id).filter((message) => message.role === "notification")).toHaveLength(1);
-        expect(registry.initDb().prepare("SELECT COUNT(*) AS n FROM callback_deliveries").get()).toEqual({ n: 1 });
+        expect(dbModule.initDb().prepare("SELECT COUNT(*) AS n FROM callback_deliveries").get()).toEqual({ n: 1 });
       });
       expect(routeFetch).toHaveBeenCalledOnce();
       expect(events.filter(({ event }) => event === "session:notification")).toHaveLength(1);
@@ -623,7 +624,7 @@ describe("parent callback reliability", () => {
       });
 
       await eventually(() => {
-        const receipt = registry.initDb().prepare(`
+        const receipt = dbModule.initDb().prepare(`
           SELECT status FROM callback_deliveries WHERE delivery_kind = 'delegation-completion-nudge'
         `).get();
         expect(receipt).toEqual({ status: "accepted" });
@@ -631,7 +632,7 @@ describe("parent callback reliability", () => {
       expect(routeFetch).toHaveBeenCalledOnce();
       expect(registry.getMessages(child.id).filter((message) => message.role === "notification")).toHaveLength(1);
       expect(registry.getMessages(parent.id)).toEqual([]);
-      expect(registry.initDb().prepare(`
+      expect(dbModule.initDb().prepare(`
         SELECT COUNT(*) AS n FROM callback_deliveries WHERE delivery_kind = 'parent-completion'
       `).get()).toEqual({ n: 0 });
       expect(registry.getSession(child.id)?.transportMeta).toMatchObject({
@@ -760,7 +761,7 @@ describe("parent callback reliability", () => {
       parentSessionId: parent.id,
       prompt: "finish after poison",
     });
-    const database = registry.initDb();
+    const database = dbModule.initDb();
     database.pragma("ignore_check_constraints = ON");
     database.prepare(`
       INSERT INTO callback_deliveries (
@@ -857,7 +858,7 @@ describe("parent callback reliability", () => {
     ]);
     const stored = registry.getSessionDelivery(delivery.id)!;
     expect(stored).toMatchObject({ status: "accepted" });
-    expect(registry.initDb().prepare("SELECT COUNT(*) AS n FROM queue_items WHERE id = ?").get(stored.queueItemId))
+    expect(dbModule.initDb().prepare("SELECT COUNT(*) AS n FROM queue_items WHERE id = ?").get(stored.queueItemId))
       .toEqual({ n: 1 });
     expect(events.filter(({ event }) => event === "session:notification")).toEqual([
       expect.objectContaining({
@@ -1218,7 +1219,7 @@ describe("callback live retry sweep", () => {
 
     callbacks.notifyParentSession(child, { result: "accepted once" });
     await vi.advanceTimersByTimeAsync(0);
-    const delivery = registry.initDb().prepare(`
+    const delivery = dbModule.initDb().prepare(`
       SELECT id FROM callback_deliveries WHERE delivery_kind = 'parent-completion'
     `).get() as { id: string };
     await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1_000);
@@ -1241,7 +1242,7 @@ describe("callback live retry sweep", () => {
       await vi.advanceTimersByTimeAsync(delay);
       await vi.runAllTicks();
     }
-    const delivery = registry.initDb().prepare(`SELECT id FROM callback_deliveries`).get() as { id: string };
+    const delivery = dbModule.initDb().prepare(`SELECT id FROM callback_deliveries`).get() as { id: string };
     expect(registry.getSessionDelivery(delivery.id)).toMatchObject({
       status: "dead_letter",
       attemptCount: callbacks.CALLBACK_DELIVERY_MAX_ATTEMPTS,

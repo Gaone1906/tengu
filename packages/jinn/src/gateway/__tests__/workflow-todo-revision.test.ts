@@ -7,13 +7,13 @@ import path from "node:path";
 // keep the suite off the live DB. Set BEFORE importing the store.
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-wf-todo-revise-"));
 process.env.JINN_HOME = tmp;
+const dbModule = await import("../../shared/db.js");
 
 type Store = typeof import("../../work-items/store.js");
 type Approvals = typeof import("../../work-items/approvals.js");
 type Comments = typeof import("../../work-items/comments.js");
 type Surface = typeof import("../workflow-todo-surface.js");
 type Transitions = typeof import("../../work-items/transitions.js");
-type Reg = typeof import("../../sessions/registry.js");
 let store: Store;
 let approvals: Approvals;
 let comments: Comments;
@@ -31,8 +31,7 @@ beforeAll(async () => {
   comments = await import("../../work-items/comments.js");
   surface = await import("../workflow-todo-surface.js");
   transitions = await import("../../work-items/transitions.js");
-  const reg: Reg = await import("../../sessions/registry.js");
-  reg.initDb();
+  dbModule.initDb();
 });
 
 let seq = 0;

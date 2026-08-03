@@ -48,7 +48,7 @@ function makeHome(seed?: string): string {
   return home;
 }
 
-/** Boot the registry against `home` in a fresh module graph — SESSIONS_DB is
+/** Boot the database against `home` in a fresh module graph — SESSIONS_DB is
  * resolved once per module instance from JINN_HOME. Returns logged warnings. */
 async function bootRegistry(home: string): Promise<string[]> {
   process.env.JINN_HOME = home;
@@ -56,9 +56,9 @@ async function bootRegistry(home: string): Promise<string[]> {
   const warnings: string[] = [];
   const { logger } = await import("../../shared/logger.js");
   vi.spyOn(logger, "warn").mockImplementation((message: string) => { warnings.push(message); });
-  const registry = await import("../registry.js");
-  registry.initDb();
-  registry.__closeDbForTest();
+  const dbModule = await import("../../shared/db.js");
+  dbModule.initDb();
+  dbModule.__closeDbForTest();
   return warnings;
 }
 

@@ -191,7 +191,7 @@ function apiFetch(): typeof fetch {
 beforeAll(async () => {
   api = await import("../../gateway/api.js");
   registry = await import("../../sessions/registry.js");
-  registry.initDb();
+  (await import("../../shared/db.js")).initDb();
   integrationCallerId = registry.createSession({ engine: "codex", source: "web", sourceRef: "org-caller", employee: "org-caller" }).id;
   // Generic synthetic org — three YAMLs under the temp ORG_DIR.
   const orgDir = path.join(process.env.JINN_HOME!, "org");
