@@ -1,139 +1,17 @@
 /**
- * Jinn Talk — backend protocol (Phase 2, real e2e voice loop).
+ * TTS engine contract.
  *
- * Canonical types shared by the /talk Agent-SDK turn, the tool dispatcher, the
- * Kokoro TTS sidecar, and the HTTP/WS plumbing. The card shapes MUST stay 1:1
- * with the frontend renderer in packages/web/src/routes/talk/types.ts — the
- * agent's show_card tool input is exactly this union.
+ * The shared types and event names for Kokoro speech synthesis, implemented by
+ * kokoro.ts and consumed by tts-stream.ts. Nothing else lives here.
  */
 
-export type TalkState = "idle" | "listening" | "thinking" | "speaking"
-export type JobStatus = "queued" | "running" | "done" | "error"
-
-// ---------------------------------------------------------------------------
-// Content cards — 1:1 mirror of web/src/routes/talk/types.ts `Card`.
-// ---------------------------------------------------------------------------
-export interface CardBase {
-  id: string
-  title?: string
-  badge?: string
-}
-export interface TextCard extends CardBase { type: "text"; body: string; tldr?: string }
-export interface StatCard extends CardBase {
-  type: "stat"; value: string; label: string
-  delta?: { dir: "up" | "down" | "flat"; value: string }
-}
-export interface ListCard extends CardBase {
-  type: "list"; ordered?: boolean; items: Array<{ text: string; done?: boolean }>
-}
-export interface ImageCard extends CardBase { type: "image"; src: string; alt?: string; caption?: string }
-export interface ImageGridCard extends CardBase { type: "image-grid"; images: Array<{ src: string; alt?: string }> }
-export interface StatusCard extends CardBase {
-  type: "status"; label: string; progress: number; state: JobStatus; chips?: string[]
-}
-export interface AgentActivity {
-  id: string; name: string; role: string; status: JobStatus; detail?: string; progress?: number
-}
-export interface AgentActivityCard extends CardBase { type: "agent-activity"; agents: AgentActivity[] }
-export interface LinkCard extends CardBase { type: "link"; url: string; label: string; source?: string }
-
-// Decision-support cards — INTERACTIVE (buttons send a synthetic user message
-// back to the orchestrator; see web use-talk `cardAction`).
-export interface CardKV { k: string; v: string }
-export interface ChoiceCard extends CardBase {
-  type: "choice"; prompt?: string
-  options: Array<{ id: string; label: string; detail?: string; badge?: string; meta?: CardKV[] }>
-}
-export interface ComparisonCard extends CardBase {
-  type: "comparison"; columns: string[]
-  rows: Array<{ label: string; cells: string[]; highlight?: number }>
-}
-export interface ApprovalCard extends CardBase {
-  type: "approval"; summary: string; details?: CardKV[]
-  confirmLabel?: string; rejectLabel?: string; danger?: boolean
-}
-export interface KeyValueCard extends CardBase {
-  type: "keyvalue"; rows: Array<{ k: string; v: string; tone?: "good" | "bad" | "neutral" }>
-}
-export interface DiffCard extends CardBase {
-  type: "diff"; hunks: Array<{ label?: string; before?: string; after?: string }>
-}
-
-export type Card =
-  | TextCard | StatCard | ListCard | ImageCard
-  | ImageGridCard | StatusCard | AgentActivityCard | LinkCard
-  | ChoiceCard | ComparisonCard | ApprovalCard | KeyValueCard | DiffCard
-
-export interface TrackerTask {
-  id: string
-  label: string
-  owner: string
-  status: JobStatus
-  progress?: number
-  result?: string
-}
-
-// ---------------------------------------------------------------------------
-// WebSocket events broadcast to web clients (envelope: { event, payload, ts }).
-// Names are the single source of truth — frontend mirrors these.
-// ---------------------------------------------------------------------------
+/** WebSocket event names emitted during synthesis (envelope: { event, payload, ts }). */
 export const TALK_EVENTS = {
-  state: "talk:state",
-  transcript: "talk:transcript",
-  say: "talk:say",
   audio: "talk:audio",
-  card: "talk:card",
-  cardUpdate: "talk:card:update",
-  cardDismiss: "talk:card:dismiss",
-  cardClear: "talk:card:clear",
-  task: "talk:task",
-  focus: "talk:focus",
-  graph: "talk:graph",
-  threadLabel: "talk:thread:label",
-  engine: "talk:engine",
-  turnDone: "talk:turn:done",
   ttsDownloadProgress: "talk:tts:download:progress",
   ttsDownloadComplete: "talk:tts:download:complete",
   ttsDownloadError: "talk:tts:download:error",
 } as const
-
-export interface TalkStateEvent { sessionId: string; state: TalkState }
-export interface TalkTranscriptEvent { sessionId: string; role: "user"; text: string }
-/** A chunk of the assistant's spoken reply (also what TTS voices). */
-export interface TalkSayEvent { sessionId: string; text: string; final?: boolean }
-/** One sentence-level TTS audio chunk, base64-encoded, ordered by seq. */
-export interface TalkAudioEvent { sessionId: string; seq: number; mime: string; dataBase64: string; last?: boolean }
-export interface TalkCardEvent { sessionId: string; card: Card }
-export interface TalkCardUpdateEvent { sessionId: string; cardId: string; patch: Partial<Card> }
-export interface TalkCardDismissEvent { sessionId: string; cardId: string }
-export interface TalkCardClearEvent { sessionId: string }
-export interface TalkTaskEvent { sessionId: string; task: TrackerTask }
-export interface TalkTurnDoneEvent { sessionId: string; ok: boolean; error?: string }
-/**
- * The active orchestrator engine/model changed (POST /api/talk/engine). The model
- * applies on the live session's next turn; the engine applies in place when the
- * live session is idle. Harmless if a client doesn't handle it.
- */
-export interface TalkEngineEvent {
-  engine: string | null
-  model: string
-  /** True when the requested/configured engine was unavailable and we fell back. */
-  fallback: boolean
-}
-
-// ---------------------------------------------------------------------------
-// HTTP request/response shapes.
-// ---------------------------------------------------------------------------
-export interface TalkTurnRequest { sessionId: string; text: string }
-export interface TalkTurnResponse { ok: boolean; error?: string }
-export interface TalkTtsRequest { text: string; voice?: string }
-export interface TalkStatusResponse {
-  ttsAvailable: boolean
-  ttsDownloading: boolean
-  progress: number
-  voice: string
-  ready: boolean
-}
 
 /** Broadcast function injected everywhere (matches gateway server's `emit`). */
 export type Emit = (event: string, payload: unknown) => void
@@ -159,30 +37,4 @@ export interface Tts {
   /** Download Kokoro weights on first use, emitting talk:tts:download:* events. */
   download(emit: Emit): Promise<void>
   shutdown(): void
-}
-
-// ---------------------------------------------------------------------------
-// Voice orchestrator (Path 1) — WS events the gateway emits for the Talk surface
-// on top of the canonical `talk:*` set above. `talk:focus` tells the UI which
-// COO child the orchestrator is currently delegating to / narrating, so the
-// avatar can animate to that "channel".
-// ---------------------------------------------------------------------------
-export interface TalkFocusEvent {
-  /** The COO child session now in focus (the orchestrator's parentSessionId === orchestrator). */
-  cooId: string
-  /** Short human label for the channel (derived from the brief). */
-  label: string
-  /** The orchestrator session that owns this COO child. */
-  parentId: string
-}
-
-/**
- * The orchestrator (or a process on its behalf) sets/refines a COO thread's
- * topic label. `sessionId` is the orchestrator (talk) surface; `threadId` is the
- * COO child session id. POST /api/talk/thread/label emits this.
- */
-export interface TalkThreadLabelEvent {
-  sessionId: string
-  threadId: string
-  label: string
 }

@@ -7,7 +7,6 @@ import {
   ensureCallbackAttemptToken,
   listDelegationCompletionNudgedSessions,
   listPendingSessionDeliveries,
-  listSessionsBySource,
   markDelegationCompletionSurfaced,
 } from "./registry.js";
 import { loadConfig } from "../shared/config.js";
@@ -15,7 +14,6 @@ import { logger } from "../shared/logger.js";
 import { STRUCTURED_MESSAGE_BODY_MAX_CHARS, type Session } from "../shared/types.js";
 import { GATEWAY_INFO_FILE } from "../shared/paths.js";
 import { gatewayBaseUrl, readGatewayInfo } from "../gateway/gateway-info.js";
-import { hydrateAllAttachments, talkSessionsAttachedTo } from "../talk/attachments.js";
 import type { ChatBlockEnvelope, JsonObject } from "../shared/types.js";
 import { enforceDelegationCompletionContract } from "./delegation-completion-contract.js";
 import type { SessionDelivery, SessionDeliveryPayload } from "../shared/types.js";
@@ -97,12 +95,6 @@ export function notifyParentSession(
   options?: { alwaysNotify?: boolean },
 ): void {
   if (!result.error && !hasMeaningfulReply(result.result)) return;
-
-  // Attachment wakes are a SEPARATE relationship from parent ownership: a talk
-  // session can soft-link any session and must be woken when it finishes, even if
-  // that session has no parent (or its parent is elsewhere). So this runs before
-  // the parent early-returns and is independent of alwaysNotify.
-  notifyAttachedTalkSessions(childSession, result);
 
   if (!childSession.parentSessionId) return;
 
@@ -198,96 +190,6 @@ export async function recoverSessionDeliveryStateOnStartup(): Promise<{
   return { pendingRecovered, orphanedRecovered };
 }
 
-/** Label for a talk wake: title → employee → "a thread". */
-function talkLabel(s: Session): string {
-  return s.title || s.employee || "a thread";
-}
-
-/**
- * Talk-tailored wake (voice-friendly): no UUIDs/URLs in the engine `message`, a
- * clean banner in `displayMessage`. Shared by owned-thread callbacks and
- * attached-session wakes so both speak in the same voice.
- */
-export function buildTalkWake(
-  label: string,
-  result: { result?: string | null; error?: string | null },
-): { message: string; displayMessage: string } {
-  if (result.error) {
-    const raw = result.error.trim();
-    const errPreview = raw.length > 500 ? raw.slice(0, 500) + "…" : raw;
-    return {
-      message:
-        `⚠️ Thread "${label}" hit an error.\n\n` +
-        `${errPreview}\n\n` +
-        `Tell the operator plainly in one short sentence — no IDs, no URLs — and offer a next step.`,
-      displayMessage: `⚠️ Thread "${label}" hit an error\n${_clean(raw, 220)}`,
-    };
-  }
-  const raw = (result.result || "").trim() || "(no output)";
-  const llmPreview = raw.length > 500 ? raw.slice(0, 500) + "…" : raw;
-  return {
-    message:
-      `📩 Thread "${label}" reported back.\n\n` +
-      `Reply preview:\n${llmPreview}\n\n` +
-      `Narrate the outcome aloud in 1–2 short sentences — no IDs, no URLs, no markdown. ` +
-      `If there is a link or detail worth seeing, push a card. ` +
-      `To follow up, delegate to this thread via /api/talk/delegate (its id is in your roster).`,
-    displayMessage: `📩 Thread "${label}" reported back\n${_clean(raw, 220)}`,
-  };
-}
-
-/**
- * Wake every talk session that has ATTACHED the just-finished session. Fire-and-
- * forget. De-dup: an owned child (parent IS the talk session) is already woken by
- * the parent-callback path, so it's skipped here to avoid a double notification.
- */
-export function notifyAttachedTalkSessions(
-  completedSession: Session,
-  result: { result?: string | null; error?: string | null },
-): void {
-  _notifyAttached(completedSession, result).catch((err) => {
-    logger.warn(`[callbacks] Failed to wake attached talk sessions: ${err instanceof Error ? err.message : String(err)}`);
-  });
-}
-
-async function _notifyAttached(
-  completedSession: Session,
-  result: { result?: string | null; error?: string | null },
-): Promise<void> {
-  // Lazy one-time scan so attachments persisted before a restart are visible
-  // (this is the first/primary talkSessionsAttachedTo consumer on the wake path).
-  hydrateAllAttachments({
-    getSession,
-    listTalkSessions: () => listSessionsBySource("talk", 50),
-  });
-  const talkIds = talkSessionsAttachedTo(completedSession.id);
-  if (talkIds.length === 0) return;
-
-  const { message, displayMessage } = buildTalkWake(talkLabel(completedSession), result);
-  const terminalOutcome = completedSession.attemptOutcome ?? (result.error ? "failed" : "succeeded");
-  const terminalVersion = Math.max(1, completedSession.attemptTerminalVersion ?? 0);
-  const attemptToken = completedSession.attemptToken
-    ?? ensureCallbackAttemptToken(completedSession.id, terminalOutcome, terminalVersion);
-  if (!attemptToken) throw new Error(`child ${completedSession.id} has no immutable callback attempt token`);
-  const deliveries = talkIds.flatMap((talkId) => {
-    if (talkId === completedSession.parentSessionId) return []; // owned child — already notified
-    const talk = getSession(talkId);
-    if (!talk || talk.source !== "talk" || talk.status === "error") return [];
-    const { delivery } = claimSessionDelivery({
-      targetSessionId: talkId,
-      sourceKind: "session",
-      sourceId: completedSession.id,
-      sourceAttempt: attemptToken,
-      sourceOutcome: terminalOutcome,
-      sourceVersion: terminalVersion,
-      deliveryKind: "talk-attachment",
-      payload: { message, displayMessage },
-    });
-    return delivery.status === "accepted" ? [] : [delivery];
-  });
-  await Promise.allSettled(deliveries.map((delivery) => deliverClaimedSessionDelivery(delivery.id)));
-}
-
 /**
  * Notify the parent session that a child session has been rate-limited and will auto-resume.
  * Fire-and-forget — errors are logged but never rethrown.
@@ -320,17 +222,8 @@ export function notifyRateLimitResumed(
 ): void {
   if (!childSession.parentSessionId) return;
 
-  const parent = getSession(childSession.parentSessionId);
-  const isTalkParent = parent?.source === "talk";
-
-  let message: string;
-  if (isTalkParent) {
-    const label = talkLabel(childSession);
-    message = `🔄 Thread "${label}" has resumed after rate limit cleared.`;
-  } else {
-    const employeeName = childSession.employee || "Unknown";
-    message = `🔄 Employee "${employeeName}" (session ${childSession.id}) has resumed after rate limit cleared.`;
-  }
+  const employeeName = childSession.employee || "Unknown";
+  const message = `🔄 Employee "${employeeName}" (session ${childSession.id}) has resumed after rate limit cleared.`;
 
   const terminalVersion = Math.max(1, childSession.attemptTerminalVersion ?? 0);
   const attemptToken = childSession.attemptToken
@@ -400,19 +293,11 @@ async function _sendNotification(
   // it carries full context and the API hints it needs to follow up.
   // `displayMessage` is the clean, human-facing version shown in the web UI
   // notification banner.
-  //
-  // For /talk parents (source:"talk") the engine is the voice orchestrator: UUIDs
-  // and raw API endpoints must NOT appear (they'd be read aloud). Use a label-based
-  // wake message with a narration instruction instead.
-  const isTalkParent = parent.source === "talk";
-
   let message: string;
   let displayMessage: string;
   let notificationMeta: JsonObject | undefined;
   let notificationBlock: ChatBlockEnvelope | undefined;
-  if (isTalkParent) {
-    ({ message, displayMessage } = buildTalkWake(talkLabel(childSession), result));
-  } else if (result.error) {
+  if (result.error) {
     message = `⚠️ Employee "${employeeName}" (child session ${childId}) hit an error and could not finish: ${result.error}`;
     displayMessage = `⚠️ ${employeeName} couldn't finish\n${_clean(result.error, 220)}`;
     if (isTerminal) {
@@ -440,7 +325,7 @@ async function _sendNotification(
     }
   }
 
-  if (isTerminal && !isTalkParent && childSession.workItemId) {
+  if (isTerminal && childSession.workItemId) {
     notificationBlock = {
       op: "patch",
       block: {

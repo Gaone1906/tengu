@@ -154,7 +154,7 @@ import { isJsonMediaType } from "./media-type.js";
 import { readJsonlTail } from "./jsonl-tail.js";
 import { completedStreamedBlockIds } from "./streamed-blocks.js";
 import { forwardWorkflowTodoComment } from "./workflow-todo-surface.js";
-import { deliverClaimedSessionDelivery, notifyParentSession, notifyRateLimited, notifyRateLimitResumed, notifyOperatorChannel, notifyAttachedTalkSessions, recoverPendingSessionDeliveries } from "../sessions/callbacks.js";
+import { deliverClaimedSessionDelivery, notifyParentSession, notifyRateLimited, notifyRateLimitResumed, notifyOperatorChannel, recoverPendingSessionDeliveries } from "../sessions/callbacks.js";
 import { clearDelegationCompletionContract, DELEGATION_COMPLETION_TRACKED_META_KEY } from "../sessions/delegation-completion-contract.js";
 import { clipSessionMessage, sessionCommGuards, prepareLateralSend, isDescendantOf, resolveCallerIdentity, type CallerIdentity } from "./session-comm-guards.js";
 import {
@@ -292,17 +292,11 @@ import {
   PAIRING_CHALLENGE_TTL_MS,
 } from "./pairing-challenge.js";
 import { markTranscriptSyncedThrough, scheduleOnLoadTailSync, transcriptEntryText } from "./external-turns.js";
-import { getOrchestratorPersona } from "../talk/orchestrator-persona.js";
 import {
-  feedTalkText,
-  flushTalkSpeech,
-  discardTalkSpeech,
   streamTtsSentences,
   ttsStatus,
   validateTtsText,
 } from "../talk/tts-stream.js";
-import { isTalkMuted } from "../talk/mute-state.js";
-import { maybeEmitTalkGraph } from "../talk/graph.js";
 import { onboardingNeeded, applyEngineChoice } from "./onboarding-policy.js";
 import { restartDetached, type RestartDetachedOptions } from "./lifecycle.js";
 import { updateSkillContent } from "./skills.js";
@@ -518,7 +512,6 @@ async function openInstanceMigration(
       });
       throw error;
     }
-    maybeEmitTalkGraph(session.id, "added", { getSession, emit: context.emit });
     return { sessionId: session.id, migrationKey, reused: false };
   });
   migrationOpenLocks.set(migrationKey, create);
@@ -714,13 +707,6 @@ function dispatchWebSessionRun(
           error: errMsg,
         });
       }
-      // This outer dispatch-error path bypasses notifyParentSession (run() failed
-      // before its own completion handling), so wake any attached talk sessions
-      // here too — otherwise an attachment wake is silently lost on a hard failure.
-      if (erroredOnDispatch) {
-        notifyAttachedTalkSessions(erroredOnDispatch, { error: errMsg });
-        maybeEmitTalkGraph(session.id, "completed", { getSession, emit: context.emit });
-      }
     });
   };
 
@@ -734,7 +720,7 @@ function dispatchWebSessionRun(
 /**
  * GET /api/skills description cache, keyed by skill dir name and invalidated
  * by SKILL.md mtime (statSync is far cheaper than re-reading + re-parsing ~70
- * files per request). Mirrors the mtime-cache in talk/orchestrator-persona.ts.
+ * files per request).
  */
 const skillDescriptionCache = new Map<string, { mtimeMs: number; description: string }>();
 
@@ -3199,7 +3185,6 @@ export async function handleApiRequest(
       killSessionEngines(context, session, "Interrupted: session deleted");
       context.sessionManager.getQueue().clearQueue(session.sessionKey || session.sourceRef || session.id);
 
-      maybeEmitTalkGraph(params.id, "removed", { getSession, emit: context.emit });
       const deleted = deleteSession(params.id);
       if (!deleted) return notFound(res);
       // Remove any per-session Codex CODEX_HOME overlay (holds a session-scoped
@@ -3441,9 +3426,6 @@ export async function handleApiRequest(
         context.sessionManager.getQueue().clearQueue(session.sessionKey || session.sourceRef || session.id);
       }
 
-      for (const session of deletable) {
-        maybeEmitTalkGraph(session.id, "removed", { getSession, emit: context.emit });
-      }
       const deletableIds = deletable.map((session) => session.id);
       const count = deleteSessions(deletableIds);
       for (const id of deletableIds) {
@@ -5121,7 +5103,6 @@ export async function handleApiRequest(
           title,
         });
       }
-      maybeEmitTalkGraph(session.id, "added", { getSession, emit: context.emit });
 
       // The delegation card above is the atomic response's sole transcript row.
       // Publish the Todo cache invalidation through the shared boundary without
@@ -5230,23 +5211,12 @@ export async function handleApiRequest(
         // Fixes #38.
         model: selection.model,
         prompt,
-        // Optional excerpt override (talk delegation passes the operator's
-        // verbatim ask so list UIs don't show the scaffolded prompt).
+        // Optional excerpt override (callers that wrap the operator's ask in a
+        // scaffolded prompt pass the verbatim ask so list UIs show that instead).
         promptExcerpt: typeof body.promptExcerpt === "string" ? body.promptExcerpt : undefined,
         portalName: config.portal?.portalName,
       });
       logger.info(`Web session created: ${session.id} (model=${selection.model || "default"})`);
-      // Voice mode: when the hands-free orchestrator (source:"talk") spawns a COO
-      // child, tell the Talk UI which channel to animate to. Auto-derived here so
-      // the orchestrator persona carries zero focus-signalling burden.
-      if (session.parentSessionId) {
-        const talkParent = getSession(session.parentSessionId);
-        if (talkParent?.source === "talk") {
-          const label = String(body.employee || prompt || "task").replace(/\s+/g, " ").trim().slice(0, 48);
-          context.emit("talk:focus", { cooId: session.id, label, parentId: talkParent.id });
-        }
-      }
-      maybeEmitTalkGraph(session.id, "added", { getSession, emit: context.emit });
       // First-message attachments were uploaded before the session existed (FILES_DIR).
       // Re-home them under uploads/<date>/<sessionId>/ now that we have an id, then persist
       // the media on the user message so the bubble renders chips/thumbnails on reload.
@@ -5437,18 +5407,6 @@ export async function handleApiRequest(
       const prompt = body.message || body.prompt;
       const messageError = messageBodyError(prompt);
       if (messageError) return badRequest(res, messageError);
-
-      // Voice mode: when the orchestrator CONTINUES an existing COO child (a
-      // thread switch/reuse), re-signal focus so the Talk UI relights that
-      // satellite + morphs the main orb to its channel — mirroring the
-      // talk:focus emitted on new-session spawn in POST /api/sessions.
-      if (session.parentSessionId) {
-        const talkParent = getSession(session.parentSessionId);
-        if (talkParent?.source === "talk") {
-          context.emit("talk:focus", { cooId: session.id, label: session.title || "", parentId: talkParent.id });
-        }
-      }
-      maybeEmitTalkGraph(session.id, "status", { getSession, emit: context.emit });
 
       // Allow internal callers (e.g. child session callbacks) to specify a non-user role
       const messageRole: string = body.role === "notification" ? "notification" : "user";
@@ -6537,7 +6495,7 @@ export async function handleApiRequest(
     // ── TTS (per-message read-aloud) ──────────────────────────
     // GET /api/tts — engine readiness so the client can pick Kokoro vs the
     // browser Web Speech fallback WITHOUT a failed POST. Reuses the shared Kokoro
-    // engine (also driving the /talk voice loop); gated on weights + venv present.
+    // engine; gated on weights + venv present.
     if (method === "GET" && pathname === "/api/tts") {
       const { available, voice } = ttsStatus(context.getConfig().talk?.kokoro);
       return json(res, { available, voice });
@@ -6910,7 +6868,6 @@ async function runWebSession(
       lastError: errMsg,
     });
     context.emit("session:completed", { sessionId: currentSession.id, result: null, error: errMsg });
-    maybeEmitTalkGraph(currentSession.id, "completed", { getSession, emit: context.emit });
     if (erroredSession) notifyParentSession(erroredSession, { error: errMsg });
     return;
   }
@@ -6941,7 +6898,6 @@ async function runWebSession(
       lastError: errMsg,
     });
     context.emit("session:completed", { sessionId: currentSession.id, result: null, error: errMsg });
-    maybeEmitTalkGraph(currentSession.id, "completed", { getSession, emit: context.emit });
     // Wake the parent COO if this was a delegated child session (parity with
     // the normal error path; no-op for top-level sessions).
     if (erroredSession) {
@@ -6958,7 +6914,6 @@ async function runWebSession(
     insertMessage(currentSession.id, "assistant", `⛔ ${errMsg}`);
     const erroredSession = completeSessionAttempt(currentSession.id, attemptToken, { status: "error", lastActivity: new Date().toISOString(), lastError: errMsg });
     context.emit("session:completed", { sessionId: currentSession.id, result: null, error: errMsg });
-    maybeEmitTalkGraph(currentSession.id, "completed", { getSession, emit: context.emit });
     if (erroredSession) notifyParentSession(erroredSession, { error: errMsg }, { alwaysNotify: employee?.alwaysNotify });
     return;
   }
@@ -7013,18 +6968,6 @@ async function runWebSession(
       // The diet keys off the built-in jinn server specifically — custom MCP
       // servers don't carry the company tools (same rule as manager.ts).
       jinnMcpAttached: Boolean(resolvedMcp?.mcpServers?.["jinn"]),
-      // Hands-free voice orchestrator: layer its persona on top of the base
-      // identity so it behaves as the thin voice layer above the COO.
-      voicePersona: currentSession.source === "talk" ? getOrchestratorPersona() : undefined,
-      talkThreads:
-        currentSession.source === "talk"
-          ? listChildSessions(currentSession.id).slice(0, 12).map((c) => ({
-              id: c.id,
-              label: c.title || "(untitled)",
-              status: c.status,
-              lastActivity: c.lastActivity,
-            }))
-          : undefined,
     };
     const preparePlatformContext = (model: string | undefined) => {
       const contextOptions: BuildContextOptions = { ...baseContextOptions, model };
@@ -7175,19 +7118,6 @@ async function runWebSession(
         } catch (err) {
           logger.warn(`Failed to persist partial block for session ${currentSession.id}: ${err instanceof Error ? err.message : err}`);
         }
-        // Voice mode: stream the orchestrator's spoken text — complete sentences
-        // synthesize immediately (per-sentence streaming); the flush at completion
-        // speaks the remainder. Only `text` deltas are spoken; tool_use/context
-        // are not. Skip entirely when the client is muted (silent/read mode) —
-        // there's no point buffering or synthesizing audio the browser will discard.
-        if (
-          currentSession.source === "talk" &&
-          !isTalkMuted(currentSession.id) &&
-          outgoingDelta.type === "text" &&
-          typeof outgoingDelta.content === "string"
-        ) {
-          feedTalkText(currentSession.id, outgoingDelta.content, config.talk?.kokoro, context.emit);
-        }
       },
       // A turn that settled as failed but whose CLI later finished delivers the
       // recovered text here. Append it and restore a clean idle status — unless
@@ -7251,7 +7181,6 @@ async function runWebSession(
       if (fallbackModel) {
         logger.warn(`Claude model "${modelForTurn}" failed availability check; retrying session ${currentSession.id} with "${fallbackModel}"`);
         deletePartialMessages(currentSession.id);
-        if (currentSession.source === "talk") discardTalkSpeech(currentSession.id);
         modelForTurn = fallbackModel;
         updateSession(currentSession.id, { model: fallbackModel, lastError: null });
         result = await runAttempt(modelForTurn);
@@ -7272,7 +7201,6 @@ async function runWebSession(
     if (liveAfterRun?.engine !== engineAtTurnStart) {
       deletePartialMessages(currentSession.id);
       clearSupersededTurnMeta(currentSession.id);
-      if (currentSession.source === "talk") discardTalkSpeech(currentSession.id);
       logger.info(
         `Dropping stale ${engineAtTurnStart} result for session ${currentSession.id}; session now uses ${liveAfterRun?.engine ?? "unknown"}`,
       );
@@ -7309,8 +7237,6 @@ async function runWebSession(
     const streamedThrough = streamedBlocks.reduce((latest, message) => Math.max(latest, message.timestamp), 0);
 
     if (rateLimit.limited) {
-      // Drop any buffered voice text — we won't speak a rate-limited turn.
-      if (currentSession.source === "talk") discardTalkSpeech(currentSession.id);
       const emitDelta = (delta: StreamDelta) => {
         const normalized = normalizeBlockDeltaForTurn(delta, turnStartedAt);
         if (!normalized.ok) {
@@ -7410,7 +7336,6 @@ async function runWebSession(
                 cost: fallbackResult.cost,
                 durationMs: fallbackResult.durationMs,
               });
-              maybeEmitTalkGraph(currentSession.id, "completed", { getSession, emit: context.emit });
             }
           },
           onWaitingStart: ({ resumeAt }) => {
@@ -7489,7 +7414,6 @@ async function runWebSession(
                 cost: retryResult.cost,
                 durationMs: retryResult.durationMs,
               });
-              maybeEmitTalkGraph(currentSession.id, "completed", { getSession, emit: context.emit });
             }
           },
           onTimeout: () => {
@@ -7512,7 +7436,6 @@ async function runWebSession(
                 result: null,
                 error: timeoutError,
               });
-              maybeEmitTalkGraph(currentSession.id, "completed", { getSession, emit: context.emit });
             }
           },
         },
@@ -7540,15 +7463,6 @@ async function runWebSession(
         formatEngineErrorAssistantMessage(result.error),
         streamedThrough,
       );
-    }
-
-    // Voice mode: flush the remainder of the turn's spoken text (final chunk,
-    // carries last:true). Fire-and-forget so completion isn't blocked on audio.
-    // Discard (don't synthesize) on a half-finished interrupt OR when the client
-    // is muted — the browser plays nothing in silent mode.
-    if (currentSession.source === "talk") {
-      if (quietPreempted || isTalkMuted(currentSession.id)) discardTalkSpeech(currentSession.id);
-      else void flushTalkSpeech(currentSession.id, config.talk?.kokoro, context.emit);
     }
 
     const completedAt = new Date().toISOString();
@@ -7607,7 +7521,6 @@ async function runWebSession(
         cost: result.cost,
         durationMs: result.durationMs,
       });
-      maybeEmitTalkGraph(currentSession.id, "completed", { getSession, emit: context.emit });
     }
 
     logger.info(
@@ -7629,7 +7542,6 @@ async function runWebSession(
       }
       deletePartialMessages(currentSession.id);
       clearSupersededTurnMeta(currentSession.id);
-      if (currentSession.source === "talk") discardTalkSpeech(currentSession.id);
       logger.info(
         `Dropping stale ${engineAtTurnStart} error for session ${currentSession.id}; session now uses ${live.engine}`,
       );
@@ -7651,7 +7563,6 @@ async function runWebSession(
         result: null,
         error: errMsg,
       });
-      maybeEmitTalkGraph(currentSession.id, "completed", { getSession, emit: context.emit });
     }
     logger.error(`Web session ${currentSession.id} error: ${errMsg}`);
   } finally {

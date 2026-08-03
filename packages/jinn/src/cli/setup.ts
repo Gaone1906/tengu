@@ -428,7 +428,7 @@ export async function runSetup(opts?: { force?: boolean }): Promise<void> {
   }
 
   // 4b. Speech-to-text (mic) prerequisites — optional. The voice/mic flow on
-  // /talk and /chat transcribes audio with whisper.cpp's `whisper-cli` plus
+  // /chat transcribes audio with whisper.cpp's `whisper-cli` plus
   // `ffmpeg` (to resample to 16kHz mono WAV). These are NOT required for the
   // gateway, text chat, or voice output — only mic input — so missing deps are
   // guidance, never a hard failure.
@@ -616,9 +616,6 @@ export async function runSetup(opts?: { force?: boolean }): Promise<void> {
   created.push(...copyTemplateDir(path.join(TEMPLATE_DIR, "skills"), SKILLS_DIR, templateMaterialization));
   created.push(...copyTemplateDir(path.join(TEMPLATE_DIR, "org"), ORG_DIR, templateMaterialization));
   created.push(...copyTemplateDir(path.join(TEMPLATE_DIR, "scripts"), path.join(JINN_HOME, "scripts"), templateMaterialization));
-  // Seed talk/ (AURA voice persona + card-reference sidecar). The persona points
-  // the orchestrator at talk/card-reference.md, so both must land in ~/.jinn/talk/.
-  created.push(...copyTemplateDir(path.join(TEMPLATE_DIR, "talk"), path.join(JINN_HOME, "talk"), templateMaterialization));
 
   // Copy skills.json manifest
   const templateSkillsJson = path.join(TEMPLATE_DIR, "skills.json");

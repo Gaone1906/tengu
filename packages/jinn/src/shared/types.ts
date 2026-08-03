@@ -970,15 +970,8 @@ export interface JinnConfig {
     language?: string;
     languages?: string[];
   };
-  /** /talk voice loop — optional, off unless explicitly configured. */
+  /** Read-aloud TTS (`/api/tts` + Kokoro) — optional, off unless configured. */
   talk?: {
-    enabled?: boolean;
-    /** Engine for the hands-free voice orchestrator session. When unset (or
-     *  unavailable) the talk session falls back to `engines.default`, then to the
-     *  first available engine. */
-    engine?: string;
-    /** Model for the hands-free voice orchestrator session (default: "sonnet" — capable enough to orchestrate). */
-    orchestratorModel?: string;
     kokoro?: {
       voice?: string;
       modelDir?: string;

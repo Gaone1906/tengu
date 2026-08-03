@@ -40,13 +40,6 @@ interface Section {
   summary: string; // compact fallback when budget is tight
 }
 
-export interface TalkThreadSummary {
-  id: string;
-  label: string;
-  status: string;
-  lastActivity: string;
-}
-
 export interface PlatformContextSnapshot {
   schemaVersion: 1;
   gatewayBootId: string;
@@ -83,10 +76,6 @@ export interface BuildContextOptions {
   language?: string;
   channelName?: string;
   hierarchy?: OrgHierarchy;
-  /** Extra ESSENTIAL persona for source:"talk" sessions. */
-  voicePersona?: string;
-  /** Live COO child-thread roster for source:"talk" sessions. */
-  talkThreads?: TalkThreadSummary[];
   /** Whether the built-in Jinn MCP toolset is attached for context dieting. */
   jinnMcpAttached?: boolean;
 }
@@ -174,24 +163,6 @@ export function renderPlatformConfigContext(snapshot: PlatformContextSnapshot): 
 }
 
 /**
- * Compact live roster of the talk session's COO threads, rebuilt every turn so
- * the orchestrator's reuse-vs-spawn decision is grounded in real state instead
- * of conversation memory. Null when there are no threads (section omitted).
- */
-export function buildTalkThreadsSection(threads?: TalkThreadSummary[]): string | null {
-  if (!threads || threads.length === 0) return null;
-  const lines = [`## Your open COO threads`];
-  for (const t of threads) {
-    lines.push(`- \`${t.id}\` — "${t.label}" (${t.status}, last activity ${t.lastActivity})`);
-  }
-  lines.push(
-    ``,
-    `Continue one: POST /api/talk/delegate with {"sessionId":"<your-id>","thread":"<id above>","brief":"..."} — new topic: {"thread":"new","label":"<short topic>","brief":"..."}. Never call /api/sessions directly.`,
-  );
-  return lines.join("\n");
-}
-
-/**
  * Build a rich system prompt for engine sessions.
  * This is what makes Jinn "smart" — the engine sees all of this context
  * before responding to the user.
@@ -235,30 +206,6 @@ export function buildContext(opts: BuildContextOptions): string {
       marker: "# You are",
       content: buildIdentity(portalName, operatorName, language),
       summary: `# You are ${portalName}\nYour working directory is \`~/.jinn\` (${JINN_HOME}).`,
-    });
-  }
-
-  // ── ESSENTIAL: Voice orchestrator persona (source:"talk" only) ──
-  // Layered right after identity so the hands-free voice behaviour governs the
-  // turn, while the base identity + CLAUDE.md still supply gateway/delegation
-  // know-how. No trimming — this defines how a talk turn must behave.
-  if (opts.voicePersona && opts.voicePersona.trim()) {
-    sections.push({
-      tier: Tier.ESSENTIAL,
-      marker: "# Voice mode",
-      content: opts.voicePersona,
-      summary: "# Voice mode\nFollow the configured voice persona for this turn.",
-    });
-  }
-
-  // ── ESSENTIAL: Live COO thread roster (source:"talk" only) ──
-  const rosterSection = buildTalkThreadsSection(opts.talkThreads);
-  if (rosterSection) {
-    sections.push({
-      tier: Tier.ESSENTIAL,
-      marker: "## Your open COO threads",
-      content: rosterSection,
-      summary: "## Your open COO threads\nContinue an existing thread for the same topic; start a new thread for a new topic.",
     });
   }
 

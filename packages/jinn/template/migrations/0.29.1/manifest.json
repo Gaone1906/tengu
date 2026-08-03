@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "version": "0.29.1",
+  "baseVersion": "0.29.0",
+  "generatedFrom": {
+    "baseRef": "v0.29.0",
+    "headRef": "WORKTREE"
+  },
+  "files": [
+    {
+      "path": "CLAUDE.md",
+      "operation": "modify",
+      "baseSha256": "b992b8be3e44e23d3ac2841ab185fb0450e71b38aa662fc64ab7e0ea2f4f4641",
+      "targetSha256": "15d154b7237110fb1d04c55e500b8778bf10c7c3c9b3e5a689fbfdeef5365fbc",
+      "basePayload": "files/base/CLAUDE.md",
+      "targetPayload": "files/target/CLAUDE.md"
+    },
+    {
+      "path": "docs/connectors.md",
+      "operation": "modify",
+      "baseSha256": "3144938d35fb70aac23efa2e5cab64264e3961821b16691c3cfbb5cdc6fd42eb",
+      "targetSha256": "6df1a66d8fa020088b7e702f7371c6142d5c6c96e12feb118ee6c88bd90748d7",
+      "basePayload": "files/base/docs/connectors.md",
+      "targetPayload": "files/target/docs/connectors.md"
+    },
+    {
+      "path": "scripts/workflow-triggers/README.md",
+      "operation": "add",
+      "baseSha256": null,
+      "targetSha256": "e1ef99ab22d710cd9f94391be0759d169b17d895098de8e12a24d532d6ef7376",
+      "basePayload": null,
+      "targetPayload": "files/target/scripts/workflow-triggers/README.md"
+    },
+    {
+      "path": "skills/todo-handling/SKILL.md",
+      "operation": "modify",
+      "baseSha256": "5b8cbccd95da89818117690fc3044acae477ab1413bfaca839f21306ca4bf2f3",
+      "targetSha256": "0fba516f808b8404ea7c84874f8f59635b8545ff5910f0362b2c94e915e3c7a3",
+      "basePayload": "files/base/skills/todo-handling/SKILL.md",
+      "targetPayload": "files/target/skills/todo-handling/SKILL.md"
+    },
+    {
+      "path": "skills/workflow/SKILL.md",
+      "operation": "modify",
+      "baseSha256": "a7ec13e7113d35cf1ded951c37cb14381d7d88f868cfcac8145b6e18d3ab7630",
+      "targetSha256": "88e344c4a33c635d4a3329a4617cb468bcad21c0da213f1b4f84c9e155e893a8",
+      "basePayload": "files/base/skills/workflow/SKILL.md",
+      "targetPayload": "files/target/skills/workflow/SKILL.md"
+    },
+    {
+      "path": "talk/card-reference.md",
+      "operation": "remove",
+      "baseSha256": "ebd18f9ef70894439844758bdbac2a7d44eda278f3aa0e8c60b0196566da3adf",
+      "targetSha256": null,
+      "basePayload": "files/base/talk/card-reference.md",
+      "targetPayload": null
+    },
+    {
+      "path": "talk/orchestrator-persona.md",
+      "operation": "remove",
+      "baseSha256": "462aaa60baa7f9506b74da7d2da9049e790c4512abce39be464c0dafa4b5138e",
+      "targetSha256": null,
+      "basePayload": "files/base/talk/orchestrator-persona.md",
+      "targetPayload": null
+    }
+  ]
+}
