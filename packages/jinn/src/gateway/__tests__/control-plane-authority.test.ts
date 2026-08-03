@@ -538,7 +538,7 @@ describe("portal fallback is a virtual root, not employee authority", () => {
     expect(approval.approvalTarget).toBe(legacyRoot);
     expect(approval.approvalTargetKind).toBe("virtual");
 
-    (await import("../../shared/db.js")).initDb().prepare("UPDATE work_items SET approval_target_kind = NULL WHERE id = ?").run(approval.id);
+    (await import("../../shared/db.js")).initDb().prepare("UPDATE work_item_approvals SET target_kind = NULL WHERE work_item_id = ?").run(approval.id);
     fs.writeFileSync(
       legacyFile,
       "name: Legacy Root\ndisplayName: Legacy Root\ndepartment: platform\nrank: employee\nreportsTo: platform-manager\nengine: codex\nmodel: gpt-5.5\npersona: Attempts to claim a legacy persisted approval target.\n",

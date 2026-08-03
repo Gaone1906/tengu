@@ -8,12 +8,12 @@ import type { ServerResponse } from "node:http";
 /**
  * Todos v2 slice 4 — GOLDEN legacy byte-parity for the approval fields.
  *
- * The approval_* columns are frozen and every payload sources the legacy
- * `approval*` fields from `work_item_approvals`. These pins hold the hard
- * compatibility bar: for databases carrying pre-slice column values (simulated
- * here exactly as the backfill finds them), the compact AND detail payloads
- * must emit the SAME values the pre-slice column-backed implementation emitted
- * — plus the new additive `approvals` history on the detail payload only.
+ * Every payload sources the legacy `approval*` fields from `work_item_approvals`.
+ * These pins hold the hard compatibility bar: for databases whose approvals came
+ * from pre-slice columns (seeded here exactly as the backfill leaves them), the
+ * compact AND detail payloads must emit the SAME values the pre-slice
+ * column-backed implementation emitted — plus the new additive `approvals`
+ * history on the detail payload only.
  */
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-wi-parity-"));
@@ -23,11 +23,9 @@ const dbModule = await import("../../shared/db.js");
 type Api = typeof import("../api.js");
 type Store = typeof import("../../work-items/store.js");
 type Approvals = typeof import("../../work-items/approvals.js");
-type Migrate = typeof import("../../work-items/migrate.js");
 let api: Api;
 let store: Store;
 let approvals: Approvals;
-let migrate: Migrate;
 
 function makeRes() {
   let status = 200;
@@ -88,27 +86,18 @@ interface LegacyApprovalColumns {
   approvalDecidedAt: string | null;
 }
 
-/** Simulate a pre-slice-4 database row: write the approval COLUMNS directly
- *  (the write path no longer does), exactly what the backfill later consumes. */
+/** Simulate a pre-slice-4 database's approvals: the exact `'legacy'` row the
+ *  column backfill mints, so the payloads face what a migrated home carries. */
 function seedLegacyColumns(id: string, legacy: LegacyApprovalColumns): void {
-  dbModule
-    .initDb()
-    .prepare(
-      `UPDATE work_items SET approval_state = ?, approval_request = ?, approval_ref = ?, approval_target = ?,
-         approval_target_kind = ?, approval_escalated_at = ?, approval_decided_by = ?, approval_decided_at = ?
-       WHERE id = ?`,
-    )
-    .run(
-      legacy.approvalState,
-      legacy.approvalRequest,
-      legacy.approvalRef,
-      legacy.approvalTarget,
-      legacy.approvalTargetKind,
-      legacy.approvalEscalatedAt,
-      legacy.approvalDecidedBy,
-      legacy.approvalDecidedAt,
-      id,
-    );
+  if (legacy.approvalState === null) return;
+  dbModule.initDb().prepare(
+    `INSERT INTO work_item_approvals (id, work_item_id, state, request, ref, target, target_kind,
+       requested_by, requested_at, escalated_at, decided_by, decided_at, note)
+     SELECT 'wap_' || lower(hex(randomblob(6))), w.id, @approvalState, COALESCE(@approvalRequest, ''), @approvalRef,
+       @approvalTarget, @approvalTargetKind, 'legacy', COALESCE(@approvalDecidedAt, w.updated_at),
+       @approvalEscalatedAt, @approvalDecidedBy, @approvalDecidedAt, NULL
+     FROM work_items w WHERE w.id = @id`,
+  ).run({ ...legacy, id });
 }
 
 function legacySubset(payload: Record<string, unknown>): LegacyApprovalColumns {
@@ -202,17 +191,15 @@ beforeAll(async () => {
   api = await import("../api.js");
   store = await import("../../work-items/store.js");
   approvals = await import("../../work-items/approvals.js");
-  migrate = await import("../../work-items/migrate.js");
-  (await import("../../shared/db.js")).initDb();
+  dbModule.initDb();
   for (const fixture of FIXTURES) {
     const item = store.createWorkItem({ title: `parity ${fixture.name}`, department: "parity-fixture" });
     seedLegacyColumns(item.id, fixture.legacy);
     itemIds.set(fixture.name, item.id);
   }
-  migrate.backfillWorkItemApprovals((await import("../../shared/db.js")).initDb());
 });
 
-describe("legacy approval-field byte-parity across the dual-read window", () => {
+describe("legacy approval-field byte-parity, sourced from work_item_approvals", () => {
   it.each(FIXTURES.map((fixture) => [fixture.name, fixture.legacy] as const))(
     "detail payload emits the exact pre-slice values for the %s fixture",
     async (name, legacy) => {
