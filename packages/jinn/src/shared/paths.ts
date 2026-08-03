@@ -4,6 +4,7 @@ import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { resolveJinnHome, resolveMcpSessionCapabilityKeyFile } from "./home.js";
 import { resolveInstancesRegistryPath, resolveLegacyInstancesRegistryPath } from "../instances/directory.js";
+import { resolveSttModelsDir } from "../stt/model-store.js";
 
 export { resolveJinnHome } from "./home.js";
 
@@ -89,7 +90,9 @@ export const PTY_SNAPSHOTS_DIR = path.join(JINN_HOME, "state", "pty-snapshots");
 export const ENGINE_LIMITS_DIR = path.join(TMP_DIR, "engine-limits");
 export const CLAUDE_LIMITS_DIR = path.join(ENGINE_LIMITS_DIR, "claude");
 export const MODELS_DIR = path.join(JINN_HOME, "models");
-export const STT_MODELS_DIR = path.join(JINN_HOME, "models", "whisper");
+export const STT_MODELS_DIR = resolveSttModelsDir();
+/** Read fallback for installs that have not yet adopted their per-home model. */
+export const LEGACY_STT_MODELS_DIR = path.join(JINN_HOME, "models", "whisper");
 export const PID_FILE = path.join(JINN_HOME, "gateway.pid");
 /** Gateway connection info (port + hook secret + pids) for hook-relay discovery. */
 export const GATEWAY_INFO_FILE = path.join(JINN_HOME, "gateway.json");
