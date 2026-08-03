@@ -23,6 +23,7 @@ vi.mock('@/hooks/use-sessions', () => ({
   useSessionSearch: () => ({ data: undefined }),
   useUpdateSession: () => ({ mutate: vi.fn() }),
   useDeleteSession: () => ({ mutateAsync: vi.fn() }),
+  useStopSession: () => ({ mutate: vi.fn() }),
   useArchiveSession: () => ({ mutateAsync: vi.fn() }),
   useUnarchiveSession: () => ({ mutateAsync: vi.fn() }),
   useBulkDeleteSessions: () => ({ mutateAsync: vi.fn() }),

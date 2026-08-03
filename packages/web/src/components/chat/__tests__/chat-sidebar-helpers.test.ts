@@ -55,8 +55,10 @@ describe('workflow sessions in the chat sidebar', () => {
       ),
     )
 
-    expect(screen.getByRole('link', { name: 'Workflow' }).getAttribute('href'))
+    const link = screen.getByRole('link', { name: 'Open workflow run' })
+    expect(link.getAttribute('href'))
       .toBe('/workflow/daily-report/runs/run-42')
+    expect(link.textContent).not.toContain('Workflow')
   })
 
   it('degrades a malformed workflow sourceRef to a non-link chip', () => {
@@ -70,7 +72,8 @@ describe('workflow sessions in the chat sidebar', () => {
       ),
     )
 
-    expect(screen.getByText('Workflow')).toBeTruthy()
+    expect(screen.getByRole('img', { name: 'Workflow session' })).toBeTruthy()
+    expect(screen.queryByText('Workflow')).toBeNull()
     expect(screen.queryByRole('link')).toBeNull()
   })
 })

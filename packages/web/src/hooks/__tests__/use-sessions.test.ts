@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { QueryClient } from '@tanstack/react-query'
-import { mergeSessionsResponse, patchSessionBackgroundActivity } from '../use-sessions'
+import { mergeSessionsResponse, patchSessionBackgroundActivity, patchStoppedSession } from '../use-sessions'
 import { queryKeys } from '@/lib/query-keys'
 import type { SessionsResponse } from '@/lib/api'
 
@@ -124,5 +124,30 @@ describe('patchSessionBackgroundActivity', () => {
     const qc = new QueryClient()
     patchSessionBackgroundActivity(qc, 'a', activity)
     expect(qc.getQueryData(queryKeys.sessions.all)).toBeUndefined()
+  })
+})
+
+describe('patchStoppedSession', () => {
+  it('moves only the stopped row out of the running state immediately', () => {
+    const qc = new QueryClient()
+    qc.setQueryData(
+      queryKeys.sessions.all,
+      resp([
+        session('running', { status: 'running', transportState: 'running' }),
+        session('other', { status: 'running', transportState: 'running' }),
+      ]),
+    )
+
+    patchStoppedSession(qc, 'running')
+
+    const data = qc.getQueryData<SessionsResponse>(queryKeys.sessions.all)!
+    expect(data.sessions.find((s) => s.id === 'running')).toMatchObject({
+      status: 'interrupted',
+      transportState: 'interrupted',
+    })
+    expect(data.sessions.find((s) => s.id === 'other')).toMatchObject({
+      status: 'running',
+      transportState: 'running',
+    })
   })
 })
