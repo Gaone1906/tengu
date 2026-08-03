@@ -39,9 +39,46 @@ describe('MessageMedia (multi-file)', () => {
     expect(screen.queryByRole('dialog')).toBeNull()
   })
 
+  it('portals the lightbox outside a content-visibility message row', () => {
+    const { container } = render(
+      <div data-message-id="message-1" style={{ contentVisibility: 'auto' }}>
+        <MessageMedia media={[mixed[0]]} isUser={false} />
+      </div>,
+    )
+
+    fireEvent.click(screen.getByLabelText('Open one.png'))
+
+    const messageRow = container.querySelector('[data-message-id="message-1"]')
+    const dialog = screen.getByRole('dialog')
+    expect(messageRow?.contains(dialog)).toBe(false)
+    expect(dialog.parentElement).toBe(document.body)
+  })
+
+  it('navigates and wraps a message image gallery with buttons and arrow keys', () => {
+    render(<MessageMedia media={mixed} isUser={false} />)
+    fireEvent.click(screen.getByLabelText('Open one.png'))
+
+    const preview = () => screen.getByTestId('attachment-lightbox-image')
+    expect(preview().getAttribute('alt')).toBe('one.png')
+
+    fireEvent.click(screen.getByLabelText('Previous image'))
+    expect(preview().getAttribute('alt')).toBe('three.png')
+    fireEvent.click(screen.getByLabelText('Next image'))
+    expect(preview().getAttribute('alt')).toBe('one.png')
+
+    fireEvent.keyDown(window, { key: 'ArrowLeft' })
+    expect(preview().getAttribute('alt')).toBe('three.png')
+    fireEvent.keyDown(window, { key: 'ArrowRight' })
+    expect(preview().getAttribute('alt')).toBe('one.png')
+  })
+
   it('renders a single image larger (no grid) without error', () => {
     render(<MessageMedia media={[mixed[0]]} isUser={true} />)
     expect(screen.getAllByRole('img')).toHaveLength(1)
+
+    fireEvent.click(screen.getByLabelText('Open one.png'))
+    expect(screen.queryByLabelText('Previous image')).toBeNull()
+    expect(screen.queryByLabelText('Next image')).toBeNull()
   })
 })
 

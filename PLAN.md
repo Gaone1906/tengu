@@ -1,130 +1,142 @@
-# ICI-225 — Variant A, slices 1 + 2
+# ICI-678 — Chat image preview: full screen again, plus zoom / navigation / close
 
-Base: `main` @ `d66b83439b9cb80edd35e9a28063d478445ba618`
-Branch: `build/ICI-225-system-employees-dispatch`
-Prior round: `docs/design/ICI-225-system-employees-and-dispatch.md` (audit + 3 variants).
+Branch `build/ICI-678-fullscreen-image-viewer` off `7fd9f259` (main).
 
-## What the operator decided
+> Note: this file previously held the merged ICI-225 plan. Replaced, per the pipeline
+> convention that `PLAN.md` at the worktree root is the current run's plan.
 
-The variants gate came back with the note **"A"**. That is a pick, not an abandon — Variant A,
-*system employees are code*. This round builds the first two slices of A's own slice plan:
+## What the operator asked for
 
-1. **Built-in registry** — system employees compiled into the bundle, merged under user YAML.
-2. **Dispatch** — a button on a Todo that starts a Todo Dispatcher session which picks the
-   employee and hands the work off.
+> In chat, there is a regression for when I click on an image to expand it. It shows inside
+> the chat container instead of full screen like it used to... please fix that.
+>
+> Also make the design and functionality of viewing images a bit better. For example I want:
+> 1. to be able to zoom images (I think that is not possible since we set a global no pinch
+>    zoom on mobile). Figure out how to enable zooming on them with pinching without disabling
+>    the disable of global zoom pinch.
+> 2. I want to go back and forth with arrows
+> 3. easily close the full screen preview.
 
-Slices 3 (workflow routing) and 4 (Request update) are deliberately not in this round.
+## Root cause of the regression (confirmed, not guessed)
 
-## One deviation from the design doc, stated up front
+`packages/web/src/components/chat/chat-messages.tsx:1026` puts
+`style={{ contentVisibility: "auto", containIntrinsicSize: "auto 120px" }}` on **every message
+row**. It arrived in `d9eac83b` ("perf: harden web loading and Todo batching").
 
-The doc's Variant A proposed a constrained Dispatcher output (`assign` / `start-workflow` /
-`hire` / `ask` / `hold`) that the gateway would execute. **Not building that.** `delegate_task`
-→ `POST /api/delegations` is already the atomic "model chooses, gateway performs" transaction,
-it already accepts an existing `workItemId`, and it already has the mint-before-spawn and
-idempotency work behind it. A second effect executor beside it would be a parallel delegation
-path with exactly one consumer. The Dispatcher dispatches via `delegate_task`. The constrained
-contract earns its keep in slice 3, when `start-workflow` makes it a genuine choice between two
-targets — that is the right time to build it, not now.
+`content-visibility: auto` implies `contain: layout style paint`. **Paint containment makes the
+element a containing block for `position: fixed` descendants.** The chat lightbox
+(`message-media.tsx:99`) is a plain in-tree `fixed inset-0` div, so `inset-0` now resolves
+against the message row instead of the viewport, and the overlay is clipped to the chat column.
 
-## What changes
+The fix is to render the overlay in a **portal to `document.body`**, not to remove
+`content-visibility` (that is deliberate virtualisation perf and is not ours to undo).
 
-**Gateway**
+## The approach
 
-- `packages/jinn/src/gateway/system-employees.ts` — **new**. A compiled-in
-  `SYSTEM_EMPLOYEES` list with one entry, `todo-dispatcher`, plus a resolver that fills
-  `engine` / `model` / `effortLevel` from `config.engines.default` so the Dispatcher runs on the
-  user's default engine, as the Todo asks. Persona is generic prose (privacy firewall) telling
-  it to read the Todo, pick with `find_employees`, hand off with
-  `delegate_task({ workItemId, employee, task })`, then `comment_work_item` with the choice and
-  the reason, then end the turn. `jinnMcp: true` — without the company toolset it has no hands.
-- `packages/jinn/src/gateway/org.ts` — `scanOrg()` seeds from the built-ins, then merges user
-  YAML on top. Rules, each of which is a test below:
-  - `system` is never read from YAML. It is stamped by the built-in registry only.
-  - A user YAML whose `name` matches a built-in may override **only** `engine`, `model`,
-    `effortLevel`, `alwaysNotify`. Persona, rank, department, `mcp`, `jinnMcp`, `provides`,
-    `reportsTo`, `cliFlags` keep the built-in values.
-  - An override file legitimately has no `persona`. The existing `data.name && data.persona`
-    guard would silently drop it — the built-in-name branch must run before that guard, not
-    after.
-  - `validateEmployeeUpdate` refuses non-knob fields for a system employee with an error that
-    names the field. `updateEmployeeYaml` writes `<org>/system/<name>.yaml` when no file exists,
-    containing `name` plus the knobs and nothing else.
-- `packages/jinn/src/shared/types.ts` — `system?: boolean` on `Employee`, documented as
-  gateway-stamped and never YAML-sourced.
-- `packages/jinn/src/gateway/api.ts` — **new** `POST /api/work-items/:id/dispatch`. Spawns one
-  `todo-dispatcher` session seeded with the Todo id, title, and body, links it to the Todo,
-  returns its id. If a dispatcher session for this Todo is already live it returns that one and
-  spawns nothing. Refuses with an explanatory 4xx if the resolved engine cannot attach the jinn
-  toolset, rather than spawning a Dispatcher with no hands.
+The Todos task page already has a full-screen image viewer that does most of what is being
+asked — `packages/web/src/routes/todos/task-page/attachment-preview.tsx:127` `AttachmentLightbox`:
+Radix `Dialog` (so: portal to body, focus trap, scroll lock, Esc), prev/next buttons, arrow-key
+navigation, click-to-zoom + pan, download, safe-area toolbar, all on Ledger tokens.
 
-**Web**
+Chat is therefore the **second caller**, which is exactly when taste §1 says to extract. So:
 
-- `packages/web/src/lib/api.ts` — `system` on the `Employee` wire type; `dispatchTodo(id)`.
-- `packages/web/src/components/org/employee-editor.tsx` — a system employee renders a **System**
-  badge; name, persona, rank, department are read-only; engine, model, effort stay editable.
-- `packages/web/src/routes/todos/task-page/props-rail.tsx` + `task-page.tsx` — a **Dispatch**
-  action in the rail beneath Assignee, built from the existing `RailRow` idiom (no new chrome,
-  no hairline, tokens only). While a dispatcher session is live it reads as running and cannot
-  double-fire.
+1. Extract a shared `ImageLightbox` to `packages/web/src/components/ui/image-lightbox.tsx`,
+   generic over `{ id, url, name }` items, keeping the existing `attachment-lightbox*` test ids
+   so the Todos suite proves the migration is behaviour-preserving.
+2. Add **pinch-to-zoom** to it (the one capability neither viewer has today).
+3. Point both call sites at it: chat `message-media.tsx` and todos `attachment-preview.tsx`.
+
+### Pinch-to-zoom under a global `user-scalable=no`
+
+`packages/web/index.html:5` sets `maximum-scale=1,user-scalable=no`. That stays untouched —
+flipping it would let the whole dashboard pinch-zoom, which is what the meta exists to prevent,
+and iOS Safari does not reliably re-apply a mutated viewport meta anyway.
+
+Instead the viewer implements its **own** gesture layer, which is how every serious lightbox
+does it and is orthogonal to the page-level meta:
+
+- `touch-action: none` on the image surface **while the lightbox is open**, so the browser hands
+  us raw pointer events instead of consuming them for scroll.
+- Track live pointers in a `Map`. Two pointers down → pinch: scale by
+  `currentDistance / startDistance`, clamped to `[1, 4]`, anchored on the midpoint so the image
+  zooms around the fingers rather than around its centre.
+- One pointer down while `zoom > 1` → pan (already implemented; reuse it).
+- Desktop trackpad pinch arrives as `wheel` with `ctrlKey` → same zoom path, `preventDefault()`
+  so the browser does not page-zoom.
+- Double-tap / double-click toggles 1× ↔ 2× (already implemented; reuse it).
+
+### Navigation and close
+
+- Prev/next buttons + `ArrowLeft`/`ArrowRight` — already implemented, carried over.
+- Horizontal swipe at `zoom === 1` navigates (mobile has no arrow keys).
+- Close: existing toolbar ×, Esc and backdrop tap via Radix, plus swipe-down-to-dismiss at
+  `zoom === 1`.
+- Gallery for chat = the images of that one message, so the arrows walk the attachments the
+  operator actually clicked into.
+
+## Files
+
+| File | Change |
+| --- | --- |
+| `packages/web/src/components/ui/image-lightbox.tsx` | **New.** Shared viewer: Radix Dialog, gallery nav, pinch/wheel/double-tap zoom, pan, swipe, download, close. |
+| `packages/web/src/components/chat/message-media.tsx` | Delete the local `ImageLightbox`; open the shared one with the message's images as the gallery. |
+| `packages/web/src/routes/todos/task-page/attachment-preview.tsx` | `AttachmentLightbox` becomes a thin adapter mapping `WorkItemAttachmentWire` → the shared item shape. |
+| `packages/web/src/components/ui/__tests__/image-lightbox.test.tsx` | **New.** Gesture + navigation logic tests. |
+| `packages/web/src/components/chat/__tests__/message-media.test.tsx` | Extend: portal target, gallery nav from chat. |
+
+Zoom/pan/pinch maths lives in small pure helpers in the new file so it can be tested without a
+real touchscreen.
 
 ## Acceptance criteria
 
-1. With no org directory on disk at all, `scanOrg()` returns a registry containing
-   `todo-dispatcher` with `system: true`, a non-empty persona, and `engine` equal to
-   `config.engines.default`.
-2. A user YAML for an ordinary employee that declares `system: true` loads with `system`
-   undefined. A protected employee cannot be forged from disk.
-3. A user YAML named `todo-dispatcher` that sets `model` **and** `persona` **and** `rank`
-   changes the model only; persona and rank keep the built-in values. The same file with no
-   `persona` key at all still applies its knobs and is not dropped.
-4. `PATCH /api/org/employees/todo-dispatcher` with `{persona}` returns 400 naming `persona`;
-   with `{model}` returns 200, and a following `scanOrg()` shows the new model with the built-in
-   persona intact.
-5. Deleting the override file returns the Dispatcher to its built-in knobs. It never disappears
-   from the registry.
-6. `POST /api/work-items/<id>/dispatch` on an open Todo spawns exactly one `todo-dispatcher`
-   session, that session appears in `GET /api/work-items/<id>/sessions`, and the response
-   carries its id. A second call while it is live returns the same id and spawns nothing.
-7. The same route returns 404 for an unknown Todo id without spawning anything.
-8. When the resolved engine cannot attach the jinn toolset, the route refuses with a 4xx whose
-   message names the engine and what to change. No session is created.
-9. On the Todo task page, Dispatch starts the Dispatcher and the page then shows the linked
-   session; while it is live the action is non-repeatable.
-10. The employee editor shows the System badge and read-only persona/rank/department for
-    `todo-dispatcher`, with engine/model/effort still editable — screenshot-verified at
-    1440×900 and 390×844 in **both** light and dark.
-11. `pnpm typecheck`, `pnpm test`, and `pnpm lint` pass, and the leak-grep over the staged diff
-    is clean.
+1. **Full screen.** Opening a chat image renders the overlay as a child of `document.body`, not
+   inside the message row, and it covers the viewport regardless of the message row's
+   `content-visibility: auto`. Test: assert the dialog's ancestry is `document.body` and is not
+   contained by the `[data-message-id]` element.
+2. **Containment regression is proven closed.** A test that renders `MessageMedia` inside a
+   wrapper carrying `content-visibility: auto` and asserts the overlay escapes it. It must fail
+   against the current in-tree overlay and pass after the portal.
+3. **Pinch zoom.** Two `pointerdown`s on the image followed by `pointermove`s that increase the
+   distance raise the applied scale above 1; shrinking returns it toward 1. Clamped to
+   `[1, 4]` — no scale below 1, none above 4.
+4. **Page zoom is still disabled.** `packages/web/index.html` still contains
+   `maximum-scale=1,user-scalable=no`, and no code path mutates the viewport meta. Grep-checkable.
+5. **Ctrl+wheel zooms and does not page-zoom.** A `wheel` event with `ctrlKey: true` on the image
+   changes the scale and has `defaultPrevented === true`.
+6. **Arrows.** With ≥2 images in one chat message: prev/next buttons and `ArrowLeft`/`ArrowRight`
+   move through the gallery and wrap at both ends. With exactly 1 image, neither arrow renders.
+7. **Zoom resets on navigate.** Moving to another image returns scale to 1 and pan to `(0,0)`.
+8. **Close.** The × button, `Escape`, and a backdrop tap each unmount the dialog. At `zoom === 1`
+   a downward swipe past threshold also closes it; at `zoom > 1` the same drag pans instead of
+   closing.
+9. **Todos preview is behaviour-identical.** `task-sections.test.tsx` and `task-page.test.tsx`
+   pass unchanged — no edits to those files.
+10. **Gates.** `pnpm typecheck` clean, `pnpm --filter @jinn/web test` green, `pnpm lint` clean.
+11. **Design bar.** Screenshot-verified at **1440×900 and 390×844, in both light and dark**:
+    zoomed-out, zoomed-in, and a multi-image gallery. Tokens only — no hardcoded colours; tap
+    targets ≥34px; toolbar respects `env(safe-area-inset-bottom)`.
 
-## How each is proved
+## How it gets verified
 
-- **1, 2, 3, 5** — `packages/jinn/src/gateway/__tests__/system-employees.test.ts` (new), driving
-  `scanOrg()` against a temp `JINN_HOME`.
-- **4** — extend `packages/jinn/src/gateway/__tests__/org-update.test.ts`.
-- **6, 7, 8** — `packages/jinn/src/gateway/__tests__/dispatch-route.test.ts` (new), in the shape
-  of the existing `delegations-route.test.ts`.
-- **10 (DOM half)** — extend `packages/web/src/components/org/employee-editor.test.tsx`.
-- **9, 10 (visual half)** — a throwaway sandbox: `jinn-sandbox.sh up qa-ICI-225 --build --seed`
-  on 7778+, driven with `agent-browser`, then `destroy` — even if the run fails.
-
-Criteria 2 and 8 are the security-shaped ones, so they follow the taste rule for closure claims:
-write the test, revert the guard, watch it go red, put the guard back.
+- **Unit** — vitest + jsdom. Pointer events are synthesised (`new PointerEvent(...)` with
+  `pointerId`/`clientX`/`clientY`), which is enough for criteria 1–8 because the gesture maths is
+  in pure helpers.
+- **Manual/browser** — `jinn-sandbox.sh up qa-ICI-678 --build --seed` on 7778+, driven with
+  `agent-browser` per the `jinn-design` skill, using a throwaway `AGENT_BROWSER_PROFILE`.
+  Destroy the sandbox afterwards even if the run fails. Real pinch cannot be produced by a
+  headless driver, so pinch is additionally exercised by dispatching synthetic two-pointer
+  sequences via `agent-browser ... eval` against the live DOM, and the visual states are
+  captured as screenshots.
+- **Never** `pnpm dev` (proxies to 7777), never port 7777 or 7788, never touch the operator's
+  live instance home.
+- Leak-grep the staged diff before committing.
 
 ## Out of scope
 
-- Slice 3: `start-workflow` routing, the label→workflow prior, shipped system workflows, a
-  `workflows/` directory in the template.
-- Slice 4: Request update, stalled-worker wake.
-- Any other change to the Todos board or task page. Todos v2 shipped; this round adds one
-  action and touches nothing else.
-- Schema or migration work. Nothing here needs a table.
-- A DELETE guard for employees. There is no DELETE route to guard, and `rm` is out of reach by
-  construction — the built-ins have no file.
-
-## Safety
-
-- Runs entirely in this worktree. No gateway started outside an explicit throwaway `JINN_HOME`
-  on 7778+; never 7777, never 7788, never `pnpm dev`.
-- Privacy firewall applies hardest to `system-employees.ts`: its persona prose compiles into
-  every user's install. Generic voice only — no real names, project names, or paths.
-- The Todo body was read as data. It contains no injected instructions and no anomaly.
+- Removing or weakening `content-visibility: auto` on message rows — it is intentional perf.
+- Changing the viewport meta in `packages/web/index.html`.
+- Video, audio or PDF preview. Images only.
+- The composer attachment strip (`chat/media-preview.tsx`) — thumbnails before send, a different
+  surface.
+- Any non-image attachment surface, and any other overlay in chat.
+- Pinch-zoom anywhere outside the image viewer.
