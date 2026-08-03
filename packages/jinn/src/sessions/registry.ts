@@ -17,7 +17,6 @@ import { parseTodoId } from '../work-items/id.js';
 import type { ChatBlock, ChatBlockEnvelope, EngineSessionRef, EngineSessionRefs, JsonObject, ReplyContext, Session, SessionAttemptOutcome, SessionDelivery, SessionDeliveryIdentity, SessionDeliveryPayload, WorkflowAttemptInterruptionCause, WorkflowSessionProvenance } from '../shared/types.js';
 import { blockFallbackText, mergeBlock, validateBlockEnvelope } from '../shared/blocks.js';
 import { ptySnapshotStore } from '../engines/pty-snapshot.js';
-import { migrateActivitySchema } from '../activity/migrate.js';
 
 let db: Database.Database | undefined;
 
@@ -533,6 +532,42 @@ function preflightWorkItemsToleratingConcurrentInit(
   }
 }
 
+/** Tables of the removed Activity ledger, dropped in dependency-free order. */
+const ACTIVITY_LEDGER_TABLES = [
+  'activity_event_search',
+  'activity_story_versions',
+  'activity_stories',
+  'activity_events',
+  'activity_ledger_meta',
+] as const;
+
+/**
+ * Drop the Activity ledger left behind on homes that booted a version which
+ * created it. No shipped code path ever appended to it, so those tables are
+ * empty, and fresh homes never create them — this is a no-op there. SQLite
+ * removes a table's indexes and triggers along with the table, so naming the
+ * tables is enough. Idempotent; runs inside the boot migration transaction.
+ *
+ * If a home somehow does hold events, keep everything and say so loudly:
+ * silently deleting operator data is never the right answer to a surprise.
+ */
+function dropActivityLedgerSchema(database: Database.Database): void {
+  const lookup = database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").pluck();
+  const present = ACTIVITY_LEDGER_TABLES.filter((table) => lookup.get(table) !== undefined);
+  if (present.length === 0) return;
+  if (present.includes('activity_events')) {
+    const rows = database.prepare('SELECT COUNT(*) FROM activity_events').pluck().get() as number;
+    if (rows > 0) {
+      logger.warn(
+        `Refusing to drop the removed Activity ledger: activity_events holds ${rows} row(s). ` +
+        `Leaving ${present.join(', ')} in place — drop them by hand once those rows are exported.`,
+      );
+      return;
+    }
+  }
+  for (const table of present) database.exec(`DROP TABLE ${table}`);
+}
+
 export function initDb(): Database.Database {
   if (db) return db;
   // Fail fast on a near-full disk before any write — running out of space during
@@ -589,10 +624,7 @@ export function initDb(): Database.Database {
     // directly, or replace only a read-only-preflighted empty prerelease shape.
     migrateWorkItemsSchema(database, todoPreflight);
     database.exec(CREATE_WORK_ITEM_SESSION_INDEX);
-    // Normalized operational Activity ledger. Additive and idempotent for both
-    // fresh and existing homes; historical domain projection is checkpointed by
-    // the Activity projector rather than faked inside schema migration.
-    migrateActivitySchema(database);
+    dropActivityLedgerSchema(database);
     database.exec(`
       CREATE TABLE IF NOT EXISTS queue_items (
         id TEXT PRIMARY KEY,
@@ -2148,7 +2180,7 @@ export function listPinnedSessions(): Session[] {
 
 /**
  * The N most-recently-active sessions, newest first — a bounded window for
- * polled endpoints (e.g. /api/activity) that only ever surface the recent tail.
+ * polled endpoints that only ever surface the recent tail.
  * `offset` pages deeper (newest-first) when the first window is all non-emitting
  * rows. Backed by idx_sessions_last_activity; avoids hydrating every row.
  */

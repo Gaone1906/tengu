@@ -145,8 +145,6 @@ import { summarizeCronRun } from "../cron/run-summary.js";
 import { reloadScheduler } from "../cron/scheduler.js";
 import { validateCronSchedule } from "../cron/validation.js";
 import { runCronJob } from "../cron/runner.js";
-import { ActivityQueryError, getActivityStory, queryActivityPage } from "../activity/query.js";
-import type { ActivityKind, ActivityOutcomeState } from "../activity/types.js";
 import QRCode from "qrcode";
 import { WhatsAppConnector } from "../connectors/whatsapp/index.js";
 import { handleFilesRequest, handleSessionAttachment, fileIdsToMedia, rehomeAttachmentsToSession, ensureFilesDir, mimeFromFilename, MultipartUploadError, readLocalFileForIngestion, readMultipartFile, sanitizeUploadFilename } from "./files.js";
@@ -6316,37 +6314,6 @@ export async function handleApiRequest(
         ...connector.getHealth(),
       }));
       return json(res, connectors);
-    }
-
-    // GET /api/activity — normalized operational stories. Raw gateway text
-    // remains available separately at /api/logs for Diagnostics.
-    if (method === "GET" && pathname === "/api/activity") {
-      try {
-        const rawLimit = url.searchParams.get("limit");
-        const kinds = url.searchParams.get("kinds")?.split(",").map((value) => value.trim()).filter(Boolean) as ActivityKind[] | undefined;
-        const outcomes = url.searchParams.get("outcomes")?.split(",").map((value) => value.trim()).filter(Boolean) as ActivityOutcomeState[] | undefined;
-        return json(res, queryActivityPage({
-          ...(rawLimit !== null ? { limit: Number(rawLimit) } : {}),
-          ...(url.searchParams.get("cursor") ? { cursor: url.searchParams.get("cursor")! } : {}),
-          ...(url.searchParams.get("q") ? { q: url.searchParams.get("q")! } : {}),
-          ...(kinds?.length ? { kinds } : {}),
-          ...(outcomes?.length ? { outcomes } : {}),
-        }));
-      } catch (err) {
-        if (err instanceof ActivityQueryError) return badRequest(res, err.message);
-        throw err;
-      }
-    }
-
-    const activityStoryMatch = pathname.match(/^\/api\/activity\/(story_[a-f0-9]{24})$/);
-    if (method === "GET" && activityStoryMatch) {
-      try {
-        const detail = getActivityStory(activityStoryMatch[1]);
-        return detail ? json(res, detail) : notFound(res);
-      } catch (err) {
-        if (err instanceof ActivityQueryError) return badRequest(res, err.message);
-        throw err;
-      }
     }
 
     // GET /api/onboarding — check if onboarding is needed
