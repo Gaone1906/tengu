@@ -97,4 +97,81 @@ describe("CompactionStreamGate", () => {
     const out = [...gate.accept(text("Real reply.")), ...gate.end()];
     expect(joined(out)).toBe("Real reply.");
   });
+
+  /**
+   * Issue #102. `<suggestion>` is a model-generated *suggested next user turn*. It must
+   * not reach the transcript, but unlike `<analysis>` it must be STRIPPED, not dropped:
+   * it is usually fused to the front of a genuine reply, and dropping the message would
+   * trade an information leak for silent data loss.
+   */
+  describe("suggestion blocks", () => {
+    it("strips a leading suggestion block and keeps the reply behind it", () => {
+      const gate = new CompactionStreamGate();
+      const out = [
+        ...gate.accept(text("<suggestion>keep going</suggestion>Leg 1 returned.")),
+        ...gate.end(),
+      ];
+      expect(joined(out)).toBe("Leg 1 returned.");
+      expect(joined(out)).not.toContain("keep going");
+    });
+
+    /** Edge case from the report: the opening tag arrives split across stream deltas. */
+    it("strips a suggestion whose opening tag is split across deltas", () => {
+      const gate = new CompactionStreamGate();
+      const out = [
+        ...gate.accept(text("<sugg")),
+        ...gate.accept(text("estion>only notify me for todos i create")),
+        ...gate.accept(text("</suggestion>CTO's message crossed.")),
+        ...gate.end(),
+      ];
+      expect(joined(out)).toBe("CTO's message crossed.");
+      expect(joined(out)).not.toContain("notify me");
+    });
+
+    it("emits nothing for a standalone suggestion message", () => {
+      const gate = new CompactionStreamGate();
+      const out = [
+        ...gate.accept(text("<suggestion>Sounds good, keep going</suggestion>")),
+        ...gate.end(),
+      ];
+      expect(out).toEqual([]);
+    });
+
+    /** Edge case from the report: the message ends mid-block. Fail closed. */
+    it("fails closed on an unterminated suggestion block", () => {
+      const gate = new CompactionStreamGate();
+      const out = [
+        ...gate.accept(text("<suggestion>go with literal source == 'human'")),
+        ...gate.accept(text(" and re-arm")),
+        ...gate.end(),
+      ];
+      expect(out).toEqual([]);
+    });
+
+    it("releases held text when the opener turns out not to be a suggestion", () => {
+      const gate = new CompactionStreamGate();
+      const out = [
+        ...gate.accept(text("<sug")),
+        ...gate.accept(text("ar is sweet.")),
+        ...gate.end(),
+      ];
+      expect(joined(out)).toBe("<sugar is sweet.");
+    });
+
+    it("forwards the message_start context delta and still strips the suggestion after it", () => {
+      const gate = new CompactionStreamGate();
+      const startDeltas = sseEventToDeltas({
+        type: "message_start",
+        message: { usage: { input_tokens: 4200 } },
+      } as never);
+      gate.reset();
+      const out = [
+        ...gate.accept(startDeltas),
+        ...gate.accept(text("<suggestion>write the final report to Onyx</suggestion>Report written.")),
+        ...gate.end(),
+      ];
+      expect(out.map((d) => d.type)).toEqual(["context", "text"]);
+      expect(joined(out.filter((d) => d.type === "text"))).toBe("Report written.");
+    });
+  });
 });

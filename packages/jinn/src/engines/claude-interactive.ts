@@ -181,6 +181,36 @@ export function stripReasoningBlocks(text: string): string {
     .trim();
 }
 
+/** The Claude engine emits `<suggestion>…</suggestion>` — a model-generated *suggested
+ *  next user turn*. Jinn has no producer or consumer for the tag, so it lands in stored
+ *  transcripts as `role: "assistant"` content, where another agent reading the session
+ *  cannot tell it from an operator instruction. See issue #102.
+ *
+ *  STRIP, never drop the whole message: the observed shape is most often a suggestion
+ *  fused to the FRONT of a genuine reply with no separator, so dropping would trade an
+ *  information leak for silent data loss. Callers drop only when nothing but whitespace
+ *  survives (the standalone shape). Kept separate from stripReasoningBlocks so private
+ *  reasoning and suggested user turns stay independently testable. */
+export function stripSuggestionBlocks(text: string): string {
+  return text
+    // Complete block, anywhere in the message.
+    .replace(/<\s*suggestion\b[^>]*>[\s\S]*?<\s*\/\s*suggestion\s*>/gi, "")
+    // Opened and never closed (message ends inside the block) — fail closed: everything
+    // from the opening tag on is suggestion text, so strip to end of string.
+    .replace(/<\s*suggestion\b[^>]*>[\s\S]*$/i, "")
+    // Message ends part-way THROUGH the opening tag (`…<sugges`). Nothing genuine can
+    // follow it, and leaving the fragment would leak a half-rendered tag — drop it.
+    .replace(/<\s*s(?:u(?:g(?:g(?:e(?:s(?:t(?:i(?:o(?:n)?)?)?)?)?)?)?)?)?$/i, "")
+    .trim();
+}
+
+/** Every path that stores or relays engine assistant text runs this. The two strippers
+ *  stay separate above; composing them in one place means no call site can accidentally
+ *  apply only one of them. */
+export function sanitizeAssistantText(text: string): string {
+  return stripSuggestionBlocks(stripReasoningBlocks(text));
+}
+
 /** Cost for ONE turn. `afterMs` (the turn's start) scopes the cumulative
  *  transcript to this turn — see sumTranscriptUsage. */
 export function computeInteractiveCost(transcriptPath: string, model?: string, afterMs?: number): { cost: number; turns: number } | null {
@@ -315,17 +345,43 @@ export function sseEventToDeltas(e: SseDataEvent): StreamDelta[] {
  *  and drop the whole message when it matches. */
 const COMPACTION_OPENER = "<analysis>";
 
+/** The other engine meta-tag that must never reach a transcript: a suggested next
+ *  user turn (issue #102). Unlike `<analysis>` this is STRIPPED, not dropped — it is
+ *  usually fused to the front of a genuine reply, so dropping the message would lose
+ *  real content. The gate only needs the head-of-message case; `last_assistant_message`
+ *  is sanitized independently by sanitizeAssistantText, which handles every position. */
+const SUGGESTION_TAG = "<suggestion";
+const SUGGESTION_OPEN_RE = /^<\s*suggestion\b[^>]*>/i;
+const SUGGESTION_CLOSE_RE = /<\s*\/\s*suggestion\s*>/i;
+
+/** True while `s` is still a viable prefix of an opener the gate might act on, so it
+ *  must keep holding rather than latch `pass`. Handles an opening tag split across
+ *  stream deltas (`<sugg` + `estion>`). */
+function couldBeOpener(s: string): boolean {
+  if (!s) return true;
+  if (COMPACTION_OPENER.startsWith(s)) return true; // case-sensitive: unchanged behaviour
+  const lower = s.toLowerCase();
+  if (SUGGESTION_TAG.startsWith(lower)) return true;
+  // `<suggestion …` with attributes still arriving — not yet a prefix of any literal.
+  if (lower.startsWith(SUGGESTION_TAG) && !lower.includes(">")) return true;
+  return false;
+}
+
 /** Per-message gate: buffers the opening text of an assistant message just long
- *  enough to tell a real reply from a compaction summary. Exported for tests. */
+ *  enough to tell a real reply from a compaction summary (dropped whole) or a leading
+ *  suggested-user-turn block (stripped, remainder kept). Exported for tests. */
 export class CompactionStreamGate {
   private held: StreamDelta[] = [];
   private opening = "";
-  private verdict: "undecided" | "pass" | "drop" = "undecided";
+  private verdict: "undecided" | "pass" | "drop" | "stripping" = "undecided";
+  /** Text seen since a `<suggestion>` opener, awaiting its close tag. */
+  private stripBuf = "";
 
   /** A new assistant message started — decide again from scratch. */
   reset(): void {
     this.held = [];
     this.opening = "";
+    this.stripBuf = "";
     this.verdict = "undecided";
   }
 
@@ -335,6 +391,15 @@ export class CompactionStreamGate {
     for (const d of deltas) {
       if (this.verdict === "drop") continue;
       if (this.verdict === "pass") { out.push(d); continue; }
+      // Inside a `<suggestion>` block: swallow text until the close tag, then release
+      // the genuine reply that follows it (and everything after) untouched. A non-text
+      // delta cannot close the block, so it is swallowed too.
+      if (this.verdict === "stripping") {
+        if (d.type !== "text") continue;
+        this.stripBuf += String(d.content ?? "");
+        out.push(...this.consumeStripping());
+        continue;
+      }
       // `context` is the FIRST delta of every message (message_start carries
       // usage), so deciding the verdict on it would latch `pass` before any
       // text arrives and the gate would never drop anything. Forward it and
@@ -346,18 +411,38 @@ export class CompactionStreamGate {
       this.held.push(d);
       const trimmed = this.opening.trimStart();
       if (trimmed.startsWith(COMPACTION_OPENER)) { this.verdict = "drop"; this.held = []; continue; }
-      if (!trimmed || COMPACTION_OPENER.startsWith(trimmed)) continue; // still could be it
+      const open = SUGGESTION_OPEN_RE.exec(trimmed);
+      if (open) {
+        // Discard the held opener text; keep scanning for the close tag.
+        this.held = [];
+        this.verdict = "stripping";
+        this.stripBuf = trimmed.slice(open[0].length);
+        out.push(...this.consumeStripping());
+        continue;
+      }
+      if (couldBeOpener(trimmed)) continue; // still could be it
       this.verdict = "pass";
       out.push(...this.flush());
     }
     return out;
   }
 
-  /** Message finished — release anything still held (messages shorter than the opener). */
+  /** Message finished — release anything still held (messages shorter than the opener).
+   *  An unterminated `<suggestion>` block releases nothing: fail closed. */
   end(): StreamDelta[] {
-    const out = this.verdict === "drop" ? [] : this.flush();
+    const out = this.verdict === "drop" || this.verdict === "stripping" ? [] : this.flush();
     this.reset();
     return out;
+  }
+
+  /** Emit the remainder of a suggestion block once its close tag has arrived. */
+  private consumeStripping(): StreamDelta[] {
+    const close = SUGGESTION_CLOSE_RE.exec(this.stripBuf);
+    if (!close) return []; // block still open — keep swallowing
+    const rest = this.stripBuf.slice(close.index + close[0].length);
+    this.stripBuf = "";
+    this.verdict = "pass";
+    return rest ? [{ type: "text", content: rest }] : [];
   }
 
   private flush(): StreamDelta[] {
@@ -463,7 +548,7 @@ export class TurnResolver {
     // Native local commands (/usage, /limits, …) produce no new assistant
     // message; the Stop hook's last_assistant_message is the prior turn's stale
     // text. Settling with it would persist a duplicate chat echo — settle empty.
-    const text = this.opts.native ? "" : stripReasoningBlocks(String(this.stopPayload.last_assistant_message ?? ""));
+    const text = this.opts.native ? "" : sanitizeAssistantText(String(this.stopPayload.last_assistant_message ?? ""));
     this.settle({ sessionId: sid, result: text, error: undefined, numTurns: 1 });
   }
 
@@ -485,7 +570,7 @@ export class TurnResolver {
 
   completeRecovered(text: string, sessionId?: string): void {
     if (sessionId && !this.claudeSessionId) this.claudeSessionId = sessionId;
-    this.settle({ sessionId: this.claudeSessionId ?? this.opts.fallbackSessionId ?? "", result: stripReasoningBlocks(text), numTurns: 1 });
+    this.settle({ sessionId: this.claudeSessionId ?? this.opts.fallbackSessionId ?? "", result: sanitizeAssistantText(text), numTurns: 1 });
   }
 
   /** Proof of life (SSE delta / tool hook) while a StopFailure is pending —
@@ -1365,7 +1450,7 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
       const recovered = recoveryPath ? lastAssistantTextFromTranscript(recoveryPath, turnStartedAt) : undefined;
       if (recovered) {
         logger.info(`Recovered ${recovered.length} chars of lost turn text for session ${jinnSessionId} from transcript (Stop hook missing)`);
-        result.result = stripReasoningBlocks(recovered);
+        result.result = sanitizeAssistantText(recovered);
       }
     }
     // Map a StopFailure rate-limit into result.rateLimit so manager.ts's
@@ -1738,7 +1823,7 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
       const text = String(h.last_assistant_message ?? "");
       const sid = typeof h.session_id === "string" ? h.session_id : "";
       this.cancelLateRecovery(jinnSessionId);
-      const safeText = stripReasoningBlocks(text);
+      const safeText = sanitizeAssistantText(text);
       if (safeText.trim()) {
         logger.info(`InteractiveClaudeEngine: late Stop superseded failed turn for ${jinnSessionId}`);
         opts.onLateRecovery?.({ result: safeText, sessionId: sid });
