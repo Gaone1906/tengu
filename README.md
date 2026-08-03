@@ -296,6 +296,11 @@ models:
       - { id: "Gemini 3.5 Flash (Medium)", label: "Gemini 3.5 Flash Medium", supportsEffort: false, effortLevels: [], contextWindow: 1000000 }
       - { id: "Gemini 3.5 Flash (High)", label: "Gemini 3.5 Flash High", supportsEffort: false, effortLevels: [], contextWindow: 1000000 }
       - { id: "Gemini 3.5 Flash (Low)", label: "Gemini 3.5 Flash Low", supportsEffort: false, effortLevels: [], contextWindow: 1000000 }
+      - { id: "Gemini 3.1 Pro (High)", label: "Gemini 3.1 Pro High", supportsEffort: false, effortLevels: [], contextWindow: 1000000 }
+      - { id: "Gemini 3.1 Pro (Low)", label: "Gemini 3.1 Pro Low", supportsEffort: false, effortLevels: [], contextWindow: 1000000 }
+      - { id: "Claude Sonnet 4.6 (Thinking)", label: "Claude Sonnet 4.6 Thinking", supportsEffort: false, effortLevels: [], contextWindow: 200000 }
+      - { id: "Claude Opus 4.6 (Thinking)", label: "Claude Opus 4.6 Thinking", supportsEffort: false, effortLevels: [], contextWindow: 200000 }
+      - { id: "GPT-OSS 120B (Medium)", label: "GPT-OSS 120B Medium", supportsEffort: false, effortLevels: [], contextWindow: 131072 }
 
 connectors: {}
 portal:
