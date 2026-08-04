@@ -63,6 +63,37 @@ Reactions provide visual feedback during processing:
 - `@mention`: messages mentioning a specific employee name route to that employee
 - Thread continuity: replies in a thread continue with the same employee
 
+## Named Instances
+
+`connectors.instances[]` declares connectors explicitly, so you can run several of the
+same type — each with its own credentials and its own employee.
+
+```yaml
+connectors:
+  instances:
+    - id: slack-support      # unique connector id
+      type: slack            # slack | discord | telegram | whatsapp
+      employee: support-lead # optional — who handles messages from this connector
+      appToken: xapp-...     # remaining keys are the type's own config
+      botToken: xoxb-...
+    - id: telegram-ops
+      type: telegram
+      botToken: ...
+```
+
+Both config forms produce the same thing at runtime: a top-level connector
+(`connectors.slack`, `connectors.discord`, `connectors.telegram`, `connectors.whatsapp`)
+is simply an instance whose `id` defaults to its type. So `connectors.slack` and an
+instance with `id: slack` are the same connector — the duplicate is skipped, as is any
+entry missing `id` or `type`.
+
+Connector ids are what the rest of the gateway addresses:
+
+- `POST /api/connectors/<id>/send` and the `send_connector_message` company tool
+- the `## Available connectors` list in every session's context
+- `POST /api/connectors/reload`, which stops every running connector and restarts it
+  from the current `config.yaml` — regardless of which form declared it
+
 ## Future Connectors
 
 The connector interface is designed for additional platforms:

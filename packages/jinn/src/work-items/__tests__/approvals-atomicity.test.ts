@@ -31,7 +31,7 @@ let approvals: Approvals;
 beforeAll(async () => {
   store = await import("../store.js");
   approvals = await import("../approvals.js");
-  (await import("../../sessions/registry.js")).initDb();
+  (await import("../../shared/db.js")).initDb();
 });
 
 function pendingInReview(id: string) {

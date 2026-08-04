@@ -18,7 +18,7 @@ beforeAll(async () => {
   registry = await import("../registry.js");
   workItems = await import("../../work-items/store.js");
   contract = await import("../delegation-completion-contract.js");
-  registry.initDb();
+  (await import("../../shared/db.js")).initDb();
 });
 
 describe("delegation completion contract atomic guard", () => {

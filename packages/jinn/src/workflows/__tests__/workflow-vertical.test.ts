@@ -241,7 +241,7 @@ beforeEach(() => {
   database = openWorkflowDatabase(path.join(root, "workflows.db"));
   repository = new WorkflowRepository(database);
   engine = new DeferredEngine();
-  manager = new SessionManager(config, new Map([["claude", engine], ["codex", engine]]), [], "vertical-boot", (id) => id === employee.name ? employee : undefined);
+  manager = new SessionManager(config, new Map([["claude", engine], ["codex", engine]]), "vertical-boot", (id) => id === employee.name ? employee : undefined);
   changes = [];
   service = createService();
 });
@@ -296,7 +296,7 @@ describe("first Workflow vertical", () => {
     engine.resolve({ sessionId: "native-recovered", result: "Recovered.\n```jinn-output\n{\"result\":\"ok\"}\n```", durationMs: 1 });
     await vi.waitFor(() => expect(getSession(repository.getRun(authored.id, lost.id)!.attempts[0]!.sessionId!)?.attemptOutcome).toBe("succeeded"));
 
-    manager = new SessionManager(config, new Map([["claude", engine], ["codex", engine]]), [], "reconstructed", (id) => id === employee.name ? employee : undefined);
+    manager = new SessionManager(config, new Map([["claude", engine], ["codex", engine]]), "reconstructed", (id) => id === employee.name ? employee : undefined);
     service = createService();
     expect(await service.recover(new Date().toISOString())).toEqual({ resumedRuns: 1, resumedWaits: 0 });
     expect(await service.recover(new Date().toISOString())).toEqual({ resumedRuns: 0, resumedWaits: 0 });

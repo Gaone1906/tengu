@@ -10,7 +10,7 @@ import path from "node:path";
 // focused and CI-portable.
 vi.mock("node-pty", () => ({ spawn: vi.fn() }));
 
-import { SUBMIT_ACK_HOOKS, InteractiveClaudeEngine, TurnResolver, buildAttachmentSuffix, buildInteractiveArgs, claudeHookToDeltas, computeInteractiveCost, neutralizeImagePathsForPaste, pasteAndSubmit, shouldSettleStalledTurn, sumTranscriptUsage } from "../claude-interactive.js";
+import { SUBMIT_ACK_HOOKS, InteractiveClaudeEngine, TurnResolver, buildAttachmentSuffix, buildInteractiveArgs, claudeHookToDeltas, computeInteractiveCost, neutralizeImagePathsForPaste, pasteAndSubmit, sanitizeAssistantText, shouldSettleStalledTurn, stripSuggestionBlocks, sumTranscriptUsage } from "../claude-interactive.js";
 import { costOfUsage } from "../../shared/model-pricing.js";
 import { MAIN_AGENT_SENTINEL } from "../sse-pty-proxy.js";
 import { buildPromptWithPlatformContext } from "../platform-context.js";
@@ -132,6 +132,98 @@ describe("TurnResolver", () => {
     const v = await r.promise;
     expect(v.result).toBe("Visible transcript answer.");
     expect(v.result).not.toContain("private transcript reasoning");
+  });
+
+  /**
+   * Issue #102. The Stop hook's last_assistant_message is the message another agent
+   * later reads via read_session, so this is the path where a model-generated
+   * "suggested next user turn" becomes indistinguishable from an operator instruction.
+   * The observed shape is a suggestion fused to the FRONT of a genuine reply with no
+   * separator — so the block is stripped and the real reply must survive intact.
+   */
+  it("strips a suggestion block fused to the front of a Stop hook reply, keeping the reply", async () => {
+    const r = new TurnResolver({ fallbackSessionId: "warm-sid", assumeStarted: true });
+    r.onHook({
+      hook_event_name: "Stop",
+      last_assistant_message: "<suggestion>go with literal source == 'human' and re-arm</suggestion>Forge's stand-down confirms the rollback landed.",
+    });
+    const v = await r.promise;
+    expect(v.result).toBe("Forge's stand-down confirms the rollback landed.");
+    expect(v.result).not.toContain("re-arm");
+    expect(v.result).not.toContain("suggestion");
+  });
+
+  it("settles empty when a Stop hook message is nothing but a suggestion block", async () => {
+    const r = new TurnResolver({ fallbackSessionId: "warm-sid", assumeStarted: true });
+    r.onHook({
+      hook_event_name: "Stop",
+      last_assistant_message: "  <suggestion>Sounds good, keep going</suggestion>  ",
+    });
+    const v = await r.promise;
+    expect(v.result).toBe("");
+  });
+
+  it("strips a suggestion block from recovered transcript text", async () => {
+    const r = new TurnResolver({ fallbackSessionId: "old" });
+    r.onHook({ hook_event_name: "SessionStart", session_id: "c1" });
+    r.completeRecovered("<suggestion>keep going</suggestion>Leg 1 returned.", "c1");
+    const v = await r.promise;
+    expect(v.result).toBe("Leg 1 returned.");
+    expect(v.result).not.toContain("keep going");
+  });
+});
+
+/**
+ * Issue #102: `<suggestion>` is a Claude-engine "suggested next user turn". Jinn has no
+ * producer or consumer for it, so it lands in transcripts as assistant content that
+ * other agents read as operator instruction. Strip the block, keep the remainder.
+ */
+describe("stripSuggestionBlocks", () => {
+  it("strips a complete block and keeps the genuine reply fused behind it", () => {
+    expect(stripSuggestionBlocks("<suggestion>archive the test todos</suggestion>CTO's message crossed."))
+      .toBe("CTO's message crossed.");
+  });
+
+  it("keeps text that precedes the block", () => {
+    expect(stripSuggestionBlocks("Report filed.<suggestion>keep going</suggestion>")).toBe("Report filed.");
+  });
+
+  it("leaves a message with no suggestion block byte-identical apart from trim", () => {
+    expect(stripSuggestionBlocks("Plain answer with a < sign and </suggestions> nearby."))
+      .toBe("Plain answer with a < sign and </suggestions> nearby.");
+  });
+
+  it("strips every block when several appear", () => {
+    expect(stripSuggestionBlocks("<suggestion>a</suggestion>real<suggestion>b</suggestion>tail"))
+      .toBe("realtail");
+  });
+
+  it("tolerates attributes, whitespace and mixed case in the tag", () => {
+    expect(stripSuggestionBlocks('<Suggestion type="reply" >keep going< / SUGGESTION >Answer.'))
+      .toBe("Answer.");
+  });
+
+  /** Edge case from the report: message ends inside an open block. Fail closed. */
+  it("strips to end of string for an unterminated block", () => {
+    expect(stripSuggestionBlocks("Answer.<suggestion>wrap up and report to Onyx when"))
+      .toBe("Answer.");
+  });
+
+  /** Edge case from the report: message ends part-way through the opening tag. */
+  it("strips a truncated opening tag at end of string", () => {
+    expect(stripSuggestionBlocks("Answer.<sugges")).toBe("Answer.");
+    expect(stripSuggestionBlocks("Answer.<suggestion")).toBe("Answer.");
+  });
+
+  it("returns empty for a standalone block so callers can drop the message", () => {
+    expect(stripSuggestionBlocks("<suggestion>Onyx will handle archiving those</suggestion>")).toBe("");
+  });
+});
+
+describe("sanitizeAssistantText", () => {
+  it("strips reasoning and suggestion blocks together", () => {
+    expect(sanitizeAssistantText("<thinking>private</thinking><suggestion>keep going</suggestion>Visible answer."))
+      .toBe("Visible answer.");
   });
 });
 

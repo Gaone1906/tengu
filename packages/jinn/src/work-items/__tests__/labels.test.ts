@@ -17,7 +17,7 @@ let db: import("better-sqlite3").Database;
 beforeAll(async () => {
   store = await import("../store.js");
   labels = await import("../labels.js");
-  db = (await import("../../sessions/registry.js")).initDb();
+  db = (await import("../../shared/db.js")).initDb();
 });
 
 describe("createLabel", () => {

@@ -162,11 +162,11 @@ beforeAll(async () => {
   registry = await import("../registry.js");
   managerModule = await import("../manager.js");
   api = await import("../../gateway/api.js");
-  registry.initDb();
+  (await import("../../shared/db.js")).initDb();
 });
 
-beforeEach(() => {
-  registry.initDb().exec("DELETE FROM messages; DELETE FROM queue_items; DELETE FROM sessions;");
+beforeEach(async () => {
+  (await import("../../shared/db.js")).initDb().exec("DELETE FROM messages; DELETE FROM queue_items; DELETE FROM sessions;");
 });
 
 describe("SessionManager platform context dispatch", () => {
@@ -180,7 +180,7 @@ describe("SessionManager platform context dispatch", () => {
       { sessionId: "codex-native", result: "ok" },
     ];
     const engine = capturingEngine("codex", runs, (runNumber) => results[runNumber - 1]);
-    const manager = new managerModule.SessionManager(makeConfig(), new Map([["codex", engine]]), [], "boot-a" as any);
+    const manager = new managerModule.SessionManager(makeConfig(), new Map([["codex", engine]]), "boot-a" as any);
     const connector = connectorStub();
 
     await manager.route(incoming("initial success"), connector);
@@ -212,7 +212,7 @@ describe("SessionManager platform context dispatch", () => {
       return { sessionId: "codex-native", result: "ok" };
     });
     const engines = new Map<string, Engine>([["codex", engine]]);
-    const manager = new managerModule.SessionManager(makeConfig(), engines, [], "boot-a" as any);
+    const manager = new managerModule.SessionManager(makeConfig(), engines, "boot-a" as any);
     const connector = connectorStub();
 
     await manager.route(incoming("initial success"), connector);
@@ -243,7 +243,7 @@ describe("SessionManager platform context dispatch", () => {
       ["claude", capturingEngine("claude", betaRuns)],
     ]);
     let config = makeConfig();
-    const manager = new managerModule.SessionManager(config, engines, [], "boot-a" as any);
+    const manager = new managerModule.SessionManager(config, engines, "boot-a" as any);
     const connector = connectorStub();
 
     await manager.route(incoming("turn 1"), connector);
@@ -272,7 +272,7 @@ describe("SessionManager platform context dispatch", () => {
     await manager.route(incoming("config stable", "channel-b"), connector);
     expect(alphaRuns.slice(7, 9).map(headingCount)).toEqual([1, 0]);
 
-    const restarted = new managerModule.SessionManager(config, engines, [], "boot-b" as any);
+    const restarted = new managerModule.SessionManager(config, engines, "boot-b" as any);
     await restarted.route(incoming("after restart", "channel-b"), connector);
     await restarted.route(incoming("restart stable", "channel-b"), connector);
     expect(alphaRuns.slice(9, 11).map(headingCount)).toEqual([1, 0]);

@@ -10,11 +10,9 @@ process.env.JINN_HOME = tmp;
 
 type Store = typeof import("../store.js");
 type Reconcile = typeof import("../reconcile.js");
-type Reg = typeof import("../../sessions/registry.js");
 
 let store: Store;
 let reconcile: Reconcile;
-let reg: Reg;
 let db: import("better-sqlite3").Database;
 
 type SessionStatus = "idle" | "running" | "error" | "waiting" | "interrupted";
@@ -48,8 +46,7 @@ function phaseSession(id: string, workItemId: string, status: SessionStatus, at:
 beforeAll(async () => {
   store = await import("../store.js");
   reconcile = await import("../reconcile.js");
-  reg = await import("../../sessions/registry.js");
-  db = reg.initDb();
+  db = (await import("../../shared/db.js")).initDb();
 });
 
 describe("deriveWorkItemStatus — pure truth table (GRS-021a elevated vocabulary)", () => {

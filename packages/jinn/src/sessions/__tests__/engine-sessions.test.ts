@@ -8,11 +8,12 @@ import Database from "better-sqlite3";
 // is resolved at module load).
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-engine-sessions-"));
 process.env.JINN_HOME = tmp;
+const migrateModule = await import("../migrate.js");
 const reg = await import("../registry.js");
 
 describe("engine session refs", () => {
-  beforeEach(() => {
-    const db = reg.initDb();
+  beforeEach(async () => {
+    const db = (await import("../../shared/db.js")).initDb();
     db.exec("DELETE FROM messages; DELETE FROM queue_items; DELETE FROM sessions;");
   });
 
@@ -34,7 +35,7 @@ describe("engine session refs", () => {
       )
     `);
 
-    reg.migrateSessionsSchema(db);
+    migrateModule.migrateSessionsSchema(db);
 
     const cols = db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>;
     expect(cols.map((col) => col.name)).toContain("engine_sessions");

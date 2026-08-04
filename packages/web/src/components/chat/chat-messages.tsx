@@ -182,7 +182,7 @@ function groupTodoCreationBursts(items: MessageItem[]): MessageItem[] {
   return grouped
 }
 
-function groupMessages(messages: Message[]): MessageItem[] {
+export function groupMessages(messages: Message[]): MessageItem[] {
   const items: MessageItem[] = []
   const suppressedToolIds = suppressedActivityToolIds(messages)
   const hasDelegationBlock = messages.some((message) =>
@@ -263,6 +263,19 @@ function isAnswerMessage(msg: Message): boolean {
  *  part of the model's work) — a mid-turn banner splits the region. */
 function isSystemBanner(msg: Message): boolean {
   return msg.role === 'notification' && !parseTeammateReply(msg) && !parseAgentRelay(msg)
+}
+
+function messageMedia(msg: Message) {
+  return msg.media?.length ? msg.media : parseMedia(msg.content)
+}
+
+function itemHasAssistantMedia(item: MessageItem): boolean {
+  const messages = item.kind === 'tool-group' || item.kind === 'todo-burst'
+    ? item.msgs
+    : item.kind === 'callback-burst'
+      ? item.entries.map((entry) => entry.msg)
+      : [item.msg]
+  return messages.some((message) => message.role === 'assistant' && messageMedia(message).length > 0)
 }
 
 /** A child callback ("dev replied") or an agent relay ("From dev [hop N]"): an
@@ -428,7 +441,7 @@ function settledDurationMs(messages: Message[], answerIndex: number): number | n
   return end - start
 }
 
-function buildFoldSummary(run: MessageItem[], messages: Message[], answerIndex: number): FoldSummaryData {
+export function buildFoldSummary(run: MessageItem[], messages: Message[], answerIndex: number): FoldSummaryData {
   let tools = 0
   let updates = 0
   const teammates = new Set<string>()
@@ -462,7 +475,7 @@ function buildFoldSummary(run: MessageItem[], messages: Message[], answerIndex: 
       continue
     }
     // Interim prose the model wrote on the way to the answer.
-    if (isAnswerMessage(msg)) updates += 1
+    if (isAnswerMessage(msg) && messageMedia(msg).length === 0) updates += 1
     for (const block of msg.blocks || []) {
       const employee = block.payload?.employee
       if (typeof employee === 'string' && employee) {
@@ -475,9 +488,13 @@ function buildFoldSummary(run: MessageItem[], messages: Message[], answerIndex: 
 
 type RenderGroup =
   | { kind: 'plain'; item: MessageItem }
-  | { kind: 'fold'; id: string; items: MessageItem[]; answered: boolean; liveCompletion: boolean; summary: FoldSummaryData; answerIdx: number; animated: boolean }
+  | { kind: 'fold'; id: string; items: MessageItem[]; answered: boolean; liveCompletion: boolean; collapseRequested: boolean; summary: FoldSummaryData; answerIdx: number; animated: boolean }
 
-function partitionForFold(
+export function shouldFoldAfterNextAsk(messages: Message[], answerIndex: number): boolean {
+  return answerIndex >= 0 && messages.slice(answerIndex + 1).some((message) => message.role === 'user')
+}
+
+export function partitionForFold(
   items: MessageItem[],
   messages: Message[],
   incompleteTurnIds: ReadonlySet<string>,
@@ -498,11 +515,13 @@ function partitionForFold(
   // rows BEFORE that segment's answer. The answer stays outside, and the work
   // after it opens a NEW fold — so one logical turn can hold several
   // (fold → visible reply) segments (reply, child re-invoke, reply again).
-  // System banners stay outside too; a mid-turn banner splits the region.
+  // System banners and media-bearing assistant rows stay outside too; either
+  // one splits a mid-turn region without orphaning the work around it.
   const folds = (item: MessageItem): boolean => {
     const msg = itemFirstMsg(item)
     if (msg.role === 'user') return false
     if (item.kind === 'message' && isSystemBanner(item.msg)) return false
+    if (itemHasAssistantMedia(item)) return false
     if (itemHasActiveDelegation(item)) return false
     if (incompleteTurnIds.has(turnIdFor(itemFirstRawIndex(item)))) return false
     const answer = answerIdx[itemFirstRawIndex(item)]
@@ -560,13 +579,14 @@ function partitionForFold(
             : [item.msg]
         return rows.some((message) => message.blocks?.some((block) => liveTerminalDelegationIds.has(block.id)))
       }),
+      collapseRequested: shouldFoldAfterNextAsk(messages, answer),
       summary: buildFoldSummary(run, messages, answer),
       answerIdx: answer,
       animated: true,
     })
   }
-  // When a banner splits one turn into several regions they all answer at the
-  // same instant — per-region scroll anchoring would double-compensate the
+  // When an exempt row splits one turn into several regions they all answer at
+  // the same instant — per-region scroll anchoring would double-compensate the
   // shared scroller. Only the region nearest the answer owns the settled
   // duration and plays the anchored choreography; earlier siblings fold with
   // the instant path.
@@ -771,6 +791,7 @@ export function AssistantRowShell({ transcript, children }: { transcript?: React
 
 const ACTION_BTN =
   'inline-flex h-[26px] w-[26px] items-center justify-center rounded-[7px] border-none bg-transparent text-[var(--text-quaternary)] transition-colors hover:bg-[var(--fill-tertiary)] hover:text-[var(--text-secondary)] cursor-pointer disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-[var(--text-quaternary)]'
+const MESSAGE_ACTIONS_ROW = 'msg-actions mt-0.5 -ml-1 flex h-[26px] items-center gap-0.5'
 
 function MessageActions({ id, text, onRetry, retryDisabled }: { id: string; text: string; onRetry?: () => void; retryDisabled?: boolean }) {
   const [copied, setCopied] = useState(false)
@@ -786,7 +807,7 @@ function MessageActions({ id, text, onRetry, retryDisabled }: { id: string; text
   }
 
   return (
-    <div className="msg-actions mt-0.5 -ml-1 flex items-center gap-0.5">
+    <div className={MESSAGE_ACTIONS_ROW}>
       <button onClick={handleCopy} aria-label={copied ? 'Copied' : 'Copy message'} title={copied ? 'Copied' : 'Copy'} className={ACTION_BTN}>
         {copied ? (
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -972,7 +993,7 @@ const MessageRow = React.memo(function MessageRow({ msg, index: i, messages, loa
   const isUser = msg.role === 'user'
   const isNotification = msg.role === 'notification'
   const showTimestamp = shouldShowTimestamp(messages, i)
-  const media = msg.media || parseMedia(msg.content)
+  const media = messageMedia(msg)
   const blocks = msg.blocks || []
   const hasBlocks = blocks.length > 0
   const teammate = useMemo(() => parseTeammateReply(msg), [msg])
@@ -1125,10 +1146,9 @@ const MessageRow = React.memo(function MessageRow({ msg, index: i, messages, loa
 
 /* ── StreamingBubble — always re-renders on every token ── */
 
-// Structural parity rule: this container renders the IDENTICAL prefix stack
-// (timestamp divider or role-switch spacer) and the same row/bubble classes
-// as the MessageRow that will replace it, so the stream→final swap is a pure
-// text-node replacement — the jump is impossible by construction.
+// Structural parity rule: the streaming row shares the final row's prefix,
+// shell and action-row footprint. The caret and controls swap below the answer,
+// so a bottom-pinned stream→final replacement does not move its first line.
 function StreamingBubble({ streamingText, prevMessage, startedAt }: {
   streamingText: string
   prevMessage?: Message
@@ -1152,7 +1172,9 @@ function StreamingBubble({ streamingText, prevMessage, startedAt }: {
             <span className="stream-caret" aria-hidden="true" />
           </>
         )}
-      />
+      >
+        <div data-message-actions-reserve aria-hidden="true" className={MESSAGE_ACTIONS_ROW} />
+      </AssistantRowShell>
     </div>
   )
 }
@@ -1376,9 +1398,20 @@ export function ChatMessages({
   // The hook owns terminal-response lifecycle independently of `loading`, which
   // can clear for waiting/idle/stopped states. Until a real final response lands,
   // the latest turn remains ordinary stream content with no fold DOM.
+  const previousTurnPendingRef = useRef(turnPending)
+  const turnJustCompleted = previousTurnPendingRef.current && !turnPending
+  useEffect(() => {
+    previousTurnPendingRef.current = turnPending
+  }, [turnPending])
+  const latestMessage = messages.at(-1)
+  const effectiveLiveFinalResponseId = liveFinalResponseId ?? (
+    turnJustCompleted && latestMessage?.role === 'assistant' && !latestMessage.partial
+      ? latestMessage.id ?? null
+      : null
+  )
   const currentTurnId = latestTurnId(messages)
-  const liveFinalPresent = liveFinalResponseId === null
-    || messages.some((message) => message.id === liveFinalResponseId)
+  const liveFinalPresent = effectiveLiveFinalResponseId === null
+    || messages.some((message) => message.id === effectiveLiveFinalResponseId)
   const incompleteTurnIds = (turnPending || !liveFinalPresent) && currentTurnId
     ? new Set([currentTurnId])
     : new Set<string>()
@@ -1389,7 +1422,7 @@ export function ChatMessages({
     groupedMessages,
     messages,
     incompleteTurnIds,
-    liveFinalResponseId,
+    effectiveLiveFinalResponseId,
     liveTerminalDelegationIds,
   )
 
@@ -1533,6 +1566,7 @@ export function ChatMessages({
                 key={`fold-${group.id}`}
                 answered={group.answered}
                 liveCompletion={group.liveCompletion}
+                collapseRequested={group.collapseRequested}
                 summary={group.summary}
                 animated={group.animated}
               >

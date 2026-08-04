@@ -8,7 +8,7 @@ The system should feel like placing simple blocks, not operating a framework. Pr
 
 ## 2. The Company Metaphor Is the API
 
-Employees, Todos, Workflows, Chats, and Notes are the public model. Internal objects can be richer, but users and agents should think in company terms: who owns work, what is pending, how work runs, where conversations happen, and which Markdown knowledge should persist.
+Employees, Todos, Workflows, Chats, Notes, and Experiments are the public model. Internal objects can be richer, but users and agents should think in company terms: who owns work, what is pending, how work runs, where conversations happen, which Markdown knowledge should persist, and which bets are being measured.
 
 Triggers are a Workflow detail: they bind supported wake-up events and polls to a reusable procedure. Notes are Markdown files below `knowledge/`; `docs/` remains read-only reference material.
 
@@ -18,7 +18,7 @@ Fresh work should not ping the operator by default. Employees handle their lane,
 
 ## 4. One Interface (MCP)
 
-For company state, the Jinn MCP is the hands. Employees should use it to read and update org, sessions, Todos, Workflows, Notes, cron, and reference material. Shell and filesystem access are for local implementation work or gaps the MCP does not cover.
+For company state, the Jinn MCP is the hands. Employees should use it to read and update org, sessions, Todos, Workflows, Notes, Experiments, cron, and reference material. Shell and filesystem access are for local implementation work or gaps the MCP does not cover.
 
 ## 5. Uniform Contracts
 

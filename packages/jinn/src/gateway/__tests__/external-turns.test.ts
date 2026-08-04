@@ -16,7 +16,7 @@ let ext: Ext;
 beforeAll(async () => {
   reg = await import("../../sessions/registry.js");
   ext = await import("../external-turns.js");
-  reg.initDb();
+  (await import("../../shared/db.js")).initDb();
 });
 
 let seq = 0;

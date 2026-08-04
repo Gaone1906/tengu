@@ -21,7 +21,7 @@ beforeAll(async () => {
   store = await import("../store.js");
   relations = await import("../relations.js");
   migrate = await import("../migrate.js");
-  db = (await import("../../sessions/registry.js")).initDb();
+  db = (await import("../../shared/db.js")).initDb();
 });
 
 function setStatus(id: string, status: string): void {

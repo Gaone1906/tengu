@@ -11,7 +11,7 @@ let store: Store;
 
 beforeAll(async () => {
   store = await import("../store.js");
-  (await import("../../sessions/registry.js")).initDb();
+  (await import("../../shared/db.js")).initDb();
 });
 
 describe("getWorkItemTree", () => {

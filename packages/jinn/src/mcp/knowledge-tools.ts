@@ -1,4 +1,5 @@
 import { assertBoundCaller, gatewayGet, JinnMcpToolError, type JinnMcpTool } from "./toolkit.js";
+import { hasControlBytes } from "../shared/sanitize.js";
 
 /**
  * GRS-020b — the knowledge tool group of the `jinn` MCP server: agents search
@@ -8,7 +9,7 @@ import { assertBoundCaller, gatewayGet, JinnMcpToolError, type JinnMcpTool } fro
  * sessions/context.ts).
  *
  * Domain rules this module owns:
- *   - INSTANCE-ROOT INVARIANT (enforced in knowledge/store.ts behind the
+ *   - INSTANCE-ROOT INVARIANT (enforced in notes/store.ts behind the
  *     routes): reads accept any relative instance file, while realpath
  *     containment rejects `..`, absolute paths, and symlink escapes.
  *   - CONTEXT-BOMB GUARDS: search returns ≤20 {path,title,snippet,matchCount}
@@ -26,19 +27,6 @@ import { assertBoundCaller, gatewayGet, JinnMcpToolError, type JinnMcpTool } fro
 export const KNOWLEDGE_QUERY_CHAR_CAP = 512;
 /** Tool-side relative-path cap (real paths are far shorter). */
 export const KNOWLEDGE_PATH_CHAR_CAP = 300;
-
-/** GRS-020b-fix: REJECT (never strip) control bytes on the RAW path arg. A
- *  trailing `%00`/NUL survives `.trim()`, and the gateway route's free-text
- *  cleaner would strip-then-accept it — so the tool fails first, on the raw
- *  value, before any normalization. Local codepoint predicate keeps this MCP
- *  module free of a sessions/registry (better-sqlite3) import. */
-function hasControlBytes(value: string): boolean {
-  for (let i = 0; i < value.length; i++) {
-    const c = value.charCodeAt(i);
-    if (c <= 0x1f || c === 0x7f) return true;
-  }
-  return false;
-}
 
 function requireString(args: Record<string, unknown>, name: string, max: number): string {
   const v = args[name];

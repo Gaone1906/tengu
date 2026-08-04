@@ -3,14 +3,14 @@ import React, { useEffect, useState, useRef, useCallback, useMemo, useSyncExtern
 import { useVirtualizer } from "@tanstack/react-virtual"
 import { useQueryClient } from "@tanstack/react-query"
 import { Link } from "react-router-dom"
-import { ChevronDown, Clock3, Copy, EllipsisVertical, Focus, Layers, Pencil, Pin, Plus, Search, SquarePen, Trash2, X } from "lucide-react"
+import { ChevronDown, Clock3, EllipsisVertical, Focus, Layers, Pencil, Pin, Plus, Search, SquarePen, Trash2, Workflow as WorkflowIcon, X } from "lucide-react"
 import { api, type BackgroundActivity, type DelegatedActivity, type Employee, type SessionsResponse } from "@/lib/api"
 import { useOrg } from "@/hooks/use-employees"
 import { EmployeeAvatar } from "@/components/ui/employee-avatar"
 import { useSettings } from "@/routes/settings-provider"
 import { cleanPreview } from "@/lib/clean-preview"
 import { queryKeys } from "@/lib/query-keys"
-import { useSessions, usePinnedSessions, useSessionCounts, useSessionSearch, useUpdateSession, useDeleteSession, useBulkDeleteSessions, useDuplicateSession, useArchiveSession, useUnarchiveSession } from "@/hooks/use-sessions"
+import { useSessions, usePinnedSessions, useSessionCounts, useSessionSearch, useUpdateSession, useDeleteSession, useBulkDeleteSessions, useDuplicateSession, useArchiveSession, useUnarchiveSession, useStopSession } from "@/hooks/use-sessions"
 import { usePins, useTogglePin } from "@/hooks/use-pins"
 import {
   ContextMenu,
@@ -37,6 +37,13 @@ import {
 } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 import { mergeSidebarEmployees, bucketByDay, summarizeOlder, isFocusedSession } from "@/components/chat/chat-route-helpers"
+import {
+  SESSION_MENU_CONTENT_CLASS,
+  SESSION_MENU_ITEM_CLASS,
+  SESSION_MENU_SEPARATOR_CLASS,
+  SessionRowMenu,
+  workflowRunPath,
+} from "@/components/chat/session-row-menu"
 
 interface Session {
   id: string
@@ -271,18 +278,6 @@ export function isVisibleSource(s: Pick<Session, "source">): boolean {
   return s.source === "web" || s.source === "cron" || s.source === "workflow" || s.source === "whatsapp" || s.source === "discord" || !s.source
 }
 
-export function workflowRunPath(sourceRef: string | undefined): string | null {
-  if (!sourceRef) return null
-  const parts = sourceRef.split(":")
-  if (
-    parts.length !== 5 ||
-    parts[0] !== "workflow" ||
-    parts.slice(1).some((part) => part.length === 0) ||
-    !/^\d+$/.test(parts[4]!)
-  ) return null
-  return `/workflow/${encodeURIComponent(parts[1]!)}/runs/${encodeURIComponent(parts[2]!)}`
-}
-
 export function WorkflowSessionChip({
   session,
 }: {
@@ -290,16 +285,26 @@ export function WorkflowSessionChip({
 }) {
   if (session.source !== "workflow") return null
   const path = workflowRunPath(session.sourceRef)
-  const className = "shrink-0 rounded-full bg-[color-mix(in_srgb,var(--system-indigo)_12%,transparent)] px-1.5 py-0.5 text-[9px] font-[var(--weight-semibold)] text-[var(--system-indigo)]"
-  if (!path) return <span className={className}>Workflow</span>
+  if (!path) {
+    return (
+      <span
+        role="img"
+        aria-label="Workflow session"
+        className="flex size-[18px] shrink-0 items-center justify-center text-[var(--system-indigo)]"
+      >
+        <WorkflowIcon aria-hidden className="size-3.5" />
+      </span>
+    )
+  }
   return (
     <Link
       to={path}
       onClick={(event) => event.stopPropagation()}
-      className={`${className} hover:bg-[color-mix(in_srgb,var(--system-indigo)_20%,transparent)]`}
+      aria-label="Open workflow run"
+      className="flex size-[18px] shrink-0 items-center justify-center rounded-full bg-[color-mix(in_srgb,var(--system-indigo)_12%,transparent)] text-[var(--system-indigo)] transition-colors hover:bg-[color-mix(in_srgb,var(--system-indigo)_20%,transparent)]"
       title="Open workflow run"
     >
-      Workflow
+      <WorkflowIcon aria-hidden className="size-3.5" />
     </Link>
   )
 }
@@ -601,6 +606,7 @@ interface SessionRowProps {
   onEmployeeSessionsAvailable?: (sessions: Session[]) => void
   togglePin: (pinKey: string) => void
   handleDuplicate: (sessionId: string) => void
+  handleStop: (sessionId: string) => void
   handleArchive: (session: Session) => void
   setDeleteTarget: (target: { type: "session" | "employee"; id: string; label: string; sessions?: Session[] } | null) => void
   setRenamingSessionId: (id: string | null) => void
@@ -620,6 +626,7 @@ const SessionRow = React.memo(function SessionRow({
   onEmployeeSessionsAvailable,
   togglePin,
   handleDuplicate,
+  handleStop,
   handleArchive,
   setDeleteTarget,
   setRenamingSessionId,
@@ -705,58 +712,49 @@ const SessionRow = React.memo(function SessionRow({
           )}
           <WorkflowSessionChip session={session} />
           {isPinned ? (
-            <Pin className="size-3 shrink-0 text-[var(--text-tertiary)] group-hover/session:lg:hidden group-has-[[data-state=open]]/session:lg:hidden" />
+            <Pin className="size-3 shrink-0 text-[var(--text-tertiary)] transition-opacity group-hover/session:lg:opacity-0 group-has-[[data-state=open]]/session:lg:opacity-0" />
           ) : null}
-          <span className="shrink-0 text-[10px] tabular-nums text-[var(--text-quaternary)] group-hover/session:lg:hidden group-has-[[data-state=open]]/session:lg:hidden">{sessionTime}</span>
+          <span className="shrink-0 text-[10px] tabular-nums text-[var(--text-quaternary)] transition-opacity group-hover/session:lg:opacity-0 group-has-[[data-state=open]]/session:lg:opacity-0">{sessionTime}</span>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <button
                 onClick={(e) => e.stopPropagation()}
                 aria-label="Session actions"
-                className="flex size-9 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:text-foreground lg:size-7 lg:hidden group-hover/session:lg:flex group-has-[[data-state=open]]/session:lg:flex"
+                className="flex size-9 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:text-foreground lg:absolute lg:right-2 lg:top-1/2 lg:size-7 lg:-translate-y-1/2 lg:hidden group-hover/session:lg:flex group-has-[[data-state=open]]/session:lg:flex"
               >
                 <EllipsisVertical className="size-3.5" />
               </button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuItem onClick={() => { renameCancelledRef.current = false; setRenamingSessionId(session.id) }}>
-                Rename
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => togglePin(session.id)}>
-                {isPinned ? "Unpin" : "Pin"}
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => handleDuplicate(session.id)}>
-                Duplicate...
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => handleArchive(session)}>
-                {isArchived ? "Unarchive chat" : "Archive chat"}
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem variant="destructive" onClick={() => setDeleteTarget({ type: "session", id: session.id, label: cleanPreview(sessionTitle) || "Untitled" })}>
-                Delete session
-              </DropdownMenuItem>
+            <DropdownMenuContent align="end" className={SESSION_MENU_CONTENT_CLASS}>
+              <SessionRowMenu
+                variant="dropdown"
+                session={session}
+                isPinned={isPinned}
+                isArchived={isArchived}
+                onRename={() => { renameCancelledRef.current = false; setRenamingSessionId(session.id) }}
+                onTogglePin={() => togglePin(session.id)}
+                onDuplicate={() => handleDuplicate(session.id)}
+                onArchive={() => handleArchive(session)}
+                onStop={() => handleStop(session.id)}
+                onDelete={() => setDeleteTarget({ type: "session", id: session.id, label: cleanPreview(sessionTitle) || "Untitled" })}
+              />
             </DropdownMenuContent>
           </DropdownMenu>
         </RowTag>
       </ContextMenuTrigger>
-      <ContextMenuContent>
-        <ContextMenuItem onClick={() => { renameCancelledRef.current = false; setRenamingSessionId(session.id) }}>
-          Rename
-        </ContextMenuItem>
-        <ContextMenuItem onClick={() => togglePin(session.id)}>
-          {isPinned ? "Unpin" : "Pin"}
-        </ContextMenuItem>
-        <ContextMenuItem onClick={() => handleDuplicate(session.id)}>
-          Duplicate...
-        </ContextMenuItem>
-        <ContextMenuItem onClick={() => handleArchive(session)}>
-          {isArchived ? "Unarchive chat" : "Archive chat"}
-        </ContextMenuItem>
-        <ContextMenuSeparator />
-        <ContextMenuItem variant="destructive" onClick={() => setDeleteTarget({ type: "session", id: session.id, label: cleanPreview(sessionTitle) || "Untitled" })}>
-          <span className="flex-1">Delete session</span>
-          <kbd className="ml-auto pl-3 font-mono text-[10px] text-[var(--text-quaternary)]">⌫</kbd>
-        </ContextMenuItem>
+      <ContextMenuContent className={SESSION_MENU_CONTENT_CLASS}>
+        <SessionRowMenu
+          variant="context"
+          session={session}
+          isPinned={isPinned}
+          isArchived={isArchived}
+          onRename={() => { renameCancelledRef.current = false; setRenamingSessionId(session.id) }}
+          onTogglePin={() => togglePin(session.id)}
+          onDuplicate={() => handleDuplicate(session.id)}
+          onArchive={() => handleArchive(session)}
+          onStop={() => handleStop(session.id)}
+          onDelete={() => setDeleteTarget({ type: "session", id: session.id, label: cleanPreview(sessionTitle) || "Untitled" })}
+        />
       </ContextMenuContent>
     </ContextMenu>
   )
@@ -781,6 +779,7 @@ interface FlatSessionRowProps {
   onEmployeeSessionsAvailable?: (sessions: Session[]) => void
   togglePin: (pinKey: string) => void
   handleDuplicate: (sessionId: string) => void
+  handleStop: (sessionId: string) => void
   handleArchive: (session: Session) => void
   setDeleteTarget: (target: { type: "session" | "employee"; id: string; label: string; sessions?: Session[] } | null) => void
   setRenamingSessionId: (id: string | null) => void
@@ -805,6 +804,7 @@ const FlatSessionRow = React.memo(function FlatSessionRow({
   onEmployeeSessionsAvailable,
   togglePin,
   handleDuplicate,
+  handleStop,
   handleArchive,
   setDeleteTarget,
   setRenamingSessionId,
@@ -822,33 +822,12 @@ const FlatSessionRow = React.memo(function FlatSessionRow({
   const isUnread =
     !readSessions.has(session.id) && session.status !== "running" && session.status !== "error"
 
-  const menuItems = (
-    <>
-      <DropdownMenuItem onClick={() => { renameCancelledRef.current = false; setRenamingSessionId(session.id) }}>
-        Rename
-      </DropdownMenuItem>
-      <DropdownMenuItem onClick={() => togglePin(session.id)}>
-        {isPinned ? "Unpin" : "Pin"}
-      </DropdownMenuItem>
-      <DropdownMenuItem onClick={() => handleDuplicate(session.id)}>
-        Duplicate...
-      </DropdownMenuItem>
-      <DropdownMenuItem onClick={() => handleArchive(session)}>
-        {isArchived ? "Unarchive chat" : "Archive chat"}
-      </DropdownMenuItem>
-      <DropdownMenuSeparator />
-      <DropdownMenuItem variant="destructive" onClick={() => setDeleteTarget({ type: "session", id: session.id, label: displayTitle })}>
-        Delete session
-      </DropdownMenuItem>
-    </>
-  )
-
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
         <div
           className={cn(
-            "group/flat relative flex w-full items-center gap-3 border-l-2 px-4 py-2 text-left transition-colors",
+            "group/flat relative flex w-full items-center gap-3 border-l-2 px-4 py-2 text-left transition-colors lg:pr-11",
             isActive
               ? "border-l-[var(--text-tertiary)] bg-[var(--fill-secondary)]"
               : "border-l-transparent hover:bg-[var(--fill-tertiary)]"
@@ -886,7 +865,7 @@ const FlatSessionRow = React.memo(function FlatSessionRow({
                 {isArchived ? (
                   <span className="shrink-0 text-[10px] font-medium text-[var(--text-tertiary)]">Archived</span>
                 ) : null}
-                <span className="shrink-0 text-[10px] tabular-nums text-[var(--text-quaternary)] group-hover/flat:lg:hidden group-has-[[data-state=open]]/flat:lg:hidden">{time}</span>
+                <span className="shrink-0 text-[10px] tabular-nums text-[var(--text-quaternary)] transition-opacity group-hover/flat:lg:opacity-0 group-has-[[data-state=open]]/flat:lg:opacity-0">{time}</span>
               </div>
               {isRenaming ? (
                 <input
@@ -918,40 +897,48 @@ const FlatSessionRow = React.memo(function FlatSessionRow({
 
           <WorkflowSessionChip session={session} />
           {isPinned && !hidePin ? (
-            <Pin className="size-3 shrink-0 text-[var(--text-tertiary)] group-hover/flat:lg:hidden group-has-[[data-state=open]]/flat:lg:hidden" />
+            <Pin className="size-3 shrink-0 text-[var(--text-tertiary)] transition-opacity group-hover/flat:lg:opacity-0 group-has-[[data-state=open]]/flat:lg:opacity-0" />
           ) : null}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <button
                 onClick={(e) => e.stopPropagation()}
                 aria-label="Chat actions"
-                className="flex size-9 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:text-foreground lg:size-7 lg:hidden group-hover/flat:lg:flex group-has-[[data-state=open]]/flat:lg:flex"
+                className="flex size-9 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:text-foreground lg:absolute lg:right-2 lg:top-1/2 lg:size-7 lg:-translate-y-1/2 lg:hidden group-hover/flat:lg:flex group-has-[[data-state=open]]/flat:lg:flex"
               >
                 <EllipsisVertical className="size-3.5" />
               </button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">{menuItems}</DropdownMenuContent>
+            <DropdownMenuContent align="end" className={SESSION_MENU_CONTENT_CLASS}>
+              <SessionRowMenu
+                variant="dropdown"
+                session={session}
+                isPinned={isPinned}
+                isArchived={isArchived}
+                onRename={() => { renameCancelledRef.current = false; setRenamingSessionId(session.id) }}
+                onTogglePin={() => togglePin(session.id)}
+                onDuplicate={() => handleDuplicate(session.id)}
+                onArchive={() => handleArchive(session)}
+                onStop={() => handleStop(session.id)}
+                onDelete={() => setDeleteTarget({ type: "session", id: session.id, label: displayTitle })}
+              />
+            </DropdownMenuContent>
           </DropdownMenu>
         </div>
       </ContextMenuTrigger>
-      <ContextMenuContent>
-        <ContextMenuItem onClick={() => { renameCancelledRef.current = false; setRenamingSessionId(session.id) }}>
-          Rename
-        </ContextMenuItem>
-        <ContextMenuItem onClick={() => togglePin(session.id)}>
-          {isPinned ? "Unpin" : "Pin"}
-        </ContextMenuItem>
-        <ContextMenuItem onClick={() => handleDuplicate(session.id)}>
-          Duplicate...
-        </ContextMenuItem>
-        <ContextMenuItem onClick={() => handleArchive(session)}>
-          {isArchived ? "Unarchive chat" : "Archive chat"}
-        </ContextMenuItem>
-        <ContextMenuSeparator />
-        <ContextMenuItem variant="destructive" onClick={() => setDeleteTarget({ type: "session", id: session.id, label: displayTitle })}>
-          <span className="flex-1">Delete session</span>
-          <kbd className="ml-auto pl-3 font-mono text-[10px] text-[var(--text-quaternary)]">⌫</kbd>
-        </ContextMenuItem>
+      <ContextMenuContent className={SESSION_MENU_CONTENT_CLASS}>
+        <SessionRowMenu
+          variant="context"
+          session={session}
+          isPinned={isPinned}
+          isArchived={isArchived}
+          onRename={() => { renameCancelledRef.current = false; setRenamingSessionId(session.id) }}
+          onTogglePin={() => togglePin(session.id)}
+          onDuplicate={() => handleDuplicate(session.id)}
+          onArchive={() => handleArchive(session)}
+          onStop={() => handleStop(session.id)}
+          onDelete={() => setDeleteTarget({ type: "session", id: session.id, label: displayTitle })}
+        />
       </ContextMenuContent>
     </ContextMenu>
   )
@@ -977,6 +964,7 @@ interface EmployeeRowProps {
   setRenamingSessionId: (id: string | null) => void
   updateSessionTitle: (id: string, title: string) => void
   handleDuplicate: (sessionId: string) => void
+  handleStop: (sessionId: string) => void
   handleArchive: (session: Session) => void
 }
 
@@ -1000,6 +988,7 @@ const EmployeeRow = React.memo(function EmployeeRow({
   setRenamingSessionId,
   updateSessionTitle,
   handleDuplicate,
+  handleStop,
   handleArchive,
 }: EmployeeRowProps) {
   const empName = item.employeeName!
@@ -1036,6 +1025,7 @@ const EmployeeRow = React.memo(function EmployeeRow({
     onEmployeeSessionsAvailable,
     togglePin,
     handleDuplicate,
+    handleStop,
     handleArchive,
     setDeleteTarget,
     setRenamingSessionId,
@@ -1077,26 +1067,29 @@ const EmployeeRow = React.memo(function EmployeeRow({
                 >
                   {displayName}
                 </span>
-                <span className="shrink-0 text-[10px] tabular-nums text-[var(--text-quaternary)] group-hover/emp:lg:hidden group-has-[[data-state=open]]/emp:lg:hidden">{timeLabel}</span>
+                <span className="shrink-0 text-[10px] tabular-nums text-[var(--text-quaternary)] transition-opacity group-hover/emp:lg:opacity-0 group-has-[[data-state=open]]/emp:lg:opacity-0">{timeLabel}</span>
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
                     <button
                       onClick={(e) => e.stopPropagation()}
                       aria-label="Employee chat actions"
-                      className="absolute right-1 top-1/2 flex size-9 shrink-0 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground transition-colors hover:text-foreground lg:static lg:size-7 lg:translate-y-0 lg:hidden group-hover/emp:lg:flex group-has-[[data-state=open]]/emp:lg:flex"
+                      className="absolute right-1 top-1/2 flex size-9 shrink-0 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground transition-colors hover:text-foreground lg:right-2 lg:size-7 lg:hidden group-hover/emp:lg:flex group-has-[[data-state=open]]/emp:lg:flex"
                     >
                       <EllipsisVertical className="size-3.5" />
                     </button>
                   </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end">
-                    <DropdownMenuItem onClick={() => togglePin(item.pinKey)}>
+                  <DropdownMenuContent align="end" className={SESSION_MENU_CONTENT_CLASS}>
+                    <DropdownMenuItem className={SESSION_MENU_ITEM_CLASS} onClick={() => togglePin(item.pinKey)}>
+                      <Pin aria-hidden />
                       {isPinned ? "Unpin" : "Pin"}
                     </DropdownMenuItem>
-                    <DropdownMenuItem onClick={() => handleMarkAllRead(empSessions)}>
+                    <DropdownMenuItem className={SESSION_MENU_ITEM_CLASS} onClick={() => handleMarkAllRead(empSessions)}>
+                      <Focus aria-hidden />
                       Mark all as read
                     </DropdownMenuItem>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem variant="destructive" onClick={() => setDeleteTarget({ type: "employee", id: empName, label: displayName, sessions: empSessions })}>
+                    <DropdownMenuSeparator className={SESSION_MENU_SEPARATOR_CLASS} />
+                    <DropdownMenuItem className={`${SESSION_MENU_ITEM_CLASS} text-[var(--system-red)] focus:text-[var(--system-red)] [&_svg]:text-[var(--system-red)]`} variant="destructive" onClick={() => setDeleteTarget({ type: "employee", id: empName, label: displayName, sessions: empSessions })}>
+                      <Trash2 aria-hidden />
                       Delete all chats
                     </DropdownMenuItem>
                   </DropdownMenuContent>
@@ -1120,15 +1113,18 @@ const EmployeeRow = React.memo(function EmployeeRow({
             </div>
           </button>
         </ContextMenuTrigger>
-        <ContextMenuContent>
-          <ContextMenuItem onClick={() => togglePin(item.pinKey)}>
+        <ContextMenuContent className={SESSION_MENU_CONTENT_CLASS}>
+          <ContextMenuItem className={SESSION_MENU_ITEM_CLASS} onClick={() => togglePin(item.pinKey)}>
+            <Pin aria-hidden />
             {isPinned ? "Unpin" : "Pin"}
           </ContextMenuItem>
-          <ContextMenuItem onClick={() => handleMarkAllRead(empSessions)}>
+          <ContextMenuItem className={SESSION_MENU_ITEM_CLASS} onClick={() => handleMarkAllRead(empSessions)}>
+            <Focus aria-hidden />
             Mark all as read
           </ContextMenuItem>
-          <ContextMenuSeparator />
-          <ContextMenuItem variant="destructive" onClick={() => setDeleteTarget({ type: "employee", id: empName, label: displayName, sessions: empSessions })}>
+          <ContextMenuSeparator className={SESSION_MENU_SEPARATOR_CLASS} />
+          <ContextMenuItem className={`${SESSION_MENU_ITEM_CLASS} text-[var(--system-red)] focus:text-[var(--system-red)] [&_svg]:text-[var(--system-red)]`} variant="destructive" onClick={() => setDeleteTarget({ type: "employee", id: empName, label: displayName, sessions: empSessions })}>
+            <Trash2 aria-hidden />
             Delete all chats
           </ContextMenuItem>
         </ContextMenuContent>
@@ -1178,6 +1174,7 @@ export function ChatSidebar({
   const deleteSessionMutation = useDeleteSession()
   const archiveSessionMutation = useArchiveSession()
   const unarchiveSessionMutation = useUnarchiveSession()
+  const stopSessionMutation = useStopSession()
   const bulkDeleteMutation = useBulkDeleteSessions()
   const duplicateSessionMutation = useDuplicateSession()
   const { data: pinnedSessions = EMPTY_PINNED_SESSIONS } = usePins()
@@ -1720,6 +1717,10 @@ export function ChatSidebar({
     }
   }, [duplicateSessionMutation, onDuplicate, onSelect])
 
+  const handleStopCb = useCallback((sessionId: string) => {
+    stopSessionMutation.mutate(sessionId)
+  }, [stopSessionMutation])
+
   // Shared props passed to all SessionRow and EmployeeRow instances
   const sharedRowProps = useMemo(() => ({
     selectedId,
@@ -1732,11 +1733,12 @@ export function ChatSidebar({
     onEmployeeSessionsAvailable,
     togglePin,
     handleDuplicate: handleDuplicateCb,
+    handleStop: handleStopCb,
     handleArchive,
     setDeleteTarget,
     setRenamingSessionId,
     updateSessionTitle,
-  }), [selectedId, readSessions, pinnedSessions, renamingSessionId, fixTitleCb, onSelect, onEmployeeSessionsAvailable, togglePin, handleDuplicateCb, updateSessionTitle])
+  }), [selectedId, readSessions, pinnedSessions, renamingSessionId, fixTitleCb, onSelect, onEmployeeSessionsAvailable, togglePin, handleDuplicateCb, handleStopCb, updateSessionTitle])
 
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   // Apple nav-bar pattern: the control band carries NO line at rest, and a

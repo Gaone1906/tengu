@@ -33,6 +33,7 @@ describe('MOBILE_TAB_ITEMS', () => {
 describe('OVERFLOW_ITEMS (the More screen)', () => {
   it('holds every non-Chat destination that is not a primary tab', () => {
     expect(OVERFLOW_ITEMS.map((i) => i.href)).toEqual([
+      '/experiments',
       '/org',
       '/cron',
       '/limits',

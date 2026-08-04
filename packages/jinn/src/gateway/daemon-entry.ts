@@ -2,7 +2,7 @@
  * Entry point for the daemon child process.
  * Spawned by lifecycle.ts startDaemon().
  */
-import { assertNativeRuntime } from "../shared/runtime-guard.js";
+import { assertNativeRuntime, repairNodePtySpawnHelper } from "../shared/runtime-guard.js";
 
 // Verify the native DB addon loads under this Node BEFORE the imports below pull
 // in better-sqlite3 (via lifecycle → server → registry). An ABI mismatch here
@@ -10,6 +10,11 @@ import { assertNativeRuntime } from "../shared/runtime-guard.js";
 // daemon mode). The static imports are therefore deferred to dynamic imports
 // that run only after the guard passes.
 assertNativeRuntime();
+
+// Every engine spawn goes through node-pty. If an --ignore-scripts install left
+// its spawn-helper non-executable, every session would die with an opaque
+// `posix_spawnp failed.` — repair it here, before any session can start.
+repairNodePtySpawnHelper();
 
 const { loadConfig } = await import("../shared/config.js");
 const { startForeground } = await import("./lifecycle.js");

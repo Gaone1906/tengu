@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { initDb } from '../sessions/registry.js';
+import { initDb } from '../shared/db.js';
 import { resolveApprovalRouteTarget, resolveRootApprovalTarget } from '../gateway/approval-authority.js';
 import { parseTodoApprovalRef } from '../workflows/todo-approval-ref.js';
 import { currentApproval, type WorkItemApproval } from './approval-rows.js';
@@ -119,8 +119,8 @@ function classifyApprovalTarget(item: WorkItem, inputTarget: string | null | und
 
 /**
  * Attach a PENDING approval to an item (the native "any actor may REQUEST" path,
- * design §1.3). Sets `approval_state='pending'` + the request text + optional ref,
- * clears any prior decision stamps, and appends ONE `approval_requested` event —
+ * design §1.3). Writes a PENDING `work_item_approvals` row carrying the request
+ * text + optional ref, and appends ONE `approval_requested` event —
  * status is orthogonal and left untouched. Idempotent when the item is already
  * pending on the identical (request, ref): no write, no duplicate event (so a
  * workflow-park re-mirror on every sweep stays event-silent). Throws on an
@@ -365,7 +365,7 @@ export type DecideWorkItemApprovalResult =
  * transaction (GRS-021b QA finding 2 — no half-applied approved+in_review). The
  * decision write, the `approval_decided` event, the status transition
  * (done / bounce+rounds / escalate), and the status event either ALL commit or
- * NONE do. Guarded on `approval_state = 'pending'` re-read INSIDE the txn, so a
+ * NONE do. Guarded on a pending-approval re-read INSIDE the txn, so a
  * double-decide or a decide-after-resolved is a clean refusal, never a partial
  * apply. `decideApproval` and `transition` each open their own transaction; called
  * here they nest as SAVEPOINTs, so a throw from the status write (or a concurrent

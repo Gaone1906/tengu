@@ -1,4 +1,4 @@
-import { initDb } from '../sessions/registry.js';
+import { initDb } from '../shared/db.js';
 
 /** True when the employee has spent at or above their calendar-month cap.
  *  This is the only budget question any caller asks — block the turn or not.

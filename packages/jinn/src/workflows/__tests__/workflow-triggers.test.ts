@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import type Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { logger } from "../../shared/logger.js";
 import type { Employee, ModelRegistry, WorkflowAttemptCommand, WorkflowAttemptCompletionListener } from "../../shared/types.js";
 import type { WorkflowTodoEventClaimOutcome, WorkflowTodoEventFeed, WorkflowTodoStatusEvent } from "../../work-items/workflow-event-feed.js";
 import type { TriggerNode, WorkflowDefinition, WorkflowNode } from "../model.js";
@@ -12,9 +13,17 @@ import type { WorkflowSessionExecutor } from "../session-executor.js";
 import { WorkflowService } from "../service.js";
 
 const scheduled: Array<{ callback: () => void | Promise<void>; stop: ReturnType<typeof vi.fn> }> = [];
-vi.mock("node-cron", () => ({ default: { schedule: vi.fn((_cron, callback) => {
-  const task = { callback, stop: vi.fn() }; scheduled.push(task); return task;
-}) } }));
+// The recorder exists only to fire the callback by hand; construction still goes
+// through the real node-cron, so an invalid expression or timezone throws here
+// exactly as it does in production.
+vi.mock("node-cron", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node-cron")>();
+  return { default: { validate: actual.validate,
+    schedule: vi.fn((expression: string, callback: () => void | Promise<void>, options?: { timezone?: string }) => {
+      actual.schedule(expression, () => {}, { ...options, scheduled: false }).stop();
+      const task = { callback, stop: vi.fn() }; scheduled.push(task); return task;
+    }) } };
+});
 
 const employee: Employee = { name: "worker", displayName: "Worker", department: "operations", rank: "employee",
   engine: "test-engine", model: "test-model", effortLevel: "high", persona: "Complete work." };
@@ -102,6 +111,27 @@ describe("Workflow trigger adapters", () => {
     now = "2026-07-21T13:00:00.000Z"; await scheduled[0]!.callback();
     expect(service.listRuns(definition.id, {}).items).toHaveLength(1);
     service.dispose(); service = buildService(); expect(scheduled).toHaveLength(1);
+  });
+
+  it("skips an already-enabled Schedule whose cron expression is invalid instead of failing to build", () => {
+    const warnings: string[] = [];
+    const warn = vi.spyOn(logger, "warn").mockImplementation((message: string) => { warnings.push(message); });
+    const trigger: WorkflowNode = { id: "start", type: "trigger", name: "Schedule",
+      config: { kind: "schedule", cron: "every weekday please", timezone: "UTC" } };
+    const work: WorkflowNode = { id: "work", type: "employee", name: "Work", config: {
+      employee: { source: "fixed", value: "worker" }, prompt: "Do work." } };
+    const finish: WorkflowNode = { id: "finish", type: "end", name: "Finish", config: { result: "success" } };
+    const draft = service.createDefinition({ id: "poison-schedule", title: "poison-schedule" });
+    // Seeded past the service gate, as a row authored before it existed would be.
+    const stored = repository.saveDefinition({ ...draft, nodes: [trigger, work, finish],
+      edges: [edge("trigger-work", "start", "work"), edge("work-end", "work", "finish")] }, draft.revision);
+    repository.setEnabled(stored.id, true, stored.revision);
+
+    service.dispose(); service = buildService();
+
+    expect(scheduled).toHaveLength(0);
+    expect(warnings).toEqual([expect.stringContaining("poison-schedule")]);
+    warn.mockRestore();
   });
 
   it("claims the existing Todo feed against its enabled in-memory index without duplicate fires", async () => {

@@ -11,7 +11,7 @@ let registry: Registry;
 
 beforeAll(async () => {
   registry = await import("../registry.js");
-  registry.initDb();
+  (await import("../../shared/db.js")).initDb();
 });
 
 describe("consumeRestartAcknowledgements", () => {

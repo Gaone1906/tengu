@@ -30,7 +30,7 @@ describe("Todos nav + redirect", () => {
       "/",
       "/todos",
       "/workflow",
-      "/org",
+      "/experiments",
     ])
   })
 

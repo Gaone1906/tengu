@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { JINN_HOME } from "../shared/paths.js";
+import { hasControlBytes, stripControlChars } from "../shared/sanitize.js";
 import type {
   NoteDocument,
   NoteFolder,
@@ -64,6 +65,49 @@ function knowledgeRoot(home: string): string {
 function isRealpathContained(candidate: string, realRoot: string): boolean {
   const relative = path.relative(realRoot, candidate);
   return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+}
+
+/** Recursive Markdown walk shared by {@link listNotes} and {@link searchKnowledge}:
+ *  hidden entries, symlinks, realpath escapes, non-Markdown, and oversized files are
+ *  skipped; directories descend in stable name order. `onFile` gets the root-relative
+ *  path and the lstat-verified absolute path. */
+function walkMarkdown(
+  absoluteDirectory: string,
+  relativeDirectory: string,
+  realRoot: string,
+  onFile: (relativePath: string, absolutePath: string) => void,
+): void {
+  let names: string[];
+  try {
+    names = fs.readdirSync(absoluteDirectory).sort((a, b) => a.localeCompare(b));
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (!name || name.startsWith(".") || name.includes("\\") || CONTROL_BYTES.test(name)) continue;
+    const absolutePath = path.join(absoluteDirectory, name);
+    let stat: fs.Stats;
+    try {
+      stat = fs.lstatSync(absolutePath);
+    } catch {
+      continue;
+    }
+    if (stat.isSymbolicLink()) continue;
+    let realPath: string;
+    try {
+      realPath = fs.realpathSync(absolutePath);
+    } catch {
+      continue;
+    }
+    if (!isRealpathContained(realPath, realRoot)) continue;
+    const relativePath = relativeDirectory ? `${relativeDirectory}/${name}` : name;
+    if (stat.isDirectory()) {
+      walkMarkdown(absolutePath, relativePath, realRoot, onFile);
+      continue;
+    }
+    if (!stat.isFile() || !name.endsWith(".md") || stat.size > NOTE_FILE_MAX_BYTES) continue;
+    onFile(relativePath, absolutePath);
+  }
 }
 
 function resolveRoot(home: string, create: boolean): RootInfo | StoreFailure {
@@ -331,48 +375,15 @@ export function listNotes(options: { query?: string; home?: string } = {}): { no
     : "";
   const notes: NoteSummary[] = [];
 
-  const visit = (absoluteDirectory: string, relativeDirectory: string): void => {
-    let names: string[];
-    try {
-      names = fs.readdirSync(absoluteDirectory).sort((a, b) => a.localeCompare(b));
-    } catch {
-      return;
-    }
-    for (const name of names) {
-      if (!name || name.startsWith(".") || name.includes("\\") || CONTROL_BYTES.test(name)) continue;
-      const absolutePath = path.join(absoluteDirectory, name);
-      let stat: fs.Stats;
-      try {
-        stat = fs.lstatSync(absolutePath);
-      } catch {
-        continue;
-      }
-      if (stat.isSymbolicLink()) continue;
-      let realPath: string;
-      try {
-        realPath = fs.realpathSync(absolutePath);
-      } catch {
-        continue;
-      }
-      if (!isRealpathContained(realPath, root.realRoot)) continue;
-      const relativePath = relativeDirectory ? `${relativeDirectory}/${name}` : name;
-      if (stat.isDirectory()) {
-        visit(absolutePath, relativePath);
-        continue;
-      }
-      if (!stat.isFile() || !name.endsWith(".md") || stat.size > NOTE_FILE_MAX_BYTES) continue;
-      const publicPath = `knowledge/${relativePath}`;
-      const valid = safeSegments(publicPath, "path");
-      if (isFailure(valid)) continue;
-      const file = openRegularFile(absolutePath);
-      if (isFailure(file)) continue;
-      const { body, ...summary } = documentFromFile(publicPath, file);
-      if (query && !`${summary.title}\n${summary.path}\n${body}`.toLocaleLowerCase().includes(query)) continue;
-      notes.push(summary);
-    }
-  };
-
-  visit(root.rootPath, "");
+  walkMarkdown(root.rootPath, "", root.realRoot, (relativePath, absolutePath) => {
+    const publicPath = `knowledge/${relativePath}`;
+    if (isFailure(safeSegments(publicPath, "path"))) return;
+    const file = openRegularFile(absolutePath);
+    if (isFailure(file)) return;
+    const { body, ...summary } = documentFromFile(publicPath, file);
+    if (query && !`${summary.title}\n${summary.path}\n${body}`.toLocaleLowerCase().includes(query)) return;
+    notes.push(summary);
+  });
   notes.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.path.localeCompare(b.path));
 
   const folderCounts = new Map<string, number>();
@@ -578,4 +589,195 @@ export function updateNote(
   const writeFailure = atomicReplace(current.value.file.absolutePath, bytes, current.value.file.stat.mode);
   if (writeFailure) return writeFailure;
   return readNote(input.path, home);
+}
+
+/* ── Knowledge search + instance read (GRS-020b, re-homed here by PLA-52) ────
+ *
+ * Deterministic search over the company's institutional knowledge, plus capped reads
+ * of files in the active Jinn instance. Search walks knowledge/ and docs/ through
+ * {@link walkMarkdown} — the same recursive, symlink-refusing regime the Notes surface
+ * above uses — so nested notes are findable and one module owns the directory. No LLM
+ * anywhere: case-insensitive token-AND matching (every whitespace token must appear in
+ * the relative path or the content), FTS-style «»-marked ~12-word snippets, never file
+ * bodies. Query hardening reuses the shared {@link stripControlChars} (GRS-020a-fix
+ * finding 2) so hostile encoded input degrades to an empty result, never an error.
+ */
+
+/** Context-bomb guards: hit count, snippet chars, read chars, snippet word window. */
+export const KNOWLEDGE_SEARCH_LIMIT = 20;
+export const KNOWLEDGE_SNIPPET_CHAR_CAP = 300;
+export const KNOWLEDGE_FILE_CHAR_CAP = 20_000;
+const SNIPPET_WORDS_EACH_SIDE = 6;
+/** The allowlisted search roots — the ONLY directories search will ever touch. */
+const SEARCH_ROOTS = ["knowledge", "docs"] as const;
+
+export interface KnowledgeSearchHit {
+  /** Relative path, e.g. `knowledge/pricing-strategy.md` — feed to readKnowledgeFile. */
+  path: string;
+  /** First markdown heading, else the filename. */
+  title: string;
+  /** ~12-word window around the first match, matched token wrapped in «». */
+  snippet: string;
+  /** Total occurrences of all query tokens across path + content. */
+  matchCount: number;
+}
+
+export type KnowledgeReadResult =
+  | { ok: true; path: string; title: string; content: string; truncated: boolean; totalChars: number }
+  | { ok: false; reason: "invalid-path" | "forbidden" | "not-found"; detail: string };
+
+function firstHeading(content: string, fallback: string): string {
+  for (const line of content.split("\n", 50)) {
+    const m = /^#{1,6}\s+(.+)$/.exec(line.trim());
+    if (m) return m[1].trim();
+  }
+  return fallback;
+}
+
+/** Non-overlapping occurrences of `needle` in `hay`. */
+function countOccurrences(hay: string, needle: string): number {
+  return hay.split(needle).length - 1;
+}
+
+/** FTS-style snippet: up to {@link SNIPPET_WORDS_EACH_SIDE} words each side of the
+ *  first content match, the matched token «»-wrapped, ellipses at cut edges. */
+function makeSnippet(content: string, matchIdx: number, matchLen: number): string {
+  const collapse = (s: string) => s.replace(/\s+/g, " ").trim();
+  const before = collapse(content.slice(Math.max(0, matchIdx - 400), matchIdx));
+  const match = content.slice(matchIdx, matchIdx + matchLen);
+  const after = collapse(content.slice(matchIdx + matchLen, matchIdx + matchLen + 400));
+  const preWords = before.split(" ").filter(Boolean);
+  const postWords = after.split(" ").filter(Boolean);
+  const pre = preWords.slice(-SNIPPET_WORDS_EACH_SIDE);
+  const post = postWords.slice(0, SNIPPET_WORDS_EACH_SIDE);
+  const parts = [
+    matchIdx > 0 && (preWords.length > SNIPPET_WORDS_EACH_SIDE || pre.length === 0) ? "…" : "",
+    pre.join(" "),
+    `«${match}»`,
+    post.join(" "),
+    postWords.length > SNIPPET_WORDS_EACH_SIDE ? "…" : "",
+  ].filter(Boolean);
+  const snippet = parts.join(" ");
+  return snippet.length > KNOWLEDGE_SNIPPET_CHAR_CAP ? `${snippet.slice(0, KNOWLEDGE_SNIPPET_CHAR_CAP - 1)}…` : snippet;
+}
+
+function fallbackSnippet(content: string): string {
+  for (const line of content.split("\n", 50)) {
+    const t = line.trim();
+    if (t && !t.startsWith("#")) {
+      return t.length > KNOWLEDGE_SNIPPET_CHAR_CAP ? `${t.slice(0, KNOWLEDGE_SNIPPET_CHAR_CAP - 1)}…` : t;
+    }
+  }
+  return "";
+}
+
+/** A file matches when EVERY query token appears in its relative path or content.
+ *  Results: `matchCount` desc, then path asc, capped at {@link KNOWLEDGE_SEARCH_LIMIT}.
+ *  Snippets only — never bodies. Symlinks and realpath escapes are skipped
+ *  entirely, so their content can't leak. */
+export function searchKnowledge(query: string, home: string = JINN_HOME): KnowledgeSearchHit[] {
+  const tokens = [...new Set(stripControlChars(query).toLowerCase().split(/\s+/).filter(Boolean))];
+  if (tokens.length === 0) return [];
+
+  const hits: KnowledgeSearchHit[] = [];
+  for (const label of SEARCH_ROOTS) {
+    const rootPath = path.join(home, label);
+    let realRoot: string;
+    try {
+      realRoot = fs.realpathSync(rootPath);
+    } catch {
+      continue;
+    }
+    walkMarkdown(rootPath, "", realRoot, (relativePath, absolutePath) => {
+      const relPath = `${label}/${relativePath}`;
+      const file = openRegularFile(absolutePath);
+      if (isFailure(file)) return;
+      const content = file.bytes.toString("utf-8");
+      const lowerContent = content.toLowerCase();
+      const lowerPath = relPath.toLowerCase();
+      if (!tokens.every((t) => lowerContent.includes(t) || lowerPath.includes(t))) return;
+
+      let matchCount = 0;
+      let firstIdx = -1;
+      let firstLen = 0;
+      for (const t of tokens) {
+        matchCount += countOccurrences(lowerContent, t) + countOccurrences(lowerPath, t);
+        const idx = lowerContent.indexOf(t);
+        if (idx !== -1 && (firstIdx === -1 || idx < firstIdx)) {
+          firstIdx = idx;
+          firstLen = t.length;
+        }
+      }
+      hits.push({
+        path: relPath,
+        title: firstHeading(content, path.posix.basename(relativePath)),
+        snippet: firstIdx === -1 ? fallbackSnippet(content) : makeSnippet(content, firstIdx, firstLen),
+        matchCount,
+      });
+    });
+  }
+
+  hits.sort((a, b) => b.matchCount - a.matchCount || a.path.localeCompare(b.path));
+  return hits.slice(0, KNOWLEDGE_SEARCH_LIMIT);
+}
+
+/** Read ONE file inside the active Jinn instance by relative path.
+ *  SECURITY-CRITICAL: the path must be normalized and its realpath must resolve
+ *  inside the realpath of the instance root. Traversal, absolute paths, control
+ *  bytes, and symlink escapes are refused; content is capped at
+ *  {@link KNOWLEDGE_FILE_CHAR_CAP} with the intentional-cap marker. */
+export function readKnowledgeFile(relPath: string, home: string = JINN_HOME): KnowledgeReadResult {
+  if (typeof relPath !== "string" || relPath.length === 0 || relPath.length > 300) {
+    return { ok: false, reason: "invalid-path", detail: "path must be a relative path inside the Jinn instance" };
+  }
+  // GRS-020b-fix: REJECT (never strip) control bytes on the raw path — the
+  // store is the defense-in-depth backstop so no caller (route or MCP tool)
+  // can strip-then-accept a %00-tampered path into a valid one.
+  if (hasControlBytes(relPath)) {
+    return { ok: false, reason: "invalid-path", detail: "path contains control bytes" };
+  }
+  const segments = relPath.split("/");
+  const traversal = segments.some((segment) => segment === "" || segment === "." || segment === "..");
+  if (relPath !== relPath.trim() || path.isAbsolute(relPath) || path.win32.isAbsolute(relPath) || relPath.includes("\\") || traversal) {
+    const shown = JSON.stringify(relPath.slice(0, 120));
+    return { ok: false, reason: "invalid-path", detail: `path must be a normalized relative path inside the Jinn instance — got ${shown}` };
+  }
+
+  let realHome: string;
+  let realFile: string;
+  try {
+    realHome = fs.realpathSync(home);
+  } catch {
+    return { ok: false, reason: "not-found", detail: "the Jinn instance directory does not exist" };
+  }
+  try {
+    realFile = fs.realpathSync(path.join(home, ...segments));
+  } catch {
+    return { ok: false, reason: "not-found", detail: `no such instance file: ${relPath}` };
+  }
+  if (realFile === realHome || !isRealpathContained(realFile, realHome)) {
+    return { ok: false, reason: "forbidden", detail: `${relPath} resolves outside the Jinn instance and is not readable` };
+  }
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(realFile);
+  } catch {
+    return { ok: false, reason: "not-found", detail: `no such instance file: ${relPath}` };
+  }
+  if (!stat.isFile()) return { ok: false, reason: "not-found", detail: `${relPath} is not a regular file` };
+
+  let content: string;
+  try {
+    content = fs.readFileSync(realFile, "utf-8");
+  } catch {
+    return { ok: false, reason: "not-found", detail: `could not read ${relPath}` };
+  }
+  const totalChars = content.length;
+  const truncated = totalChars > KNOWLEDGE_FILE_CHAR_CAP;
+  if (truncated) {
+    content =
+      content.slice(0, KNOWLEDGE_FILE_CHAR_CAP) +
+      `…[truncated ${totalChars - KNOWLEDGE_FILE_CHAR_CAP} chars — intentional cap; this is an instance file excerpt]`;
+  }
+  return { ok: true, path: relPath, title: firstHeading(content, path.basename(relPath)), content, truncated, totalChars };
 }

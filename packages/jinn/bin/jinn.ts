@@ -4,7 +4,7 @@ import { realpathSync } from "node:fs";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import pkg from "../package.json" with { type: "json" };
-import { assertNativeRuntime } from "../src/shared/runtime-guard.js";
+import { assertNativeRuntime, repairNodePtySpawnHelper } from "../src/shared/runtime-guard.js";
 import { loadInstances } from "../src/instances/directory.js";
 import { resolveInstanceHome } from "../src/instances/create.js";
 
@@ -21,6 +21,9 @@ program.hook("preAction", (thisCommand) => {
   // better-sqlite3, so an ABI mismatch prints one clear instruction instead of a
   // cryptic boot crash. Runs for real commands only (not --version/--help).
   assertNativeRuntime();
+  // Restore node-pty's spawn-helper exec bit if an --ignore-scripts install
+  // (Homebrew's default) left it at 0644. No-op on a healthy install.
+  repairNodePtySpawnHelper();
   const opts = thisCommand.opts();
   if (opts.instance) {
     process.env.JINN_INSTANCE = opts.instance;

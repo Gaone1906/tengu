@@ -27,6 +27,8 @@ import { buildDelegatedActivityIndex } from "../sessions/delegated-activity.js";
 import type { SessionManager } from "../sessions/manager.js";
 import { buildContext, buildPlatformContextSnapshot, type BuildContextOptions } from "../sessions/context.js";
 import { buildPlatformContextRefresh, fingerprintPlatformContext } from "../engines/platform-context.js";
+import { stripControlChars, hasControlBytes } from "../shared/sanitize.js";
+import { initDb } from "../shared/db.js";
 import {
   listSessions,
   listPinnedSessions,
@@ -44,8 +46,6 @@ import {
   searchSessionsFiltered,
   getMessageContext,
   getCostReport,
-  stripControlChars,
-  hasControlBytes,
   MESSAGE_CONTEXT_MAX_RADIUS,
   type MessageSearchFilter,
   type SearchSessionsFilter,
@@ -89,7 +89,6 @@ import {
   claimSessionDelivery,
   getFile,
   getSessionBySessionKey,
-  initDb,
   recordChildReportedToParent,
   recordTurnAccounting,
   RESTART_ACK_META_KEY,
@@ -145,8 +144,6 @@ import { summarizeCronRun } from "../cron/run-summary.js";
 import { reloadScheduler } from "../cron/scheduler.js";
 import { validateCronSchedule } from "../cron/validation.js";
 import { runCronJob } from "../cron/runner.js";
-import { ActivityQueryError, getActivityStory, queryActivityPage } from "../activity/query.js";
-import type { ActivityKind, ActivityOutcomeState } from "../activity/types.js";
 import QRCode from "qrcode";
 import { WhatsAppConnector } from "../connectors/whatsapp/index.js";
 import { handleFilesRequest, handleSessionAttachment, fileIdsToMedia, rehomeAttachmentsToSession, ensureFilesDir, mimeFromFilename, MultipartUploadError, readLocalFileForIngestion, readMultipartFile, sanitizeUploadFilename } from "./files.js";
@@ -258,15 +255,20 @@ import { scanOrg } from "./org.js";
 import { TODO_DISPATCHER_NAME } from "./system-employees.js";
 import { resolveOrgHierarchy } from "./org-hierarchy.js";
 import { surfaceManagerVisibility } from "./manager-visibility.js";
-import { searchKnowledge, readKnowledgeFile } from "../knowledge/store.js";
+import { NOTE_FILE_MAX_BYTES, createNote, listNotes, readKnowledgeFile, readNote, searchKnowledge, updateNote, type NoteStoreResult } from "../notes/store.js";
 import {
-  NOTE_FILE_MAX_BYTES,
-  createNote,
-  listNotes,
-  readNote,
-  updateNote,
-  type NoteStoreResult,
-} from "../notes/store.js";
+  getExperiment,
+  listExperiments,
+  recordReading,
+  updateExperiment,
+  type CreateExperimentInput,
+  type ExperimentStoreResult,
+} from "../experiments/store.js";
+import {
+  concludeExperimentAndDisableCheckIn,
+  createExperimentWithCheckIn,
+  type ExperimentCheckInInput,
+} from "../experiments/check-in.js";
 import { loadInstances, saveInstances, type Instance, type InstanceInput } from "../instances/directory.js";
 import { createInstance, type CreateInstanceInput, type CreateInstanceResult } from "../instances/create.js";
 import { startInstance, type StartInstanceInput, type StartInstanceResult } from "../instances/start.js";
@@ -859,6 +861,14 @@ function noteStoreFailureResponse(
   }, status);
 }
 
+function experimentStoreFailureResponse(
+  res: ServerResponse,
+  result: Extract<ExperimentStoreResult<unknown>, { ok: false }>,
+): void {
+  const status = { invalid: 400, "not-found": 404, conflict: 409 }[result.reason];
+  json(res, { error: result.detail }, status);
+}
+
 function serverError(res: ServerResponse, message: string): void {
   json(res, { error: message }, 500);
 }
@@ -993,6 +1003,7 @@ export const SEARCH_QUERY_ROUTE_CHAR_CAP = 1_024;
 
 /** JSON escaping can expand one byte to six characters (for example NUL). */
 const NOTES_BODY_ROUTE_MAX_BYTES = NOTE_FILE_MAX_BYTES * 6 + 64_000;
+const EXPERIMENTS_BODY_ROUTE_MAX_BYTES = 128_000;
 
 /** Read a query param with NUL/control bytes stripped (GRS-020a-fix finding 2)
  *  and whitespace trimmed; empty-after-cleaning collapses to null. */
@@ -2962,6 +2973,115 @@ export async function handleApiRequest(
       if (!result.ok) return noteStoreFailureResponse(res, result);
       context.emit("notes:changed", { path: result.value.path, revision: result.value.revision, action: "updated" });
       return json(res, { note: result.value });
+    }
+
+    if (method === "GET" && pathname === "/api/experiments") {
+      const status = url.searchParams.get("status");
+      if (status !== null && status !== "running" && status !== "concluded") {
+        return badRequest(res, "status must be running or concluded");
+      }
+      return json(res, { experiments: listExperiments(status ?? undefined) });
+    }
+
+    if (method === "POST" && pathname === "/api/experiments") {
+      const parsed = await readJsonBody(req, res, { maxBytes: EXPERIMENTS_BODY_ROUTE_MAX_BYTES });
+      if (!parsed.ok) return;
+      const body = parsed.body && typeof parsed.body === "object" && !Array.isArray(parsed.body)
+        ? parsed.body as Record<string, unknown>
+        : {};
+      if (typeof body.name !== "string") return badRequest(res, "name is required and must be a string");
+      if (typeof body.hypothesis !== "string") return badRequest(res, "hypothesis is required and must be a string");
+      if (!body.baseline || typeof body.baseline !== "object" || Array.isArray(body.baseline)) return badRequest(res, "baseline is required and must be an object");
+      if (!Array.isArray(body.metrics)) return badRequest(res, "metrics is required and must be an array");
+      if (typeof body.horizonDays !== "number") return badRequest(res, "horizonDays is required and must be a number");
+      if (body.checkIn !== undefined && (!body.checkIn || typeof body.checkIn !== "object" || Array.isArray(body.checkIn))) {
+        return badRequest(res, "checkIn must be an object");
+      }
+      const input: CreateExperimentInput = {
+        name: body.name,
+        hypothesis: body.hypothesis,
+        baseline: body.baseline as Record<string, number>,
+        metrics: body.metrics as CreateExperimentInput["metrics"],
+        horizonDays: body.horizonDays,
+      };
+      const result = createExperimentWithCheckIn(
+        input,
+        body.checkIn as ExperimentCheckInInput | undefined,
+      );
+      if (!result.ok) return experimentStoreFailureResponse(res, result);
+      context.emit("experiments:changed", { id: result.value.id, action: "created" });
+      return json(res, { experiment: result.value }, 201);
+    }
+
+    let experimentParams = matchRoute("/api/experiments/:id", pathname);
+    if (method === "GET" && experimentParams) {
+      const result = getExperiment(experimentParams.id);
+      if (!result.ok) return experimentStoreFailureResponse(res, result);
+      return json(res, { experiment: result.value });
+    }
+
+    if (method === "PATCH" && experimentParams) {
+      const parsed = await readJsonBody(req, res, { maxBytes: EXPERIMENTS_BODY_ROUTE_MAX_BYTES });
+      if (!parsed.ok) return;
+      const body = parsed.body && typeof parsed.body === "object" && !Array.isArray(parsed.body)
+        ? parsed.body as Record<string, unknown>
+        : {};
+      for (const field of ["name", "hypothesis"] as const) {
+        if (body[field] !== undefined && typeof body[field] !== "string") return badRequest(res, `${field} must be a string`);
+      }
+      if (body.horizonDays !== undefined && typeof body.horizonDays !== "number") return badRequest(res, "horizonDays must be a number");
+      if (body.metrics !== undefined && !Array.isArray(body.metrics)) return badRequest(res, "metrics must be an array");
+      const result = updateExperiment(experimentParams.id, {
+        ...(typeof body.name === "string" ? { name: body.name } : {}),
+        ...(typeof body.hypothesis === "string" ? { hypothesis: body.hypothesis } : {}),
+        ...(typeof body.horizonDays === "number" ? { horizonDays: body.horizonDays } : {}),
+        ...(Array.isArray(body.metrics) ? { metrics: body.metrics as CreateExperimentInput["metrics"] } : {}),
+      });
+      if (!result.ok) return experimentStoreFailureResponse(res, result);
+      context.emit("experiments:changed", { id: result.value.id, action: "updated" });
+      return json(res, { experiment: result.value });
+    }
+
+    experimentParams = matchRoute("/api/experiments/:id/readings", pathname);
+    if (method === "POST" && experimentParams) {
+      const parsed = await readJsonBody(req, res, { maxBytes: EXPERIMENTS_BODY_ROUTE_MAX_BYTES });
+      if (!parsed.ok) return;
+      const body = parsed.body && typeof parsed.body === "object" && !Array.isArray(parsed.body)
+        ? parsed.body as Record<string, unknown>
+        : {};
+      if (typeof body.at !== "string") return badRequest(res, "at is required and must be a string");
+      if (typeof body.metric !== "string") return badRequest(res, "metric is required and must be a string");
+      if (typeof body.value !== "number") return badRequest(res, "value is required and must be a number");
+      if (body.note !== undefined && typeof body.note !== "string") return badRequest(res, "note must be a string");
+      const result = recordReading(experimentParams.id, {
+        at: body.at,
+        metric: body.metric,
+        value: body.value,
+        ...(typeof body.note === "string" ? { note: body.note } : {}),
+      });
+      if (!result.ok) return experimentStoreFailureResponse(res, result);
+      context.emit("experiments:changed", { id: experimentParams.id, action: "reading-recorded" });
+      return json(res, { reading: result.value }, 201);
+    }
+
+    experimentParams = matchRoute("/api/experiments/:id/conclude", pathname);
+    if (method === "POST" && experimentParams) {
+      const parsed = await readJsonBody(req, res, { maxBytes: EXPERIMENTS_BODY_ROUTE_MAX_BYTES });
+      if (!parsed.ok) return;
+      const body = parsed.body && typeof parsed.body === "object" && !Array.isArray(parsed.body)
+        ? parsed.body as Record<string, unknown>
+        : {};
+      if (body.outcome !== "win" && body.outcome !== "loss" && body.outcome !== "inconclusive") {
+        return badRequest(res, "outcome must be win, loss, or inconclusive");
+      }
+      if (typeof body.note !== "string") return badRequest(res, "note is required and must be a string");
+      const result = concludeExperimentAndDisableCheckIn(experimentParams.id, {
+        outcome: body.outcome,
+        note: body.note,
+      });
+      if (!result.ok) return experimentStoreFailureResponse(res, result);
+      context.emit("experiments:changed", { id: result.value.id, action: "concluded" });
+      return json(res, { experiment: result.value });
     }
 
     // GET /api/knowledge/search — GRS-020b: deterministic token-AND search over
@@ -6316,37 +6436,6 @@ export async function handleApiRequest(
         ...connector.getHealth(),
       }));
       return json(res, connectors);
-    }
-
-    // GET /api/activity — normalized operational stories. Raw gateway text
-    // remains available separately at /api/logs for Diagnostics.
-    if (method === "GET" && pathname === "/api/activity") {
-      try {
-        const rawLimit = url.searchParams.get("limit");
-        const kinds = url.searchParams.get("kinds")?.split(",").map((value) => value.trim()).filter(Boolean) as ActivityKind[] | undefined;
-        const outcomes = url.searchParams.get("outcomes")?.split(",").map((value) => value.trim()).filter(Boolean) as ActivityOutcomeState[] | undefined;
-        return json(res, queryActivityPage({
-          ...(rawLimit !== null ? { limit: Number(rawLimit) } : {}),
-          ...(url.searchParams.get("cursor") ? { cursor: url.searchParams.get("cursor")! } : {}),
-          ...(url.searchParams.get("q") ? { q: url.searchParams.get("q")! } : {}),
-          ...(kinds?.length ? { kinds } : {}),
-          ...(outcomes?.length ? { outcomes } : {}),
-        }));
-      } catch (err) {
-        if (err instanceof ActivityQueryError) return badRequest(res, err.message);
-        throw err;
-      }
-    }
-
-    const activityStoryMatch = pathname.match(/^\/api\/activity\/(story_[a-f0-9]{24})$/);
-    if (method === "GET" && activityStoryMatch) {
-      try {
-        const detail = getActivityStory(activityStoryMatch[1]);
-        return detail ? json(res, detail) : notFound(res);
-      } catch (err) {
-        if (err instanceof ActivityQueryError) return badRequest(res, err.message);
-        throw err;
-      }
     }
 
     // GET /api/onboarding — check if onboarding is needed

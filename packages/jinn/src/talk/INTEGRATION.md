@@ -35,7 +35,9 @@ event names from `protocol.ts` `TALK_EVENTS`. Frontend: `useGateway().subscribe(
 receives ALL events (talk:* included). Do NOT rely on the legacy `events` array.
 
 ## TTS sidecar pattern  — mirror src/stt/stt.ts
-STT lives in src/stt/stt.ts: `STT_MODELS_DIR = JINN_HOME/models/whisper`, model
+STT lives in src/stt/stt.ts: models are shared from the host Jinn data directory's
+`models/whisper` folder (or `JINN_STT_MODELS_DIR`), with the old
+`JINN_HOME/models/whisper` retained as a read fallback. Model
 download-on-first-use with progress, `transcribe()`. For Kokoro: use
 `JINN_HOME/models/kokoro` + a Python venv + a long-running sidecar process
 (spawn/health/restart), download onnx weights (~310MB) on first use emitting

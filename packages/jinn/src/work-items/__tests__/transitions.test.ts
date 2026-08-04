@@ -9,18 +9,15 @@ process.env.JINN_HOME = tmp;
 
 type Store = typeof import("../store.js");
 type Transitions = typeof import("../transitions.js");
-type Reg = typeof import("../../sessions/registry.js");
 
 let store: Store;
 let tr: Transitions;
-let reg: Reg;
 let db: import("better-sqlite3").Database;
 
 beforeAll(async () => {
   store = await import("../store.js");
   tr = await import("../transitions.js");
-  reg = await import("../../sessions/registry.js");
-  db = reg.initDb();
+  db = (await import("../../shared/db.js")).initDb();
 });
 
 const mk = (status: Store["createWorkItem"] extends (i: infer I) => unknown ? (I extends { status?: infer S } ? S : never) : never, extra: Partial<Parameters<Store["createWorkItem"]>[0]> = {}) =>

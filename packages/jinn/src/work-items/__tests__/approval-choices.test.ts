@@ -10,18 +10,15 @@ process.env.JINN_HOME = tmp;
 
 type Store = typeof import("../store.js");
 type Approvals = typeof import("../approvals.js");
-type Reg = typeof import("../../sessions/registry.js");
 let store: Store;
 let approvals: Approvals;
-let reg: Reg;
 
 const VARIANTS = ["variant-a", "variant-b", "variant-c"];
 
 beforeAll(async () => {
   store = await import("../store.js");
   approvals = await import("../approvals.js");
-  reg = await import("../../sessions/registry.js");
-  reg.initDb();
+  (await import("../../shared/db.js")).initDb();
 });
 
 afterEach(() => {

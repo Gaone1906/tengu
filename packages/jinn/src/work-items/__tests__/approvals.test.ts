@@ -7,22 +7,20 @@ import path from "node:path";
 // keep the suite off the live DB. Set BEFORE importing the store.
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-wi-appr-"));
 process.env.JINN_HOME = tmp;
+const dbModule = await import("../../shared/db.js");
 
 type Store = typeof import("../store.js");
 type Approvals = typeof import("../approvals.js");
-type Reg = typeof import("../../sessions/registry.js");
 type ApprovalAuthority = typeof import("../../gateway/approval-authority.js");
 let store: Store;
 let approvals: Approvals;
-let reg: Reg;
 let approvalAuthority: ApprovalAuthority;
 
 beforeAll(async () => {
   store = await import("../store.js");
   approvals = await import("../approvals.js");
-  reg = await import("../../sessions/registry.js");
   approvalAuthority = await import("../../gateway/approval-authority.js");
-  reg.initDb();
+  (await import("../../shared/db.js")).initDb();
 });
 
 function kinds(id: string): string[] {
@@ -201,32 +199,12 @@ describe("decideWorkItemApproval — native consequence rules", () => {
 
 /* ── approvals off-row (Todos v2 slice 4) — the work_item_approvals table ───── */
 
-describe("approvals off-row — writes land in work_item_approvals, columns stay frozen", () => {
-  function rawColumns(id: string): Record<string, unknown> {
-    return reg
-      .initDb()
-      .prepare(
-        `SELECT approval_state, approval_request, approval_ref, approval_target,
-                approval_target_kind, approval_escalated_at, approval_decided_by, approval_decided_at
-           FROM work_items WHERE id = ?`,
-      )
-      .get(id) as Record<string, unknown>;
-  }
-
-  function expectColumnsFrozenNull(id: string): void {
-    const cols = rawColumns(id);
-    for (const [column, value] of Object.entries(cols)) {
-      expect(value, `${column} must stay frozen (never written post-slice-4)`).toBeNull();
-    }
-  }
-
-  it("request writes ONLY the new table; the legacy approval_* columns never change", () => {
+describe("approvals off-row — writes land in work_item_approvals", () => {
+  it("request writes the approvals table and the returned item reads back from it", () => {
     const item = store.createWorkItem({ title: "Off-row request", status: "in_review", source: "human" });
     const out = approvals.requestApproval(item.id, { request: "gate?", ref: "opaque-ref", target: null, actor: "session:sX" });
-    // The returned WorkItem still reads as pending (dual-read), but the columns are untouched.
     expect(out.approvalState).toBe("pending");
     expect(out.approvalRef).toBe("opaque-ref");
-    expectColumnsFrozenNull(item.id);
     const row = approvals.currentApproval(item.id)!;
     expect(row.state).toBe("pending");
     expect(row.request).toBe("gate?");
@@ -241,7 +219,7 @@ describe("approvals off-row — writes land in work_item_approvals, columns stay
     expect(out.version).toBe(item.version + 1);
   });
 
-  it("decide + escalate write the pending row (note included); columns stay frozen", async () => {
+  it("decide + escalate write the pending row (note included)", async () => {
     const item = store.createWorkItem({ title: "Off-row decide", status: "backlog", source: "human" });
     approvals.requestApproval(item.id, { request: "plan ok?", target: null });
     const escalated = approvals.escalateApproval(item.id, "coo", "needs the operator");
@@ -254,7 +232,6 @@ describe("approvals off-row — writes land in work_item_approvals, columns stay
     expect(row.decidedBy).toBe("coo");
     expect(row.decidedAt).toBeTruthy();
     expect(row.note).toBe("fine");
-    expectColumnsFrozenNull(item.id);
   });
 
   it("keeps approval history: a fresh request after a decision is a NEW row; current = pending else latest decided", async () => {
@@ -279,7 +256,7 @@ describe("approvals off-row — writes land in work_item_approvals, columns stay
     expect(current.request).toBe("round two");
     expect(current.state).toBe("approved");
 
-    // the dual-read WorkItem view tracks the current row
+    // the hydrated WorkItem view tracks the current row
     const roundTrip = store.getWorkItem(item.id)!;
     expect(roundTrip.approvalState).toBe("approved");
     expect(roundTrip.approvalRequest).toBe("round two");
@@ -299,7 +276,7 @@ describe("approvals off-row — writes land in work_item_approvals, columns stay
     const item = store.createWorkItem({ title: "Unique pending", status: "backlog", source: "human" });
     approvals.requestApproval(item.id, { request: "first", target: null });
     expect(() =>
-      reg
+      dbModule
         .initDb()
         .prepare(
           `INSERT INTO work_item_approvals (id, work_item_id, state, request, requested_by, requested_at)
@@ -336,7 +313,6 @@ describe("approvals off-row — writes land in work_item_approvals, columns stay
     approvals.requestApproval(item.id, { request: "sign-off", target: "attention-target" });
     const hits = store.listWorkItems({ needsAttentionFor: "attention-target" });
     expect(hits.some((i) => i.id === item.id)).toBe(true);
-    expectColumnsFrozenNull(item.id);
   });
 });
 

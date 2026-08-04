@@ -22,7 +22,7 @@ beforeAll(async () => {
   files = await import("../files.js");
   registry = await import("../../sessions/registry.js");
   identity = await import("../../mcp/identity.js");
-  registry.initDb();
+  (await import("../../shared/db.js")).initDb();
   fileSession = registry.createSession({ engine: "codex", source: "web", sourceRef: "file-reader", employee: "file-reader" });
 });
 

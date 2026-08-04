@@ -95,13 +95,13 @@ describe("search tools — registry + schemas", () => {
     }
   });
 
-  it("the belt registers the search group — 52 tools total", () => {
+  it("the belt registers the search group", () => {
     const names = buildTools().map((t) => t.name);
     expect(names).toContain("search_messages");
     expect(names).toContain("search_sessions");
     expect(names).toContain("get_message_context");
     expect(names).toContain("cancel_workflow_run");
-    expect(names).toHaveLength(63);
+    expect(names).toHaveLength(69);
   });
 
   it("domain teaching lives on search_messages; the others stay short", () => {
@@ -383,7 +383,7 @@ function seedSession(fields: { employee?: string; engine?: string; status?: stri
 beforeAll(async () => {
   api = await import("../../gateway/api.js");
   registry = await import("../../sessions/registry.js");
-  registry.initDb();
+  (await import("../../shared/db.js")).initDb();
   integrationCallerId = seedSession({ employee: "search-caller", engine: "codex", title: "Search caller" });
 });
 

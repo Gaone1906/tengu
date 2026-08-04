@@ -8,13 +8,14 @@ import Database from "better-sqlite3";
 // resolved from JINN_HOME at module load).
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-prompt-excerpt-"));
 process.env.JINN_HOME = tmp;
+const migrateModule = await import("../migrate.js");
 
 type Reg = typeof import("../registry.js");
 let reg: Reg;
 
 beforeAll(async () => {
   reg = await import("../registry.js");
-  reg.initDb();
+  (await import("../../shared/db.js")).initDb();
 });
 
 describe("promptExcerptOf", () => {
@@ -89,7 +90,7 @@ describe("migrateSessionsSchema prompt_excerpt migration", () => {
 
     expect(hasCol()).toBe(false);
 
-    reg.migrateSessionsSchema(db);
+    migrateModule.migrateSessionsSchema(db);
     expect(hasCol()).toBe(true);
     expect(
       (db.prepare("SELECT prompt_excerpt FROM sessions WHERE id = ?").get("old-1") as {
@@ -98,7 +99,7 @@ describe("migrateSessionsSchema prompt_excerpt migration", () => {
     ).toBeNull();
 
     // Re-running must not throw and must not duplicate the column.
-    expect(() => reg.migrateSessionsSchema(db)).not.toThrow();
+    expect(() => migrateModule.migrateSessionsSchema(db)).not.toThrow();
     const cols = (db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>).filter(
       (c) => c.name === "prompt_excerpt",
     );

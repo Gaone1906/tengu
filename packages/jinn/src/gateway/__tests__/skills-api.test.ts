@@ -116,7 +116,7 @@ function workerHeaders(): Record<string, string> {
 beforeAll(async () => {
   api = await import("../api.js");
   registry = await import("../../sessions/registry.js");
-  registry.initDb();
+  (await import("../../shared/db.js")).initDb();
   worker = registry.createSession({
     engine: "codex",
     source: "web",

@@ -6,6 +6,8 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-callback-deliveries-"));
 process.env.JINN_HOME = home;
+const migrateModule = await import("../migrate.js");
+const dbModule = await import("../../shared/db.js");
 
 type Registry = typeof import("../registry.js");
 
@@ -50,7 +52,7 @@ function createSession(id: string, parentSessionId?: string) {
     parentSessionId,
     prompt: `session ${id}`,
   });
-  registry.initDb().prepare("UPDATE sessions SET id = ? WHERE id = ?").run(id, session.id);
+  dbModule.initDb().prepare("UPDATE sessions SET id = ? WHERE id = ?").run(id, session.id);
   return registry.getSession(id)!;
 }
 
@@ -97,7 +99,7 @@ function installExactChildDeliverySchema(database: Database.Database): void {
 }
 
 function openRegistryOwnedExactChildDeliverySchema(): Database.Database {
-  registry.__closeDbForTest();
+  dbModule.__closeDbForTest();
   const sessionsDir = path.join(home, "sessions");
   fs.rmSync(sessionsDir, { recursive: true, force: true });
   fs.mkdirSync(sessionsDir, { recursive: true });
@@ -109,11 +111,11 @@ function openRegistryOwnedExactChildDeliverySchema(): Database.Database {
 
 beforeAll(async () => {
   registry = await import("../registry.js");
-  registry.initDb();
+  dbModule.initDb();
 });
 
 beforeEach(() => {
-  const database = registry.initDb();
+  const database = dbModule.initDb();
   const hasCallbackTable = database
     .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'callback_deliveries'")
     .get();
@@ -173,7 +175,7 @@ describe("callback delivery schema migration", () => {
 
     const validBefore = seedDatabase.prepare("SELECT * FROM callback_deliveries WHERE id LIKE 'valid-%' ORDER BY id").all();
     seedDatabase.close();
-    const database = registry.initDb();
+    const database = dbModule.initDb();
     const databaseFile = (database.pragma("database_list") as Array<{ file: string }>)[0]?.file;
     expect(databaseFile).toBe(path.join(fs.realpathSync(home), "sessions", "registry.db"));
 
@@ -265,7 +267,7 @@ describe("callback delivery schema migration", () => {
       });
     }) as Database.Database["prepare"]);
 
-    expect(() => registry.migrateCallbackDeliveriesSchema(database)).toThrow("forced mid-copy failure");
+    expect(() => migrateModule.migrateCallbackDeliveriesSchema(database)).toThrow("forced mid-copy failure");
     prepareSpy.mockRestore();
     expect(database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'callback_deliveries'").get()).toEqual(beforeSql);
     expect(database.prepare("SELECT * FROM callback_deliveries ORDER BY id").all()).toEqual(beforeRows);
@@ -273,7 +275,7 @@ describe("callback delivery schema migration", () => {
   });
 
   it("reopens the current child-session schema as one generic session delivery without rewriting its receipt", () => {
-    const database = registry.initDb();
+    const database = dbModule.initDb();
     database.exec(`
       DROP TABLE callback_deliveries;
       CREATE TABLE callback_deliveries (
@@ -323,8 +325,8 @@ describe("callback delivery schema migration", () => {
       );
     `);
 
-    registry.__closeDbForTest();
-    registry.initDb();
+    dbModule.__closeDbForTest();
+    dbModule.initDb();
 
     expect(registry.getSessionDelivery("delivery-old")).toMatchObject({
       targetSessionId: "parent-a",
@@ -337,14 +339,14 @@ describe("callback delivery schema migration", () => {
       status: "pending",
       payload: { message: "existing payload", displayMessage: "Existing payload" },
     });
-    expect(registry.initDb().prepare("SELECT COUNT(*) AS n FROM callback_deliveries").get()).toEqual({ n: 1 });
+    expect(dbModule.initDb().prepare("SELECT COUNT(*) AS n FROM callback_deliveries").get()).toEqual({ n: 1 });
   });
 
   it("is idempotent and installs the durable composite uniqueness contract", () => {
     const database = new Database(":memory:");
 
-    registry.migrateCallbackDeliveriesSchema(database);
-    registry.migrateCallbackDeliveriesSchema(database);
+    migrateModule.migrateCallbackDeliveriesSchema(database);
+    migrateModule.migrateCallbackDeliveriesSchema(database);
 
     const columns = database.prepare("PRAGMA table_info(callback_deliveries)").all() as Array<{ name: string }>;
     expect(columns.map((column) => column.name)).toEqual(expect.arrayContaining([
@@ -395,7 +397,7 @@ describe("callback delivery schema migration", () => {
     const database = new Database(":memory:");
     database.exec("CREATE TABLE callback_deliveries (id TEXT PRIMARY KEY)");
 
-    expect(() => registry.migrateCallbackDeliveriesSchema(database)).toThrow(/incompatible callback_deliveries schema/i);
+    expect(() => migrateModule.migrateCallbackDeliveriesSchema(database)).toThrow(/incompatible callback_deliveries schema/i);
 
     const columns = database.prepare("PRAGMA table_info(callback_deliveries)").all() as Array<{ name: string }>;
     expect(columns.map((column) => column.name)).toEqual(["id"]);
@@ -429,8 +431,8 @@ describe("callback delivery schema migration", () => {
           '{broken', 'pending', NULL, NULL, '2026-01-01T00:00:01.000Z', NULL);
     `);
 
-    registry.migrateCallbackDeliveriesSchema(database);
-    registry.migrateCallbackDeliveriesSchema(database);
+    migrateModule.migrateCallbackDeliveriesSchema(database);
+    migrateModule.migrateCallbackDeliveriesSchema(database);
 
     expect(database.prepare(`
       SELECT target_session_id AS targetSessionId, source_kind AS sourceKind,
@@ -487,10 +489,10 @@ describe("callback delivery schema migration", () => {
       insert.run(`ws-${hex}`, `${edge}parent-${hex}${edge}`, `child-${hex}`, `attempt-${hex}`, new Date().toISOString());
     }
 
-    registry.migrateCallbackDeliveriesSchema(database);
+    migrateModule.migrateCallbackDeliveriesSchema(database);
     database.close();
     database = new Database(dbPath);
-    registry.migrateCallbackDeliveriesSchema(database);
+    migrateModule.migrateCallbackDeliveriesSchema(database);
 
     const rows = database.prepare(`
       SELECT id, target_session_id AS targetSessionId FROM callback_deliveries ORDER BY id
@@ -534,7 +536,7 @@ describe("callback delivery schema migration", () => {
         'pending', -2, '2026-01-01T00:00:00.000Z');
     `);
 
-    registry.migrateCallbackDeliveriesSchema(database);
+    migrateModule.migrateCallbackDeliveriesSchema(database);
 
     expect(() => database.prepare(`
       INSERT INTO callback_deliveries (
@@ -635,7 +637,7 @@ describe("callback delivery identity", () => {
   });
 
   it("uses the complete Unicode White_Space set for claims and SQLite constraints", () => {
-    const database = registry.initDb();
+    const database = dbModule.initDb();
     for (const codePoint of UNICODE_WHITE_SPACE) {
       const edge = String.fromCodePoint(codePoint);
       const hex = codePoint.toString(16);
@@ -693,7 +695,7 @@ describe("callback delivery identity", () => {
     ["padded source attempt", "source_attempt", " token ", 1],
     ["zero source version", "source_version", "attempt-2", 0],
   ])("rejects direct SQL identities that violate canonical constraints: %s", (_label, column, value, version) => {
-    const database = registry.initDb();
+    const database = dbModule.initDb();
     const row = callbackInput({
       targetSessionId: column === "target_session_id" ? value : "parent-sql",
       sourceId: column === "source_id" ? value : "child-sql",
@@ -836,7 +838,7 @@ describe("callback delivery retry lifecycle", () => {
   });
 
   it("quarantines a poison pending row and continues returning later valid receipts", () => {
-    const database = registry.initDb();
+    const database = dbModule.initDb();
     database.pragma("ignore_check_constraints = ON");
     database.prepare(`
       INSERT INTO callback_deliveries (
@@ -865,7 +867,7 @@ describe("callback delivery retry lifecycle", () => {
   });
 
   it("quarantines mixed identity and lifecycle poison per row and continues after reopen", () => {
-    const database = registry.initDb();
+    const database = dbModule.initDb();
     const baseValues = {
       payload: JSON.stringify({ message: "poison", displayMessage: "poison" }),
       createdAt: new Date().toISOString(),
@@ -912,7 +914,7 @@ describe("callback delivery retry lifecycle", () => {
       lastError: expect.stringMatching(/(?:callback|session) delivery/i),
     })));
 
-    registry.__closeDbForTest();
+    dbModule.__closeDbForTest();
     expect(registry.listPendingSessionDeliveries()).toEqual([
       expect.objectContaining({ id: valid.id }),
     ]);
@@ -1050,7 +1052,7 @@ describe("callback delivery acceptance", () => {
 describe("session terminal versions", () => {
   it("upgrades a migrated tokenless terminal row from version zero when its first callback is claimed", () => {
     const child = createSession("child-1");
-    registry.initDb().prepare(`
+    dbModule.initDb().prepare(`
       UPDATE sessions
       SET status = 'idle', attempt_outcome = 'succeeded', attempt_token = NULL, attempt_terminal_version = 0
       WHERE id = ?

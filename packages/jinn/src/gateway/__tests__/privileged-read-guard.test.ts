@@ -67,7 +67,6 @@ function stragglerReadRoutes(): RouteSpec[] {
     { method: "GET", path: "/api/config", label: "config" },
     { method: "GET", path: "/api/logs", label: "logs" },
     { method: "GET", path: "/api/connectors", label: "connectors" },
-    { method: "GET", path: "/api/activity", label: "activity" },
     { method: "GET", path: "/api/onboarding", label: "onboarding" },
     { method: "GET", path: "/api/stt/status", label: "stt status" },
     { method: "GET", path: "/api/tts", label: "tts status" },
@@ -195,7 +194,7 @@ beforeAll(async () => {
   registry = await import("../../sessions/registry.js");
   identity = await import("../../mcp/identity.js");
   paths = await import("../../shared/paths.js");
-  registry.initDb();
+  (await import("../../shared/db.js")).initDb();
   const fileDir = path.join(paths.FILES_DIR, fileId);
   fs.mkdirSync(fileDir, { recursive: true });
   fs.writeFileSync(path.join(fileDir, "visible.txt"), "visible managed file");

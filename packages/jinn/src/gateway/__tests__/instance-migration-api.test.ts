@@ -8,6 +8,7 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 
 const registryHome = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-migration-api-registry-"))
 process.env.JINN_HOME = registryHome
+const dbModule = await import("../../shared/db.js");
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-migration-api-home-"))
 const migrationsDir = path.join(home, "package-migrations")
@@ -109,7 +110,7 @@ async function request(method: string, url: string, body?: unknown, authorized =
 beforeAll(async () => {
   api = await import("../api.js")
   registry = await import("../../sessions/registry.js")
-  registry.initDb()
+  dbModule.initDb()
 })
 
 beforeEach(() => {
@@ -169,8 +170,8 @@ describe("instance migration API", () => {
     expect(dispatched).toHaveLength(1)
     expect(registry.getQueueItems(`instance-migration:${pending.body.migrationKey}`)).toHaveLength(1)
 
-    registry.__closeDbForTest()
-    registry.initDb()
+    dbModule.__closeDbForTest()
+    dbModule.initDb()
     expect(registry.getQueueItems(`instance-migration:${pending.body.migrationKey}`)).toHaveLength(1)
     const afterRestart = await request("POST", "/api/instance-migration/open", { migrationKey: pending.body.migrationKey })
     expect(afterRestart).toMatchObject({

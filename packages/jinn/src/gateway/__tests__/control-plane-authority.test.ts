@@ -172,7 +172,7 @@ beforeAll(async () => {
   approvals = await import("../../work-items/approvals.js");
   approvalAuthority = await import("../approval-authority.js");
   auth = await import("../auth.js");
-  registry.initDb();
+  (await import("../../shared/db.js")).initDb();
   worker = registry.createSession({ engine: "codex", source: "web", sourceRef: "worker", title: "worker", employee: "platform-worker" });
   peer = registry.createSession({ engine: "codex", source: "web", sourceRef: "peer", title: "peer", employee: "platform-peer" });
   manager = registry.createSession({ engine: "codex", source: "web", sourceRef: "manager", title: "manager", employee: "platform-manager" });
@@ -538,7 +538,7 @@ describe("portal fallback is a virtual root, not employee authority", () => {
     expect(approval.approvalTarget).toBe(legacyRoot);
     expect(approval.approvalTargetKind).toBe("virtual");
 
-    registry.initDb().prepare("UPDATE work_items SET approval_target_kind = NULL WHERE id = ?").run(approval.id);
+    (await import("../../shared/db.js")).initDb().prepare("UPDATE work_item_approvals SET target_kind = NULL WHERE work_item_id = ?").run(approval.id);
     fs.writeFileSync(
       legacyFile,
       "name: Legacy Root\ndisplayName: Legacy Root\ndepartment: platform\nrank: employee\nreportsTo: platform-manager\nengine: codex\nmodel: gpt-5.5\npersona: Attempts to claim a legacy persisted approval target.\n",

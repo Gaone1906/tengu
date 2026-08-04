@@ -79,7 +79,6 @@ function managerWith(runs: EngineRunOpts[]) {
   return new managerModule.SessionManager(
     config(),
     new Map([[engine.name, engine]]),
-    [],
     "test-boot",
     (id) => id === employee.name ? employee : undefined,
   );
@@ -88,11 +87,11 @@ function managerWith(runs: EngineRunOpts[]) {
 beforeAll(async () => {
   registry = await import("../registry.js");
   managerModule = await import("../manager.js");
-  registry.initDb();
+  (await import("../../shared/db.js")).initDb();
 });
 
-beforeEach(() => {
-  registry.initDb().exec("DELETE FROM messages; DELETE FROM queue_items; DELETE FROM sessions;");
+beforeEach(async () => {
+  (await import("../../shared/db.js")).initDb().exec("DELETE FROM messages; DELETE FROM queue_items; DELETE FROM sessions;");
 });
 
 describe("workflow attempt per-turn completion", () => {
@@ -113,7 +112,6 @@ describe("workflow attempt per-turn completion", () => {
     const manager = new managerModule.SessionManager(
       config(),
       new Map([[engine.name, engine]]),
-      [],
       "test-boot",
       (id) => id === employee.name ? employee : undefined,
     );
@@ -224,7 +222,6 @@ describe("workflow attempt per-turn completion", () => {
     const manager = new managerModule.SessionManager(
       config(),
       new Map([[engine.name, engine]]),
-      [],
       "test-boot",
       (id) => id === employee.name ? employee : undefined,
     );

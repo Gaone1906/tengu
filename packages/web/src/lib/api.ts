@@ -5,6 +5,7 @@ import type {
   NotesListResponse,
   UpdateNoteInput,
 } from "@/routes/notes/types"
+import type { ExperimentResponse, ExperimentsResponse } from "@/routes/experiments/types"
 
 export interface TranscriptContentBlock {
   type: 'text' | 'tool_use' | 'tool_result' | 'thinking'
@@ -287,6 +288,7 @@ export interface EngineRegistryEntry {
   defaultModel: string;
   effortMechanism: "claude-flag" | "codex-config" | "grok-flag" | "pi-flag" | "none";
   models: ModelInfo[];
+  supportsPty?: boolean; // interactive PTY/CLI view (`/ws/pty`)
 }
 export interface EnginesResponse {
   default: string;
@@ -865,6 +867,10 @@ export const api = {
     post<NoteDocumentResponse>("/api/notes", input),
   updateNote: (input: UpdateNoteInput) =>
     put<NoteDocumentResponse>("/api/notes", input),
+  listExperiments: (status?: "running" | "concluded") =>
+    get<ExperimentsResponse>(`/api/experiments${status ? `?status=${status}` : ""}`),
+  getExperiment: (id: string) =>
+    get<ExperimentResponse>(`/api/experiments/${encodeURIComponent(id)}`),
   getFeatures: () => get<{ notesEnabled: boolean }>("/api/features"),
   getStatus: () => get<Record<string, unknown>>("/api/status"),
   listWorkflowDefinitionsV2: () =>
@@ -1007,8 +1013,6 @@ export const api = {
     get<{ needed: boolean; onboarded: boolean; sessionsCount: number; hasEmployees: boolean; companyName: string | null; companyPrefix: string | null; todoPrefix: string | null; todoPrefixFrozen: boolean; portalName: string | null; operatorName: string | null }>("/api/onboarding"),
   completeOnboarding: (data: { companyName?: string; companyPrefix?: string | null; portalName?: string; operatorName?: string; language?: string; engine?: string; model?: string; effortLevel?: string }) =>
     post<{ status: string; portal: { companyName?: string; companyPrefix?: string; portalName?: string; operatorName?: string; language?: string } }>("/api/onboarding", data),
-  getActivity: () =>
-    get<Array<{ event: string; payload: unknown; ts: number }>>("/api/activity"),
   updateDepartmentBoard: (name: string, data: unknown) =>
     put<Record<string, unknown>>(`/api/org/departments/${name}/board`, data),
   sttStatus: () =>

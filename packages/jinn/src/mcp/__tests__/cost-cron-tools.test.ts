@@ -77,7 +77,7 @@ describe("cost + cron tools — schemas and belt registration", () => {
     expect(names).toContain("get_cron_run_history");
     expect(names).toContain("cancel_workflow_run");
     expect(names.filter((name) => name === "list_work_items")).toHaveLength(1);
-    expect(names).toHaveLength(63);
+    expect(names).toHaveLength(69);
   });
 });
 
@@ -221,9 +221,9 @@ beforeAll(async () => {
   });
   api = await import("../../gateway/api.js");
   registry = await import("../../sessions/registry.js");
-  registry.initDb();
+  (await import("../../shared/db.js")).initDb();
   integrationCallerId = registry.createSession({ engine: "codex", source: "web", sourceRef: "cost-cron-caller", employee: "cost-cron-caller" }).id;
-  const db = registry.initDb();
+  const db = (await import("../../shared/db.js")).initDb();
   db.prepare(
     `INSERT INTO sessions (id, engine, employee, source, source_ref, status, title, total_cost, total_turns, created_at, last_activity)
      VALUES (?, ?, ?, ?, ?, 'idle', ?, ?, ?, ?, ?)`,

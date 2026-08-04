@@ -19,11 +19,11 @@ let reg: Reg;
 beforeAll(async () => {
   reg = await import("../../sessions/registry.js");
   api = await import("../api.js");
-  reg.initDb();
+  (await import("../../shared/db.js")).initDb();
 });
 
-beforeEach(() => {
-  const db = reg.initDb();
+beforeEach(async () => {
+  const db = (await import("../../shared/db.js")).initDb();
   db.exec("DELETE FROM messages; DELETE FROM queue_items; DELETE FROM sessions;");
 });
 

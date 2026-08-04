@@ -132,11 +132,11 @@ function normalizedRows(reload: Record<string, unknown>) {
 beforeAll(async () => {
   api = await import("../api.js");
   registry = await import("../../sessions/registry.js");
-  registry.initDb();
+  (await import("../../shared/db.js")).initDb();
 });
 
-beforeEach(() => {
-  registry.initDb().exec("DELETE FROM queue_items; DELETE FROM messages; DELETE FROM sessions;");
+beforeEach(async () => {
+  (await import("../../shared/db.js")).initDb().exec("DELETE FROM queue_items; DELETE FROM messages; DELETE FROM sessions;");
 });
 
 describe("completed streamed-turn settlement", () => {

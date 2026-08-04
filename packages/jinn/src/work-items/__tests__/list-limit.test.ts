@@ -6,16 +6,14 @@ import path from "node:path";
 // Throwaway DB before importing the registry (SESSIONS_DB resolves from JINN_HOME).
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-wi-limit-"));
 process.env.JINN_HOME = tmp;
+const dbModule = await import("../../shared/db.js");
 
 type Store = typeof import("../store.js");
-type Reg = typeof import("../../sessions/registry.js");
 let store: Store;
-let reg: Reg;
 
 beforeAll(async () => {
   store = await import("../store.js");
-  reg = await import("../../sessions/registry.js");
-  reg.initDb();
+  dbModule.initDb();
 });
 
 describe("listWorkItems SQL LIMIT", () => {
@@ -103,7 +101,7 @@ describe("listWorkItems SQL LIMIT", () => {
       department: "filter-department",
       source: "connector",
     });
-    const db = reg.initDb();
+    const db = dbModule.initDb();
     db.prepare("UPDATE work_items SET updated_at = ? WHERE id = ?").run("2031-04-10T12:00:00.000Z", match.id);
     db.prepare("UPDATE work_items SET updated_at = ? WHERE id = ?").run("2031-04-11T12:00:00.000Z", bodyMatch.id);
     db.prepare("UPDATE work_items SET updated_at = ? WHERE id = ?").run("2031-05-01T12:00:00.000Z", outsideWindow.id);
@@ -131,7 +129,7 @@ describe("listWorkItems SQL LIMIT", () => {
   });
 
   it("the ordered read is index-backed (LIMIT does not sort the whole table)", () => {
-    const db = reg.initDb();
+    const db = dbModule.initDb();
     const plan = db
       .prepare(
         "EXPLAIN QUERY PLAN SELECT * FROM work_items WHERE status = ? ORDER BY (rank IS NULL) ASC, rank ASC, updated_at DESC, created_at DESC, id ASC LIMIT ? OFFSET ?",
@@ -143,7 +141,7 @@ describe("listWorkItems SQL LIMIT", () => {
   });
 
   it("the default no-filter page is index-backed", () => {
-    const db = reg.initDb();
+    const db = dbModule.initDb();
     const plan = db
       .prepare(
         "EXPLAIN QUERY PLAN SELECT * FROM work_items ORDER BY (rank IS NULL) ASC, rank ASC, updated_at DESC, created_at DESC, id ASC LIMIT ? OFFSET ?",

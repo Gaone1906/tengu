@@ -6,6 +6,7 @@ import { Readable } from "node:stream";
 import type { ServerResponse } from "node:http";
 
 process.env.JINN_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-pins-api-"));
+const dbModule = await import("../../shared/db.js");
 
 type Api = typeof import("../api.js");
 type Registry = typeof import("../../sessions/registry.js");
@@ -70,7 +71,7 @@ async function request(method: string, url: string, body?: unknown) {
 beforeAll(async () => {
   registry = await import("../../sessions/registry.js");
   api = await import("../api.js");
-  registry.initDb();
+  dbModule.initDb();
 });
 
 describe("chat pin API", () => {
@@ -102,7 +103,7 @@ describe("chat pin API", () => {
     const newer = registry.createSession({ engine: "codex", source: "web", sourceRef: "web:api-newer" });
     const archived = registry.createSession({ engine: "claude", source: "web", sourceRef: "web:api-archived" });
     const unpinned = registry.createSession({ engine: "claude", source: "web", sourceRef: "web:api-unpinned" });
-    const database = registry.initDb();
+    const database = dbModule.initDb();
     database.prepare("UPDATE sessions SET last_activity = ? WHERE id = ?").run("2026-02-01T00:00:00.000Z", older.id);
     database.prepare("UPDATE sessions SET last_activity = ? WHERE id = ?").run("2026-02-02T00:00:00.000Z", newer.id);
     registry.pinChat(older.id);
@@ -131,7 +132,7 @@ describe("chat pin API", () => {
   });
 
   it("filters an orphaned session key even if the database invariant was bypassed", async () => {
-    registry.initDb().prepare(
+    dbModule.initDb().prepare(
       "INSERT INTO chat_pins (pin_key, pinned_at) VALUES (?, ?)",
     ).run("missing-session", "2026-01-01T00:00:00.000Z");
 

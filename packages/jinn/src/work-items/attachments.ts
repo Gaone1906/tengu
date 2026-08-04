@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { initDb } from '../sessions/registry.js';
+import { initDb } from '../shared/db.js';
 import { ATTACHMENTS_DIR } from '../shared/paths.js';
 import { parseTodoId } from './id.js';
 import { appendWorkItemEvent } from './store.js';

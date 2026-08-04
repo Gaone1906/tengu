@@ -16,7 +16,7 @@ import type { WorkflowError, WorkflowRunDetail } from "./runtime.js";
 import { WorkflowRunner, type WorkflowTodoApprovalMirror, type WorkflowTodoLifecycle, type WorkflowTodoSessionLink } from "./runner.js";
 import type { WorkflowSessionExecutor } from "./session-executor.js";
 import { WorkflowTriggerService, type FireWorkflowEventInput } from "./trigger-service.js";
-import { validateExecutableWorkflow, type WorkflowValidationIssue } from "./validation.js";
+import { scheduleTriggerIssues, validateExecutableWorkflow, type WorkflowValidationIssue } from "./validation.js";
 
 export { WorkflowRepositoryError };
 export type { FireWorkflowEventInput };
@@ -220,6 +220,10 @@ export class WorkflowService {
     const value = this.options.repository.createDefinition(input); this.definitionChanged(value); return value;
   }
   saveDefinition(definition: WorkflowDefinition, expectedRevision: number): WorkflowDefinition {
+    // Saving a revision of an already-enabled Workflow bypasses the enable gate,
+    // so an unarmable schedule is refused here before it can become durable.
+    const issues = scheduleTriggerIssues(definition);
+    if (issues.length > 0) throw new WorkflowServiceError("invalid-definition", "Workflow definition is invalid.", issues);
     const value = this.options.repository.saveDefinition(definition, expectedRevision); this.definitionChanged(value); return value;
   }
   duplicateDefinition(sourceId: WorkflowId, input: { id: WorkflowId; title: string }): WorkflowDefinition {

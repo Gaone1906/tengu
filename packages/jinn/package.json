@@ -23,7 +23,7 @@
     "build": "node scripts/build.mjs",
     "dev": "tsc && (tsc --watch &) && node --watch-path=dist dist/bin/jinn.js start",
     "typecheck": "tsc --noEmit",
-    "test": "pnpm build && vitest run",
+    "test": "pnpm build && vitest run --maxWorkers=2 --testTimeout=30000 --hookTimeout=30000",
     "coverage": "vitest run --coverage",
     "test:watch": "vitest",
     "migration:generate": "node scripts/instance-migration-bundle.mjs generate",

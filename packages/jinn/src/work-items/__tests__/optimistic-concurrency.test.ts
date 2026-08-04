@@ -131,12 +131,12 @@ describe("conditional Todo metadata updates", () => {
     );
   });
 
-  it("persists only a digest of the caller idempotency key", () => {
+  it("persists only a digest of the caller idempotency key", async () => {
     const item = store.createWorkItem({ title: "digest receipt" });
     const key = "todo:edit:caller-private-key";
     conditional(item.id, { title: "digested" }, item.version, key);
 
-    const receipt = registry.initDb().prepare("SELECT * FROM work_item_edit_receipts ORDER BY created_at DESC LIMIT 1").get() as Record<string, unknown>;
+    const receipt = (await import("../../shared/db.js")).initDb().prepare("SELECT * FROM work_item_edit_receipts ORDER BY created_at DESC LIMIT 1").get() as Record<string, unknown>;
     expect(receipt.key_digest).toMatch(/^[a-f0-9]{64}$/);
     expect(JSON.stringify(receipt)).not.toContain(key);
   });

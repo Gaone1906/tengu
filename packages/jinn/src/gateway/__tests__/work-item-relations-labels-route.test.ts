@@ -115,7 +115,7 @@ beforeAll(async () => {
   api = await import("../api.js");
   reg = await import("../../sessions/registry.js");
   store = await import("../../work-items/store.js");
-  db = reg.initDb();
+  db = (await import("../../shared/db.js")).initDb();
 });
 
 describe("POST/DELETE /api/work-items/:id/relations", () => {

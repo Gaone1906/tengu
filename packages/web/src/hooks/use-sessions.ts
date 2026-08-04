@@ -83,6 +83,25 @@ export function removeFromSessionsCache(qc: QueryClient, ids: Iterable<string>) 
   )
 }
 
+/** Reflect a successful stop immediately; the authoritative refetch follows. */
+export function patchStoppedSession(qc: QueryClient, id: string) {
+  qc.setQueryData<SessionsResponse>(queryKeys.sessions.all, (old) => {
+    if (!old) return old
+    let changed = false
+    const sessions = old.sessions.map((session) => {
+      if (sessionId(session) !== id) return session
+      changed = true
+      return {
+        ...session,
+        status: 'interrupted',
+        transportState: 'interrupted',
+        turnProgress: null,
+      }
+    })
+    return changed ? { ...old, sessions } : old
+  })
+}
+
 export function useSessions() {
   const qc = useQueryClient()
   return useQuery({
@@ -140,6 +159,18 @@ export function useDeleteSession() {
       removeFromSessionsCache(qc, [id])
       qc.invalidateQueries({ queryKey: queryKeys.sessions.all })
     },
+  })
+}
+
+export function useStopSession() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => api.stopSession(id),
+    onSuccess: (_data, id) => {
+      patchStoppedSession(qc, id)
+      qc.invalidateQueries({ queryKey: queryKeys.sessions.all })
+    },
+    onError: () => qc.invalidateQueries({ queryKey: queryKeys.sessions.all }),
   })
 }
 

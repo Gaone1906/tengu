@@ -2,7 +2,16 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen } from '@testing-library/react'
-import { ChatMessages, finalAnswerIndices, turnSpacerClass } from '../chat-messages'
+import userEvent from '@testing-library/user-event'
+import {
+  buildFoldSummary,
+  ChatMessages,
+  finalAnswerIndices,
+  groupMessages,
+  partitionForFold,
+  shouldFoldAfterNextAsk,
+  turnSpacerClass,
+} from '../chat-messages'
 import { BURST_WINDOW_MS, formatBurstRange } from '../callback-burst'
 import { anchorScrollDuring, canAnchorFold, formatWorkDuration, foldSummaryWords } from '../fold-region'
 import type { Message } from '@/lib/conversations'
@@ -131,6 +140,19 @@ describe('the post-turn fold', () => {
     expect(region()?.getAttribute('aria-hidden')).toBeNull()
     act(() => vi.advanceTimersByTime(600))
     expect(region()?.getAttribute('aria-hidden')).toBe('true')
+  })
+
+  it('toggles the summary line from the keyboard with an accurate expanded state', async () => {
+    const user = userEvent.setup()
+    render(<ChatMessages messages={foldedTurn} loading={false} />)
+    const summary = screen.getByRole('button', { name: /Show the work/ })
+
+    summary.focus()
+    await user.keyboard('{Enter}')
+    expect(summary.getAttribute('aria-expanded')).toBe('true')
+
+    await user.keyboard(' ')
+    expect(summary.getAttribute('aria-expanded')).toBe('false')
   })
 
   it('recovers from a collapse interrupted by a re-expand click', () => {
@@ -499,6 +521,100 @@ describe('fold region boundary (turn structure)', () => {
     }
   })
 
+  it.each([
+    {
+      source: 'uploaded media',
+      message: {
+        id: 'm1',
+        role: 'assistant',
+        content: 'Mid-turn screenshot.',
+        timestamp: T0 + 2_000,
+        media: [{ type: 'image', url: 'https://example.com/screenshot.png', name: 'Screenshot' }],
+      } satisfies Message,
+    },
+    {
+      source: 'media parsed from content',
+      message: {
+        id: 'm1',
+        role: 'assistant',
+        content: 'Mid-turn screenshot. ![Screenshot](https://example.com/screenshot.png)',
+        timestamp: T0 + 2_000,
+      } satisfies Message,
+    },
+  ])('partitionForFold keeps $source outside and splits work around it', ({ message }) => {
+    const messages: Message[] = [
+      { id: 'u1', role: 'user', content: 'Go.', timestamp: T0 },
+      { id: 't1', role: 'assistant', content: 'Used grep', timestamp: T0 + 1_000, toolCall: 'grep' },
+      message,
+      { id: 't2', role: 'assistant', content: 'Used bash', timestamp: T0 + 3_000, toolCall: 'bash' },
+      { id: 'a1', role: 'assistant', content: 'All done.', timestamp: T0 + 4_000 },
+    ]
+
+    const groups = partitionForFold(groupMessages(messages), messages, new Set(), null, new Set())
+    expect(groups.map((group) => group.kind)).toEqual(['plain', 'fold', 'plain', 'fold', 'plain'])
+    expect(groups[2]).toMatchObject({ kind: 'plain', item: { kind: 'message', msg: { id: 'm1' } } })
+    expect(groups[1]).toMatchObject({ kind: 'fold', summary: { tools: 1 } })
+    expect(groups[3]).toMatchObject({ kind: 'fold', summary: { tools: 1 } })
+  })
+
+  it('keeps a media message and its text visible while both surrounding work regions rest folded', () => {
+    const messages: Message[] = [
+      { id: 'u1', role: 'user', content: 'Go.', timestamp: T0 },
+      { id: 't1', role: 'assistant', content: 'Used grep', timestamp: T0 + 1_000, toolCall: 'grep' },
+      {
+        id: 'm1',
+        role: 'assistant',
+        content: 'This screenshot shows the midpoint.',
+        timestamp: T0 + 2_000,
+        media: [{ type: 'image', url: 'https://example.com/midpoint.png', name: 'Midpoint' }],
+      },
+      { id: 't2', role: 'assistant', content: 'Used bash', timestamp: T0 + 3_000, toolCall: 'bash' },
+      { id: 'a1', role: 'assistant', content: 'All done.', timestamp: T0 + 4_000 },
+    ]
+    const { container } = render(<ChatMessages messages={messages} loading={false} />)
+
+    const mediaRow = container.querySelector('[data-message-id="m1"]')!
+    expect(mediaRow.closest('[data-fold-region]')).toBeNull()
+    expect(mediaRow.textContent).toContain('This screenshot shows the midpoint.')
+    expect(mediaRow.querySelector('img[alt="Midpoint"]')).toBeTruthy()
+    expect(container.querySelectorAll('[data-fold-region][aria-hidden="true"]')).toHaveLength(2)
+  })
+
+  it('buildFoldSummary does not count an exempt media message as an update', () => {
+    const messages: Message[] = [
+      { id: 'u1', role: 'user', content: 'Go.', timestamp: T0 },
+      {
+        id: 'm1',
+        role: 'assistant',
+        content: 'Mid-turn screenshot.',
+        timestamp: T0 + 1_000,
+        media: [{ type: 'image', url: 'https://example.com/midpoint.png' }],
+      },
+      { id: 't1', role: 'assistant', content: 'Used bash', timestamp: T0 + 2_000, toolCall: 'bash' },
+      { id: 'a1', role: 'assistant', content: 'All done.', timestamp: T0 + 4_000 },
+    ]
+
+    expect(buildFoldSummary(groupMessages(messages.slice(1, -1)), messages, 3)).toEqual({
+      durationMs: 4_000,
+      tools: 1,
+      teammates: 0,
+      updates: 0,
+    })
+  })
+
+  it('gates a live fold on a later user message', () => {
+    const answered: Message[] = [
+      { id: 'u1', role: 'user', content: 'Go.', timestamp: T0 },
+      { id: 't1', role: 'assistant', content: 'Used grep', timestamp: T0 + 1_000, toolCall: 'grep' },
+      { id: 'a1', role: 'assistant', content: 'All done.', timestamp: T0 + 2_000 },
+    ]
+    expect(shouldFoldAfterNextAsk(answered, 2)).toBe(false)
+    expect(shouldFoldAfterNextAsk([
+      ...answered,
+      { id: 'u2', role: 'user', content: 'Next.', timestamp: T0 + 3_000 },
+    ], 2)).toBe(true)
+  })
+
   it('counts delegated wait as worked time: a lone callback spans from the turn start', () => {
     const messages: Message[] = [
       { id: 'u1', role: 'user', content: 'Ask dev to audit.', timestamp: T0 },
@@ -529,7 +645,7 @@ describe('fold region boundary (turn structure)', () => {
     expect(inset.compareDocumentPosition(summaryRow) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
-  it('creates and auto-collapses the region only when the final response arrives', () => {
+  it('creates the region at final response and collapses it only on the next ask', () => {
     const running: Message[] = [
       { id: 'u1', role: 'user', content: 'Go.', timestamp: T0 },
       { id: 'p1', role: 'assistant', content: 'On it, delegating now.', timestamp: T0 + 1_000 },
@@ -586,10 +702,45 @@ describe('fold region boundary (turn structure)', () => {
     expect(region.getAttribute('aria-hidden')).toBeNull()
     expect(container.querySelector('[data-fold-summary]')).toBeNull()
 
-    // The existing beat + 420ms choreography performs the first collapse.
-    act(() => vi.advanceTimersByTime(1200))
+    // Variant B keeps the just-answered turn open while the user is reading.
+    act(() => vi.advanceTimersByTime(3_000))
+    expect(container.querySelector('[data-fold-region]')?.getAttribute('aria-hidden')).toBeNull()
+    expect(container.querySelector('[data-fold-summary]')).toBeNull()
+
+    // The next user message is the only live auto-fold trigger.
+    rerender(
+      <ChatMessages
+        messages={[
+          ...done,
+          { id: 'u2', role: 'user', content: 'One more thing.', timestamp: T0 + 10_000 },
+        ]}
+        loading
+        turnPending
+        onPeek={onPeek}
+      />,
+    )
+    act(() => vi.advanceTimersByTime(1_200))
     expect(container.querySelector('[data-fold-region]')?.getAttribute('aria-hidden')).toBe('true')
     expect(screen.getByRole('button', { name: /Worked for 5s, 1 tool, 1 teammate\. Show the work\./ })).toBeTruthy()
+  })
+
+  it('keeps the current answered turn open without live-completion provenance', () => {
+    vi.useFakeTimers()
+    const running: Message[] = [
+      { id: 'u1', role: 'user', content: 'Go.', timestamp: T0 },
+      { id: 't1', role: 'assistant', content: 'Used grep', timestamp: T0 + 1_000, toolCall: 'grep' },
+    ]
+    const done: Message[] = [
+      ...running,
+      { id: 'a1', role: 'assistant', content: 'All done.', timestamp: T0 + 2_000 },
+    ]
+
+    const { container, rerender } = render(<ChatMessages messages={running} loading turnPending />)
+    rerender(<ChatMessages messages={done} loading={false} turnPending={false} />)
+    act(() => vi.advanceTimersByTime(3_000))
+
+    expect(container.querySelector('[data-fold-region]')?.getAttribute('aria-hidden')).toBeNull()
+    expect(container.querySelector('[data-fold-summary]')).toBeNull()
   })
 })
 
@@ -639,6 +790,7 @@ describe('streaming → final structural parity', () => {
       <ChatMessages messages={[prev]} loading streamingText="The answer." />,
     )
     const streamingSig = shellSignature(streaming.container.querySelector('[data-streaming]')!)
+    const streamingActionsClass = streaming.container.querySelector('[data-message-actions-reserve]')?.className
     streaming.unmount()
 
     const final = render(
@@ -650,6 +802,9 @@ describe('streaming → final structural parity', () => {
     const finalSig = shellSignature(final.container.querySelector('[data-message-id="a1"]')!)
 
     expect(streamingSig).toBe(finalSig)
+    const finalActions = final.container.querySelector('.msg-actions')!
+    expect(streamingActionsClass).toBe(finalActions.className)
+    expect(streamingActionsClass).toContain('h-[26px]')
   })
 })
 

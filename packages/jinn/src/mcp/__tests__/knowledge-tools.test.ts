@@ -87,12 +87,12 @@ describe("knowledge tools — registry + schemas", () => {
     }
   });
 
-  it("the belt registers the knowledge group — 52 tools total", () => {
+  it("the belt registers the knowledge group", () => {
     const names = buildTools().map((t) => t.name);
     expect(names).toContain("search_knowledge");
     expect(names).toContain("read_knowledge");
     expect(names).toContain("cancel_workflow_run");
-    expect(names).toHaveLength(63);
+    expect(names).toHaveLength(69);
   });
 
   it("domain teaching lives on search_knowledge; read names the instance scope", () => {
@@ -228,7 +228,7 @@ beforeAll(async () => {
   fs.symlinkSync(outsideFile, path.join(home, "knowledge", "escape.md"));
   api = await import("../../gateway/api.js");
   registry = await import("../../sessions/registry.js");
-  registry.initDb();
+  (await import("../../shared/db.js")).initDb();
   integrationCallerId = registry.createSession({ engine: "codex", source: "web", sourceRef: "knowledge-caller", employee: "knowledge-caller" }).id;
 });
 

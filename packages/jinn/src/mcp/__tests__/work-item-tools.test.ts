@@ -88,7 +88,7 @@ describe("work-item tools — registry + schemas", () => {
     expect(names).toContain("fire_workflow_event");
     expect(names).toContain("cancel_workflow_run");
     expect(names.some((n) => /cancel/i.test(n) && /work_item/.test(n))).toBe(false);
-    expect(names).toHaveLength(63);
+    expect(names).toHaveLength(69);
   });
 
   it("positions list as recent/filter summaries and search as text/filter hits", () => {
@@ -521,7 +521,7 @@ beforeAll(async () => {
   registry = await import("../../sessions/registry.js");
   store = await import("../../work-items/store.js");
   approvals = await import("../../work-items/approvals.js");
-  registry.initDb();
+  (await import("../../shared/db.js")).initDb();
 });
 
 describe("work-item tools — integration against the real API + store", () => {

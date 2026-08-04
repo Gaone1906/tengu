@@ -130,6 +130,35 @@ CREATE TABLE IF NOT EXISTS work_items (
   verify_policy       TEXT,
   rounds              INTEGER NOT NULL DEFAULT 0,
   budget_usd          REAL,
+  created_at          TEXT NOT NULL,
+  updated_at          TEXT NOT NULL,
+  closed_at           TEXT
+)`;
+
+/** Pre-PLA-48 v2 work_items shape, when approvals were also shadowed in eight
+ *  columns here. Frozen recognizer: a match is healed at boot. */
+export const V2_APPROVAL_WORK_ITEMS_TABLE_DDL = `
+CREATE TABLE IF NOT EXISTS work_items (
+  id                  TEXT PRIMARY KEY CHECK (${CANONICAL_ID_SQL}),
+  title               TEXT NOT NULL,
+  body                TEXT,
+  status              TEXT NOT NULL DEFAULT 'backlog' CHECK (status IN ('backlog','assigned','executing','in_review','done','blocked','escalated','cancelled')),
+  department          TEXT,
+  assignee            TEXT,
+  created_by          TEXT NOT NULL,
+  parent_id           TEXT REFERENCES work_items(id),
+  root_id             TEXT NOT NULL,
+  depth               INTEGER NOT NULL DEFAULT 0 CHECK ((parent_id IS NULL AND depth = 0) OR (parent_id IS NOT NULL AND depth BETWEEN 1 AND 3)),
+  due_at              TEXT,
+  priority            INTEGER NOT NULL DEFAULT 2 CHECK (priority BETWEEN 0 AND 3),
+  rank                REAL,
+  version             INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
+  source              TEXT NOT NULL DEFAULT 'human' CHECK (source IN ('human','delegation','cron','workflow','session','connector','goal')),
+  source_ref          TEXT,
+  acceptance          TEXT,
+  verify_policy       TEXT,
+  rounds              INTEGER NOT NULL DEFAULT 0,
+  budget_usd          REAL,
   approval_state      TEXT CHECK (approval_state IN ('pending','approved','rejected')),
   approval_request    TEXT,
   approval_ref        TEXT,
@@ -142,6 +171,10 @@ CREATE TABLE IF NOT EXISTS work_items (
   updated_at          TEXT NOT NULL,
   closed_at           TEXT
 )`;
+
+/** The shadow columns above, dropped once their values reach `work_item_approvals`. */
+const V2_APPROVAL_COLUMNS: readonly string[] = ["approval_state", "approval_request", "approval_ref",
+  "approval_target", "approval_target_kind", "approval_escalated_at", "approval_decided_by", "approval_decided_at"];
 
 export const WORK_ITEMS_INDEX_DDL = `
 CREATE INDEX IF NOT EXISTS idx_work_items_status     ON work_items(status);
@@ -268,13 +301,11 @@ CREATE INDEX IF NOT EXISTS idx_wia_item ON work_item_attachments(work_item_id, c
 CREATE INDEX IF NOT EXISTS idx_wia_comment ON work_item_attachments(comment_id) WHERE comment_id IS NOT NULL;
 `;
 
-/** Todos v2 slice 4: approvals leave the fat work_items row. Full history —
- *  one row per requested gate; the partial unique index makes "at most one
- *  PENDING approval per item" a DB guarantee. The legacy `approval_*` columns
- *  on work_items stay physically present but FROZEN (never written again after
- *  the backfill); every read goes through this table. `ref` is the opaque
- *  correlation reference the request contract has always carried (kept here so
- *  the legacy `approvalRef` payload field stays byte-identical). */
+/** Todos v2 slice 4: approvals leave the fat work_items row. The SOLE storage
+ *  owner since PLA-48 — full history, one row per requested gate; the partial
+ *  unique index makes "at most one PENDING approval per item" a DB guarantee.
+ *  `ref` is the opaque correlation reference the request contract has always
+ *  carried (kept here so the `approvalRef` payload field stays byte-identical). */
 export const WORK_ITEM_APPROVALS_TABLE_DDL = `
 CREATE TABLE IF NOT EXISTS work_item_approvals (
   id           TEXT PRIMARY KEY CHECK (id GLOB 'wap_[0-9a-f]*' AND length(id) = 16),
@@ -685,15 +716,13 @@ const V2_ADDITIVE_TABLES: ReadonlyArray<{ name: string; ddl: string }> = [
 ];
 
 /**
- * Copy the frozen legacy `approval_*` column values into `work_item_approvals`
- * (Todos v2 slice 4, dual-read window). Exactly one row per item whose columns
- * carry a state; idempotent — an item that already has ANY approval row is
- * skipped, so re-runs (every boot) and post-slice items are no-ops. The columns
- * themselves are read, never written. `requested_by`/`requested_at` are not
- * recoverable from the columns: `'legacy'` and the best column-derived bound
- * (decided_at when decided, else the row's updated_at) stand in.
+ * Copy a shadow-column table's `approval_*` values into `work_item_approvals`,
+ * one row per item carrying a state — a one-shot step inside each rebuild, and
+ * a no-op for an item that already has an approval row. `requested_by`/
+ * `requested_at` are not recoverable from the columns: `'legacy'` and the best
+ * column-derived bound (decided_at when decided, else updated_at) stand in.
  */
-export function backfillWorkItemApprovals(db: DatabaseType): number {
+function backfillWorkItemApprovals(db: DatabaseType, source: "work_items" | "work_items_v1_legacy"): number {
   return db
     .prepare(
       `INSERT INTO work_item_approvals
@@ -701,7 +730,7 @@ export function backfillWorkItemApprovals(db: DatabaseType): number {
        SELECT 'wap_' || lower(hex(randomblob(6))), w.id, w.approval_state, COALESCE(w.approval_request, ''), w.approval_ref,
               w.approval_target, w.approval_target_kind, 'legacy', COALESCE(w.approval_decided_at, w.updated_at),
               w.approval_escalated_at, w.approval_decided_by, w.approval_decided_at, NULL
-       FROM work_items w
+       FROM ${source} w
        WHERE w.approval_state IS NOT NULL
          AND NOT EXISTS (SELECT 1 FROM work_item_approvals a WHERE a.work_item_id = w.id)`,
     )
@@ -712,8 +741,7 @@ export function backfillWorkItemApprovals(db: DatabaseType): number {
  * Register any department that holds Todos but is missing from the registry
  * (review F2). Department-changing writes now mint the row in their own
  * transaction; this reconciles rows written BEFORE that fix (move-only
- * departments). Idempotent — runs on every boot next to the approvals
- * backfill.
+ * departments). Idempotent — runs on every boot.
  */
 export function reconcileDepartmentRegistry(db: DatabaseType): number {
   const missing = db
@@ -787,15 +815,21 @@ function recognizedEmptyPrerelease(db: DatabaseType): boolean {
   return true;
 }
 
-/** A v2 database created before some additive tables shipped (e.g. slice-1
- *  pre-comments, slice-2 pre-relations/labels). Not a refusal and never a
- *  rebuild: `migrateWorkItemsSchema` creates the missing tables additively.
- *  Every table that IS present — additive or not — must shape-match exactly. */
-function recognizedV2MissingAdditiveTables(db: DatabaseType): boolean {
+function hasShadowApprovalColumns(db: DatabaseType): boolean {
+  return sqlShape(currentTableSql(db, "work_items")) === sqlShape(V2_APPROVAL_WORK_ITEMS_TABLE_DDL);
+}
+
+/** A v2 database whose only defects heal at boot: additive tables that shipped
+ *  later are absent (e.g. slice-1 pre-comments), and/or work_items still carries
+ *  the pre-PLA-48 approval columns. Never a refusal and never a rebuild. Every
+ *  OTHER table that is present must shape-match exactly. */
+function recognizedHealableV2(db: DatabaseType): boolean {
   const additiveNames = new Set(V2_ADDITIVE_TABLES.map((table) => table.name));
+  const shadowedApprovals = hasShadowApprovalColumns(db);
   const missing = V2_ADDITIVE_TABLES.filter((table) => !tableExists(db, table.name));
-  if (missing.length === 0) return false; // nothing to heal — not this recognizer's case
+  if (missing.length === 0 && !shadowedApprovals) return false; // nothing to heal
   for (const [name, expected] of REQUIRED_TABLE_SQL) {
+    if (name === "work_items" && shadowedApprovals) continue;
     if (additiveNames.has(name) && !tableExists(db, name)) continue;
     if (sqlShape(currentTableSql(db, name)) !== sqlShape(expected)) return false;
   }
@@ -978,7 +1012,7 @@ function classifyOpenWorkItemsDatabase(db: DatabaseType): WorkItemSchemaPrefligh
   } catch {
     // A v2 database missing additive tables (created before a later slice
     // shipped them) is "current": the migration creates them at boot.
-    if (recognizedV2MissingAdditiveTables(db)) return "current";
+    if (recognizedHealableV2(db)) return "current";
     if (recognizedV1(db)) return "v1";
     if (todoTables.some((name) => name.startsWith("work_item_id_"))) refusal();
     if (recognizedEmptyPrerelease(db)) return "empty-prerelease";
@@ -1023,17 +1057,22 @@ export function migrateWorkItemsSchema(
 ): WorkItemsMigrationResult {
   registerWorkItemIdentityFunctions(db);
   const migrate = db.transaction((): WorkItemsMigrationResult => {
-    // Additive self-heal, BEFORE classification: a v2 database created before a
-    // later slice shipped its additive tables gains them here so the exact-shape
+    // In-place self-heal, BEFORE classification: a v2 database created before a
+    // later slice shipped its additive tables (or before PLA-48 dropped the
+    // approval columns) is brought to the canonical shape here so the exact-shape
     // verifier below sees the complete v2 schema. IF NOT EXISTS makes this a
     // no-op everywhere else, and a refused classification rolls the creates back
     // with the transaction. Never a rebuild, never a refusal. (List order
     // matters: work_item_labels references labels.)
-    if (tableExists(db, "work_items") && sqlShape(currentTableSql(db, "work_items")) === sqlShape(WORK_ITEMS_TABLE_DDL)) {
+    const shadowedApprovals = hasShadowApprovalColumns(db);
+    if (shadowedApprovals || sqlShape(currentTableSql(db, "work_items")) === sqlShape(WORK_ITEMS_TABLE_DDL)) {
       for (const table of V2_ADDITIVE_TABLES) db.exec(table.ddl);
-      // Slice-4 dual-read: any item still carrying approval state ONLY in the
-      // frozen columns (a pre-slice-4 database) gains its history row here.
-      backfillWorkItemApprovals(db);
+      // PLA-48: a pre-drop database hands its shadowed approvals to their one
+      // owner and then loses the columns — same transaction, both or neither.
+      if (shadowedApprovals) {
+        backfillWorkItemApprovals(db, "work_items");
+        for (const column of V2_APPROVAL_COLUMNS) db.exec(`ALTER TABLE work_items DROP COLUMN ${column}`);
+      }
       // Slice-5 review F2: departments that gained Todos through pre-fix
       // move-only writes get their registry rows.
       reconcileDepartmentRegistry(db);
@@ -1097,19 +1136,16 @@ export function migrateWorkItemsSchema(
           id, title, body, status, department, assignee,
           created_by, parent_id, root_id, depth, due_at,
           priority, rank, version, source, source_ref, acceptance, verify_policy, rounds, budget_usd,
-          approval_state, approval_request, approval_ref, approval_target, approval_target_kind,
-          approval_escalated_at, approval_decided_by, approval_decided_at,
           created_at, updated_at, closed_at)
         SELECT
           id, title, body, status, department, assignee,
           CASE WHEN source = 'human' THEN 'operator' ELSE 'system' END,
           NULL, id, 0, NULL,
           priority, rank, version, source, source_ref, acceptance, verify_policy, rounds, budget_usd,
-          approval_state, approval_request, approval_ref, approval_target, approval_target_kind,
-          approval_escalated_at, approval_decided_by, approval_decided_at,
           created_at, updated_at, closed_at
         FROM work_items_v1_legacy`);
-      backfillWorkItemApprovals(db);
+      // Approvals come off the legacy row — read BEFORE the table is dropped.
+      backfillWorkItemApprovals(db, "work_items_v1_legacy");
       reconcileDepartmentRegistry(db); // v1 rows carried departments with no registry
       const migratedRows = Number(db.prepare("SELECT COUNT(*) FROM work_items").pluck().get());
       db.exec("DROP TABLE work_items_v1_legacy");
