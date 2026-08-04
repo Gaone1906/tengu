@@ -1,201 +1,133 @@
-# ICI-678 — Chat image preview: full screen again, plus zoom / navigation / close
+# ICI-676 round 3 — share the STT *settings*, not just the model file
 
-Branch `build/ICI-678-fullscreen-image-viewer`. Original base `7fd9f259`.
-**This round reconciles that branch against current `main` (`27b6a213`) and lands it.**
+Branch `build/ICI-676-shared-stt-settings` off `df6f409a` (main).
 
-> Note: `PLAN.md` is tracked on `main` and every build run overwrites it with its own plan.
-> That is the pipeline's existing convention (main currently carries ICI-680's plan) and it
-> is the sole reason the previous landing attempt stopped. Flagged as an adjacent problem
-> at the bottom; not fixed here.
+## What already shipped, and why the Todo came back
 
----
+Round 1/2 moved the Whisper model out of `JINN_HOME/models/whisper` into the host data
+dir (`~/Library/Application Support/Jinn/models/whisper`), with legacy adoption on boot.
+That landed at `bd427c52` and it works. Verified live, read-only, before planning:
 
-# Round 2 — reconcile and land
+- shared dir holds `ggml-small.bin` (adopted 2026-08-03 17:46, matching the 7777 boot time)
+- a simulated foreign `JINN_HOME` resolves the shared dir and reports `available: true`
+- `GET /api/stt/status` on **7850** → `{"available":true,"model":"small",...,"languages":["en"]}`
+- `GET /api/stt/status` on **7860** → identical
 
-## Where this stands
+So the download prompt the Todo describes is gone. The operator re-armed the Todo with no
+comment, so the requirement is still the Todo body: *"only .jinn has the STT capability …
+fix that so that it is shared easily. KISS."*
 
-The feature is **built and independently verified**. Round 1 (`run_2d3116cc`) ended with
-verdict `ship` — 0 Blockers, 0 Majors, 0 Minors — with browser QA at both breakpoints in
-both themes and eight screenshots attached to the Todo. The operator then approved the
-merge and commented **"merge into main"**.
+What is still per-instance is the **STT settings block**:
 
-The landing did not happen. The landing phase had already completed when it hit an
-unreviewed `PLAN.md` conflict against the newer `main`, so it could not resolve it. A
-follow-up run (`run_d527b10b`) stalled in its plan node and never got to the merge.
+| | `~/.jinn/config.yaml` | every other instance |
+|---|---|---|
+| `stt.enabled` | `true` | absent |
+| `stt.model` | `small` | absent → default `small` |
+| `stt.languages` | `[en, bg]` | absent → default `["en"]` |
 
-So the work of this round is **not** to rebuild the feature. It is to reconcile the branch
-with 26 commits of newer `main`, re-prove the gates on the merged HEAD, and land it.
+`packages/jinn/template/config.yaml` ships no `stt` block, so a new instance never gets one.
+Consequence on every non-`.jinn` instance: the language pill never renders
+(`chat-input.tsx` / `note-mic.tsx` gate on `stt.languages.length > 1`) and every dictation is
+forced through `-l en`. The operator dictates in Bulgarian. That is the live remainder of
+"only .jinn has the STT capability".
 
-## What the reconcile actually involves — measured, not assumed
+Adjacent, reported not fixed: `~/.jinn/config.yaml` line 220 sets `stt.modelsDir:
+~/.jinn/models/whisper/`. `modelsDir` is read by **no code in the repo** — grep across
+`packages/**` returns nothing, and it is not in the `stt` type in `shared/types.ts`. It is
+silently ignored. We deliberately do **not** start honouring it: its current value points
+back into `~/.jinn`, so honouring it would re-break the fix that already landed. The
+operator should delete that line; flagged on the Todo.
 
-```
-git merge-tree --write-tree --name-only HEAD main
-  → CONFLICT (content): PLAN.md          # the only conflicted path
-```
+## The change
 
-- **Conflict set is exactly one file: `PLAN.md`.** No code conflicts.
-- `main` has made **zero** changes since `7fd9f259` to any file this branch touches
-  (`message-media.tsx`, `dialog.tsx`, `attachment-preview.tsx`, `components/ui/`).
-- **No dependency drift**: no commits to `package.json`, `packages/web/package.json`, or
-  `pnpm-lock.yaml` in `7fd9f259..main`.
-- The regression's cause is **still present** on `main`:
-  `chat-messages.tsx:1047` still carries `contentVisibility: "auto"`, and there is a test on
-  `main` (`message-row-content-visibility.test.tsx`) asserting it. So the portal fix is still
-  the right fix and is still needed.
+Mirror the shape that already shipped for the model file — one host-level artefact, with
+the per-home value treated as a legacy seed.
 
-Risk is therefore concentrated in one place: the merged HEAD must still pass the full web
-suite and the design gate. That is what gets re-run, not re-argued.
+**New `packages/jinn/src/stt/settings-store.ts`**
 
-## Steps
+- `resolveSttSettingsPath(options)` → `<hostDataDir>/stt.json`, `JINN_STT_SETTINGS` env
+  override for tests. Same `HostPathOptions` shape as `resolveSttModelsDir`.
+- `readSharedSttSettings(path)` → `{ enabled?, model?, languages? } | null`. Unknown keys
+  dropped. Malformed / unreadable → `null` (warn, never throw — this runs at boot).
+- `writeSharedSttSettings(path, settings)` → atomic `tmp` + `rename`, mode `0600`, matching
+  `writeDirectory` in `instances/directory.ts`. Several gateways share this file.
+- `seedSharedSttSettings(path, localStt)` → create-only (`wx`). No-ops when the file exists
+  or when `localStt` is empty, so an instance with no `stt` block can never seed.
+- `resolveEffectiveSttSettings(shared, localStt)` → shared wins when present; otherwise the
+  local block; otherwise `{ model: "small", languages: ["en"] }`. One source of truth, which
+  is the KISS the Todo asks for.
 
-1. **Commit this plan** on the branch (`docs: plan ICI-678 reconcile`), so the merge has a
-   clean tree to work with.
-2. **`git merge main`** in the existing worktree. Resolve the single `PLAN.md` conflict by
-   keeping **ours** (`git checkout --ours PLAN.md`) — this file. Do not hand-merge ICI-680's
-   plan text into it; the convention is that the current run's plan lives here.
-3. **Prove the merge changed no code.** `git diff 27b6a213..HEAD --stat` must list exactly
-   the six feature files plus `PLAN.md`, with the same shape as before the merge.
-4. **Re-run the gates on the merged HEAD** (see below).
-5. **Re-run browser QA on the merged HEAD** (see below). The design bar is not inherited from
-   round 1 — a merge changes the bundle, so the shots are retaken.
+**Wiring**
 
-## Acceptance criteria for this round
+- `stt/stt.ts` — `initStt()` also seeds the shared settings file from `config.stt`.
+- `gateway/api.ts`
+  - `GET /api/stt/status` — resolve effective settings instead of reading `config.stt` alone.
+  - `POST /api/stt/download` — on success write `{enabled:true, model}` to the shared file
+    instead of the instance's `config.yaml`.
+  - `PUT /api/stt/config` — write `languages` to the shared file.
+  - `POST /api/stt/transcribe` — pick model/language from effective settings.
+- `shared/paths.ts` — export `STT_SETTINGS_FILE` next to `STT_MODELS_DIR`.
 
-1. **Merged.** `git merge-base --is-ancestor 27b6a213 HEAD` succeeds — current `main` is fully
-   contained in the branch HEAD.
-2. **Only `PLAN.md` was resolved by hand.** `git diff 27b6a213..HEAD --name-only` returns
-   exactly: `PLAN.md`, `packages/web/src/components/chat/message-media.tsx`,
-   `packages/web/src/components/chat/__tests__/message-media.test.tsx`,
-   `packages/web/src/components/ui/dialog.tsx`,
-   `packages/web/src/components/ui/image-lightbox.tsx`,
-   `packages/web/src/components/ui/__tests__/image-lightbox.test.tsx`,
-   `packages/web/src/routes/todos/task-page/attachment-preview.tsx`. Nothing else.
-3. **The regression test still fails without the fix.** Revert the portal in
-   `image-lightbox.tsx` on the merged HEAD, watch `message-media.test.tsx`'s containment
-   assertion go red, restore it. Evidence per taste §5.1 — a green test alone proves nothing.
-4. **`pnpm typecheck` clean** on the merged HEAD. Paste the verbatim tail.
-5. **`pnpm --filter @jinn/web test` green** on the merged HEAD, full suite, not a focused
-   subset. Round 1 needed `--maxWorkers=1` under host load; that is acceptable, but the run
-   must be complete and the file/test counts reported.
-6. **`pnpm build` clean** on the merged HEAD.
-7. **Design gate re-verified on the merged HEAD.** Screenshots at **1440×900 and 390×844, in
-   both light and dark**, covering: viewer open at 1×, viewer zoomed, and a multi-image
-   gallery showing the arrows. Overlay covers the full viewport in every shot.
-8. **Behaviour unchanged from the verified round-1 build.** Prev/next wrap, zoom resets on
-   navigate, close via ×/Esc/backdrop/swipe-down, ctrl+wheel zoom with `preventDefault`,
-   pinch clamped to `[1, 4]`.
-9. **`packages/web/index.html` still contains `maximum-scale=1,user-scalable=no`** and no code
-   path mutates the viewport meta. Grep-checkable.
-10. **Leak-grep clean** on the staged diff before the landing commit.
+No UI change. Once a secondary instance reports two languages the existing pill renders
+itself.
 
-## How it gets verified
+## Acceptance criteria
 
-- Gates run from the worktree root, **after** the final edit, with verbatim tails pasted.
-- Browser QA via `jinn-sandbox.sh up qa-ICI-678 --build --seed` on **7778+**, driven with
-  `agent-browser` under a **throwaway `AGENT_BROWSER_PROFILE`** (the shared `jinn-main` profile
-  collides with parallel runs). Destroy the sandbox and delete the profile afterwards, even if
-  the run fails.
-- **Never** `pnpm dev` — its proxy reaches into 7777. **Never** port 7777 or 7788. **Never**
-  touch the operator's live instance home. Kill only PIDs this run started.
-- Real pinch cannot be produced by a headless driver, so pinch is exercised by dispatching
-  synthetic two-pointer sequences via `agent-browser ... eval` against the live DOM.
+1. `resolveSttSettingsPath()` resolves inside the host data dir and outside every
+   `JINN_HOME`; two different homes resolve to the same absolute path.
+2. With a shared settings file present, `GET /api/stt/status` on an instance whose
+   `config.yaml` has **no** `stt` block returns the shared `model` and `languages`.
+3. On boot, an instance whose `config.yaml` *has* an `stt` block creates the shared file
+   when it is absent, carrying only `enabled` / `model` / `languages`.
+4. Seeding never overwrites an existing shared file, and an instance with no `stt` block
+   never creates one.
+5. `PUT /api/stt/config {languages:[...]}` writes the shared file atomically; a second
+   gateway on a different home returns the new languages from `GET /api/stt/status`
+   **without a restart**.
+6. `POST /api/stt/download` success records `{enabled:true, model}` into the shared file.
+7. A malformed or unreadable shared file degrades to `{model:"small", languages:["en"]}`
+   with a warning; `initStt()` does not throw.
+8. No shared file and no local `stt` block still yields `model: "small"`,
+   `languages: ["en"]` — unchanged from today.
+9. Two sandbox gateways on separate throwaway `JINN_HOME`s and non-prod ports (7778+) both
+   report identical `languages` from the shared file; changing languages on one is visible
+   on the other's next `GET /api/stt/status`. Evidence: both status JSONs, before and after.
+10. `pnpm typecheck` clean. `pnpm --filter jinn-cli test` reports **zero failed tests**; any
+    file that fails is re-run alone to prove it was machine load, per the round-2 finding
+    that the full shared gate is unreliable under pipeline parallelism. The web suite is
+    excluded by diffstat — this change touches no web file.
 
-## Out of scope for this round
+## Tests
 
-- Any change to the feature's design or behaviour. It was verified `ship`; reopening it is a
-  new Major against code already passed, which taste §5 rule 2 forbids.
-- Removing or weakening `content-visibility: auto` on message rows — intentional perf.
-- Changing the viewport meta in `packages/web/index.html`.
-- Video, audio or PDF preview. Images only.
-- The composer attachment strip (`chat/media-preview.tsx`).
-- Fixing the tracked-`PLAN.md` churn (see below). Reported, not fixed.
+`packages/jinn/src/stt/__tests__/settings-store.test.ts` — unit, `tmpdir`-scoped, no network:
+path resolution across two homes (AC1); read of a valid file, an unknown-key file, a
+malformed file, a missing file (AC7); create-only seeding, including the file-exists and
+empty-local no-ops (AC3, AC4); atomic write leaves no `.tmp` behind and preserves the old
+content when the write throws (AC5); precedence table for
+`resolveEffectiveSttSettings` covering shared-only, local-only, both, neither (AC2, AC8).
 
-## Adjacent problem, handed back not fixed
+Per taste §5.1: AC5's "a second instance sees it without a restart" gets a test that fails
+before the wiring change — the handler writes `config.yaml` today, so a test asserting the
+shared file changed goes red on the current code first, then green.
 
-`PLAN.md` is a **tracked file at the repo root** that the build pipeline overwrites on every
-run and lands on `main`. Consequence: any two build branches created from different bases
-conflict on it, which is exactly what stalled this ticket for a day. Worth a follow-up Todo —
-either gitignore it and write plans to an untracked path, or move plans under
-`.jinn-build/<ticket>.md`. Not this ticket's job.
+API handler coverage for AC2/AC5/AC6 goes in the existing gateway API test file if one
+already covers `/api/stt/*`; otherwise the store-level tests plus the two-gateway sandbox
+run in AC9 carry it, rather than standing up a new API harness for three endpoints.
 
----
+## Out of scope
 
-# Reference — the feature spec as built and verified in round 1
+- Any UI change.
+- Honouring `stt.modelsDir` (see above) — reported, not built.
+- Sharing the `whisper-cli` / `ffmpeg` installs. Those are machine-level already.
+- TTS / `talk` settings.
+- The `packages/web` test suite and any pre-existing full-suite flake outside these files.
+- Reaching into another instance's `JINN_HOME` at runtime.
 
-## What the operator asked for
+## Safety
 
-> In chat, there is a regression for when I click on an image to expand it. It shows inside
-> the chat container instead of full screen like it used to... please fix that.
->
-> Also make the design and functionality of viewing images a bit better. For example I want:
-> 1. to be able to zoom images (I think that is not possible since we set a global no pinch
->    zoom on mobile). Figure out how to enable zooming on them with pinching without disabling
->    the disable of global zoom pinch.
-> 2. I want to go back and forth with arrows
-> 3. easily close the full screen preview.
-
-## Root cause of the regression (confirmed, not guessed)
-
-`packages/web/src/components/chat/chat-messages.tsx` puts
-`style={{ contentVisibility: "auto", containIntrinsicSize: "auto 120px" }}` on **every message
-row**. It arrived in `d9eac83b` ("perf: harden web loading and Todo batching").
-
-`content-visibility: auto` implies `contain: layout style paint`. **Paint containment makes the
-element a containing block for `position: fixed` descendants.** The old chat lightbox was a
-plain in-tree `fixed inset-0` div, so `inset-0` resolved against the message row instead of the
-viewport, and the overlay was clipped to the chat column.
-
-The fix is to render the overlay in a **portal to `document.body`**, not to remove
-`content-visibility` (that is deliberate virtualisation perf and is not ours to undo).
-
-## The approach
-
-The Todos task page already had a full-screen image viewer doing most of what was asked
-(`attachment-preview.tsx` `AttachmentLightbox`: Radix `Dialog` → portal to body, focus trap,
-scroll lock, Esc; prev/next; click-to-zoom + pan; download; safe-area toolbar; Ledger tokens).
-
-Chat is the **second caller**, which is exactly when taste §1 says to extract. So:
-
-1. A shared `ImageLightbox` at `packages/web/src/components/ui/image-lightbox.tsx`, generic over
-   `{ id, url, name }` items, keeping the existing `attachment-lightbox*` test ids so the Todos
-   suite proves the migration is behaviour-preserving.
-2. **Pinch-to-zoom** added to it — the one capability neither viewer had.
-3. Both call sites point at it: chat `message-media.tsx` and todos `attachment-preview.tsx`.
-
-### Pinch-to-zoom under a global `user-scalable=no`
-
-`packages/web/index.html` sets `maximum-scale=1,user-scalable=no`. That stays untouched —
-flipping it would let the whole dashboard pinch-zoom, which is what the meta exists to prevent,
-and iOS Safari does not reliably re-apply a mutated viewport meta anyway.
-
-Instead the viewer runs its **own** gesture layer, orthogonal to the page-level meta:
-
-- `touch-action: none` on the image surface **while the lightbox is open**, so the browser hands
-  us raw pointer events instead of consuming them for scroll.
-- Live pointers tracked in a `Map`. Two pointers down → pinch: scale by
-  `currentDistance / startDistance`, clamped to `[1, 4]`, anchored on the midpoint.
-- One pointer down while `zoom > 1` → pan.
-- Desktop trackpad pinch arrives as `wheel` with `ctrlKey` → same zoom path, `preventDefault()`
-  so the browser does not page-zoom.
-- Double-tap / double-click toggles 1× ↔ 2×.
-
-### Navigation and close
-
-- Prev/next buttons + `ArrowLeft`/`ArrowRight`; horizontal swipe at `zoom === 1` on mobile.
-- Close: toolbar ×, Esc and backdrop tap via Radix, plus swipe-down-to-dismiss at `zoom === 1`.
-- Gallery for chat = the images of that one message, so the arrows walk the attachments the
-  operator actually clicked into.
-
-## Files
-
-| File | Change |
-| --- | --- |
-| `packages/web/src/components/ui/image-lightbox.tsx` | **New.** Shared viewer: Radix Dialog, gallery nav, pinch/wheel/double-tap zoom, pan, swipe, download, close. |
-| `packages/web/src/components/ui/dialog.tsx` | `DialogContent` accepts `overlayClassName` so the viewer can style its backdrop. |
-| `packages/web/src/components/chat/message-media.tsx` | Local `ImageLightbox` deleted; opens the shared one with the message's images as the gallery. |
-| `packages/web/src/routes/todos/task-page/attachment-preview.tsx` | `AttachmentLightbox` is a thin adapter mapping `WorkItemAttachmentWire` → the shared item shape. |
-| `packages/web/src/components/ui/__tests__/image-lightbox.test.tsx` | **New.** Gesture + navigation logic tests. |
-| `packages/web/src/components/chat/__tests__/message-media.test.tsx` | Extended: portal target, containment regression, gallery nav from chat. |
-
-Zoom/pan/pinch maths lives in small pure helpers in the new file so it is testable without a
-real touchscreen.
+Ports 7777 and 7788 untouched. QA runs on throwaway `JINN_HOME`s at 7778+ via
+`jinn-sandbox`, each `config.yaml` port-checked before boot, destroyed afterwards even on
+failure. `JINN_STT_SETTINGS` and `JINN_STT_MODELS_DIR` point at scratch paths during QA so
+the host-shared `stt.json` and the real 487 MB model are never written to or moved. Only
+PIDs we started get killed. Leak-grep the staged diff before commit — no real names,
+  project names, or absolute home paths under `packages/**`.

@@ -2,9 +2,14 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import { LEGACY_STT_MODELS_DIR, STT_MODELS_DIR, TMP_DIR } from "../shared/paths.js";
+import { LEGACY_STT_MODELS_DIR, STT_MODELS_DIR, STT_SETTINGS_FILE, TMP_DIR } from "../shared/paths.js";
 import { logger } from "../shared/logger.js";
 import { adoptLegacyModels, findModelFile } from "./model-store.js";
+import {
+  readSharedSttSettings,
+  seedSharedSttSettings,
+  type LocalSttSettings,
+} from "./settings-store.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -54,8 +59,8 @@ const EXPECTED_SIZES: Record<string, number> = {
 let downloading = false;
 let downloadProgress = 0;
 
-/** Ensure models directory exists. */
-export function initStt(): void {
+/** Initialize host-shared STT models and settings. */
+export function initStt(localSettings?: LocalSttSettings): void {
   fs.mkdirSync(STT_MODELS_DIR, { recursive: true });
   try {
     const adopted = adoptLegacyModels({
@@ -66,6 +71,12 @@ export function initStt(): void {
     if (adopted.length > 0) logger.info(`Adopted ${adopted.length} legacy STT model(s) into ${STT_MODELS_DIR}`);
   } catch (error) {
     logger.warn(`Could not adopt legacy STT models: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  try {
+    seedSharedSttSettings(STT_SETTINGS_FILE, localSettings);
+    readSharedSttSettings(STT_SETTINGS_FILE, logger.warn);
+  } catch (error) {
+    logger.warn(`Could not seed shared STT settings: ${error instanceof Error ? error.message : String(error)}`);
   }
   logger.info(`STT initialized, models dir: ${STT_MODELS_DIR}`);
 }

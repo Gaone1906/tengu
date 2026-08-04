@@ -119,6 +119,7 @@ import {
   LOGS_DIR,
   TMP_DIR,
   FILES_DIR,
+  STT_SETTINGS_FILE,
   TEMPLATE_MIGRATIONS_DIR,
   resolveHomeIdentity,
 } from "../shared/paths.js";
@@ -126,7 +127,12 @@ import { saveConfigAtomic } from "../shared/config.js";
 import { messageBodyError } from "../shared/message-body.js";
 import { logger } from "../shared/logger.js";
 import { redactText } from "../shared/redact.js";
-import { getSttStatus, downloadModel, transcribe as sttTranscribe, resolveLanguages, WHISPER_LANGUAGES } from "../stt/stt.js";
+import { getSttStatus, downloadModel, transcribe as sttTranscribe, WHISPER_LANGUAGES } from "../stt/stt.js";
+import {
+  readSharedSttSettings,
+  resolveEffectiveSttSettings,
+  writeSharedSttSettings,
+} from "../stt/settings-store.js";
 import { CODEX_HOMES_DIR, JINN_HOME } from "../shared/paths.js";
 import { resolveEffort } from "../shared/effort.js";
 import { selectClaudeModelFallback } from "../shared/model-fallback.js";
@@ -6599,30 +6605,23 @@ export async function handleApiRequest(
     // ── STT (Speech-to-Text) ──────────────────────────────────
     if (method === "GET" && pathname === "/api/stt/status") {
       const config = context.getConfig();
-      const languages = resolveLanguages(config.stt);
-      const status = getSttStatus(config.stt?.model, languages);
+      const settings = resolveEffectiveSttSettings(readSharedSttSettings(STT_SETTINGS_FILE, logger.warn), config.stt);
+      const status = getSttStatus(settings.model, settings.languages);
       return json(res, status);
     }
 
     if (method === "POST" && pathname === "/api/stt/download") {
       const config = context.getConfig();
-      const model = config.stt?.model || "small";
+      const settings = resolveEffectiveSttSettings(readSharedSttSettings(STT_SETTINGS_FILE, logger.warn), config.stt);
+      const model = settings.model;
 
       downloadModel(model, (progress) => {
         context.emit("stt:download:progress", { progress });
       }).then(() => {
-        // Update config to mark STT as enabled
         try {
-          const raw = fs.readFileSync(CONFIG_PATH, "utf-8");
-          const cfg = yaml.load(raw) as Record<string, unknown>;
-          if (!cfg.stt || typeof cfg.stt !== "object") cfg.stt = {};
-          const sttCfg = cfg.stt as Record<string, unknown>;
-          sttCfg.enabled = true;
-          sttCfg.model = model;
-          if (!sttCfg.languages) sttCfg.languages = ["en"];
-          saveConfigAtomic(cfg, { lineWidth: -1 });
+          writeSharedSttSettings(STT_SETTINGS_FILE, { ...settings, enabled: true, model });
         } catch (err) {
-          logger.error(`Failed to update config after STT download: ${err}`);
+          logger.error(`Failed to update shared STT settings after download: ${err}`);
         }
         context.emit("stt:download:complete", { model });
       }).catch((err) => {
@@ -6636,8 +6635,9 @@ export async function handleApiRequest(
 
     if (method === "POST" && pathname === "/api/stt/transcribe") {
       const config = context.getConfig();
-      const model = config.stt?.model || "small";
-      const languages = resolveLanguages(config.stt);
+      const settings = resolveEffectiveSttSettings(readSharedSttSettings(STT_SETTINGS_FILE, logger.warn), config.stt);
+      const model = settings.model;
+      const languages = settings.languages;
       // Accept language from query param, fall back to first configured language
       const requestedLang = url.searchParams.get("language");
       const language = requestedLang && languages.includes(requestedLang) ? requestedLang : languages[0];
@@ -6685,14 +6685,9 @@ export async function handleApiRequest(
       }
 
       try {
-        const raw = fs.readFileSync(CONFIG_PATH, "utf-8");
-        const cfg = yaml.load(raw) as Record<string, unknown>;
-        if (!cfg.stt || typeof cfg.stt !== "object") cfg.stt = {};
-        const sttCfg = cfg.stt as Record<string, unknown>;
-        sttCfg.languages = langs;
-        // Remove deprecated language field if present
-        delete sttCfg.language;
-        saveConfigAtomic(cfg, { lineWidth: -1 });
+        const config = context.getConfig();
+        const settings = resolveEffectiveSttSettings(readSharedSttSettings(STT_SETTINGS_FILE, logger.warn), config.stt);
+        writeSharedSttSettings(STT_SETTINGS_FILE, { ...settings, languages: langs });
         return json(res, { status: "ok", languages: langs });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
