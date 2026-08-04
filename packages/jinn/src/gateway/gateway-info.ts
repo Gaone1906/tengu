@@ -2,34 +2,91 @@ import fs from "node:fs";
 import os from "node:os";
 import crypto from "node:crypto";
 
-export interface GatewayInfo { port: number; host?: string; secret: string; pid: number; token?: string; ptyPids?: number[]; namespace?: string; }
+export interface GatewayInfo { port: number; host?: string; url?: string; secret: string; pid: number; token?: string; ptyPids?: number[]; namespace?: string; }
 
 /**
- * A boot identity to pair with the hostname, because pid numbers survive neither a
- * reboot nor a namespace swap. Linux answers exactly: boot_id changes on every host
- * boot, and the pid-namespace inode changes when the namespace does — needed because
- * a container shares the host's boot_id, so `docker restart` (same hostname, fresh
- * pids from 1) would otherwise look like the same namespace.
- *
- * Elsewhere the boot instant is derived from uptime and bucketed: os.uptime() has
- * second granularity, so the derived instant jitters by a tick between reads. A read
- * landing either side of a bucket edge makes one boot look like two, which only skips
- * reaping — it never signals a pid this namespace no longer owns.
+ * How far two derived boot instants may sit apart and still be one boot: `now - uptime`
+ * jitters by a tick between reads, while firmware and init put many seconds between real
+ * boots. Not widened to cover an NTP step or a Windows suspend, which move the derived
+ * instant by the whole correction — that would trade a bounded miss for an unbounded one
+ * in the dangerous direction. The miss stays on the safe side: pids of this boot read as
+ * foreign and are left alone. Linux answers exactly, see computeBootIdentity().
  */
-function bootIdentity(): string {
+const BOOT_INSTANT_TOLERANCE_MS = 3_000;
+
+/**
+ * A boot identity to pair with the hostname, because pid numbers survive neither a reboot
+ * nor a namespace swap. Linux answers exactly: the pid-namespace inode is needed because a
+ * container shares the host's boot_id, so `docker restart` would look like the same
+ * namespace. Elsewhere it is derived from uptime and deliberately NOT bucketed — a window
+ * puts a short reboot on the previous boot's value, which is the dangerous direction.
+ */
+function computeBootIdentity(): string {
   try {
     const bootId = fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf-8").trim();
     return `${bootId}/${fs.readlinkSync("/proc/self/ns/pid")}`; // "pid:[4026531836]"
   } catch {
-    return `boot-${Math.floor((Date.now() - os.uptime() * 1000) / 600_000)}`;
+    return `boot-${Math.round(Date.now() - os.uptime() * 1000)}`;
   }
+}
+
+// Memoised so every write from one process stamps one value; only the comparison
+// across processes has to tolerate the jitter.
+let cachedBootIdentity: string | undefined;
+function bootIdentity(): string {
+  return (cachedBootIdentity ??= computeBootIdentity());
 }
 
 /** Identifies the pid namespace the recorded pids belong to. Under Docker the
  *  hostname is the container id, so it changes on every recreate; the boot identity
  *  covers the cases where it does not (host reboot, restart of the same container). */
-function currentNamespace(): string {
+export function currentNamespace(): string {
   return `${os.hostname()}:${bootIdentity()}`;
+}
+
+/** Whether the pids recorded in `info` belong to the namespace we are running in — the
+ *  one place that answers "may I signal what this file names". gateway.json outlives an
+ *  ungraceful stop, and both a reboot and a container restart recycle its numbers. */
+export function recordedInThisNamespace(
+  info: Pick<GatewayInfo, "namespace"> | null | undefined,
+  namespace = currentNamespace(),
+): boolean {
+  return !!info && sameNamespace(info.namespace, namespace);
+}
+
+/** Split "<hostname>:boot-<ms>". Null for the exact Linux form (boot_id + namespace
+ *  inode, which contains its own colon) and for anything else, both of which are
+ *  compared verbatim. */
+function parseDerivedBootNamespace(namespace: string): { host: string; bootMs: number } | null {
+  const separator = namespace.lastIndexOf(":");
+  if (separator < 0) return null;
+  const derived = /^boot-(-?\d+)$/.exec(namespace.slice(separator + 1));
+  if (!derived) return null;
+  return { host: namespace.slice(0, separator), bootMs: Number(derived[1]) };
+}
+
+/** Whether pids recorded under `recorded` are pids of the namespace `current` names. */
+export function sameNamespace(recorded: string | undefined, current: string): boolean {
+  // Written before namespaces were recorded at all: assume foreign.
+  if (!recorded) return false;
+  if (recorded === current) return true;
+  const a = parseDerivedBootNamespace(recorded);
+  const b = parseDerivedBootNamespace(current);
+  if (!a || !b || a.host !== b.host) return false;
+  return Math.abs(a.bootMs - b.bootMs) <= BOOT_INSTANT_TOLERANCE_MS;
+}
+
+/** Every signalable pid the file names, WITHOUT the namespace check. Only for
+ *  reporting what a foreign-namespace file held — never for deciding what to kill. */
+export function recordedGatewayPids(
+  info: Partial<GatewayInfo> | null | undefined,
+  currentPid = process.pid,
+): number[] {
+  if (!info) return [];
+  const candidates = [...(Array.isArray(info.ptyPids) ? info.ptyPids : []), info.pid];
+  return candidates.filter((pid): pid is number =>
+    typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0 && pid !== currentPid
+  );
 }
 
 export function staleGatewayPids(
@@ -41,18 +98,19 @@ export function staleGatewayPids(
   // Pids are only meaningful in the namespace that recorded them. A container
   // restarts pids from 1, so a gateway.json left by an ungraceful stop names
   // numbers now held by unrelated live processes. Absent field: assume foreign.
-  if (info.namespace !== namespace) return [];
-  const candidates = [...(Array.isArray(info.ptyPids) ? info.ptyPids : []), info.pid];
-  return candidates.filter((pid): pid is number =>
-    typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0 && pid !== currentPid
-  );
+  if (!recordedInThisNamespace(info, namespace)) return [];
+  return recordedGatewayPids(info, currentPid);
 }
 
 export function writeGatewayInfo(file: string, opts: { port: number; host?: string; pid: number; secret?: string; token?: string }): GatewayInfo {
   const previous = readGatewayInfo(file);
+  const host = opts.host ?? previous?.host;
   const info: GatewayInfo = {
     port: opts.port,
-    host: opts.host ?? previous?.host,
+    host,
+    // Recorded so consumers outside this module — docker-healthcheck.sh notably — do not
+    // re-derive "bind address -> reachable URL" in another language.
+    url: gatewayBaseUrl({ port: opts.port, host }),
     pid: opts.pid,
     secret: opts.secret ?? previous?.secret ?? crypto.randomBytes(24).toString("hex"),
     token: opts.token ?? previous?.token,
@@ -89,6 +147,22 @@ export function gatewayBaseUrl(info: Pick<GatewayInfo, "port" | "host">, fallbac
     ? (isWildcardHost(fallbackHost) ? "127.0.0.1" : fallbackHost!)
     : info.host!;
   return `http://${formatHttpHost(host)}:${info.port}`;
+}
+
+/**
+ * Where a gateway is reachable. What the running one recorded wins over config, which
+ * may have been edited — or overridden by --port — since boot. One implementation
+ * because pair, restart-request, workflow and status each had their own, and status's
+ * skipped gateway.json entirely.
+ */
+export function resolveGatewayEndpoint(
+  info: Pick<GatewayInfo, "port" | "host"> | null | undefined,
+  fallback: { port?: number; host?: string } = {},
+): { port: number; host?: string } {
+  return {
+    port: info?.port ?? fallback.port ?? 7777,
+    host: info?.host ?? fallback.host,
+  };
 }
 
 export function updateGatewayPtyPids(file: string, ptyPids: number[]): void {

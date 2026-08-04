@@ -15,6 +15,14 @@ export function resolveClaudeConfigDir(): string {
   return path.resolve(path.join(os.homedir(), ".claude"));
 }
 
+/** Claude Code's global config: beside the config dir by default, inside it once
+ *  CLAUDE_CONFIG_DIR is set. Lives here rather than in claude-settings.ts so that
+ *  "where does Claude Code keep its state" is one module, not two. */
+export function claudeJsonPath(): string {
+  if (process.env.CLAUDE_CONFIG_DIR) return path.join(resolveClaudeConfigDir(), ".claude.json");
+  return path.join(os.homedir(), ".claude.json");
+}
+
 /**
  * Resolve the instance NAME (not the home path) for user-facing hints such as
  * the `jinn -i <name> pair` command. Derives from an explicit JINN_INSTANCE,

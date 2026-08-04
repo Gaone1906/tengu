@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { gatewayBaseUrl, readGatewayInfo } from "../gateway/gateway-info.js";
+import { gatewayBaseUrl, readGatewayInfo, resolveGatewayEndpoint } from "../gateway/gateway-info.js";
 import { PAIRING_CHALLENGE_FILE_PREFIX } from "../gateway/pairing-challenge.js";
 import { loadConfig } from "../shared/config.js";
 import { GATEWAY_INFO_FILE, JINN_HOME } from "../shared/paths.js";
@@ -50,18 +50,13 @@ interface GatewayRuntimeInfo {
 function gatewayRuntimeInfo(): GatewayRuntimeInfo | null {
   if (!fs.existsSync(JINN_HOME)) return null;
   const info = readGatewayInfo(GATEWAY_INFO_FILE);
-  let configHost: string | undefined;
-  let configPort: number | undefined;
+  let configBinding: { host?: string; port?: number } = {};
   try {
-    const config = loadConfig();
-    configHost = config.gateway.host;
-    configPort = config.gateway.port;
+    configBinding = loadConfig().gateway;
   } catch {
     // gateway.json is enough for local CLI pairing when config.yaml is temporarily invalid.
   }
-  const port = info?.port ?? configPort ?? 7777;
-  const host = info?.host ?? configHost;
-  return { port, host, token: info?.token };
+  return { ...resolveGatewayEndpoint(info, configBinding), token: info?.token };
 }
 
 function gatewayConnection(): { port: number; host?: string; token: string } | null {

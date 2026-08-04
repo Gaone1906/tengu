@@ -1,14 +1,5 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { resolveClaudeConfigDir } from "./home.js";
-
-/** Claude Code's global config: beside the config dir by default, inside it once
- *  CLAUDE_CONFIG_DIR is set. */
-export function claudeJsonPath(): string {
-  if (process.env.CLAUDE_CONFIG_DIR) return path.join(resolveClaudeConfigDir(), ".claude.json");
-  return path.join(os.homedir(), ".claude.json");
-}
 
 export interface SessionSettingsOpts {
   sessionId: string;
@@ -158,6 +149,10 @@ export function seedTrust(claudeJsonFile: string, projectDir: string): void {
   proj.hasTrustDialogAccepted = true;
   proj.hasCompletedProjectOnboarding = true;
   proj.allowedTools ??= [];
+  // Under CLAUDE_CONFIG_DIR the target directory may not exist yet, unlike the old
+  // os.homedir(); the caller swallows the ENOENT and every turn then hangs on the dialog
+  // this function exists to answer. 0700 because credentials and transcripts land there.
+  fs.mkdirSync(path.dirname(claudeJsonFile), { recursive: true, mode: 0o700 });
   const tmp = `${claudeJsonFile}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
   fs.renameSync(tmp, claudeJsonFile);

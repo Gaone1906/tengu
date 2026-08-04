@@ -397,7 +397,40 @@ describe("foreground gateway ownership (no JINN_HOME in env)", () => {
 
     expect(() => stop(port)).toThrow(/owned by another jinn instance/i);
   });
+
+  // The pid file path where the recorded pid does NOT hold the port: with that evidence
+  // gone the recorded namespace has to carry the claim, or a SIGTERM goes to whatever
+  // unrelated process inherited the number after a restart.
+  it("refuses a pid recorded under a different namespace when it does not own the port", async () => {
+    const port = await freePort();
+    // Alive, not listening, and not a gateway: stands in for the process that
+    // inherited the recorded number after a restart renumbered the namespace.
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    children.push(child);
+    await waitForSpawn(child);
+
+    fs.writeFileSync(PID_FILE, String(child.pid), { mode: 0o600 });
+    fs.writeFileSync(
+      GATEWAY_INFO_FILE,
+      JSON.stringify({ port, host: "127.0.0.1", pid: child.pid, secret: "s", namespace: "some-other-host:boot-1" }),
+      { mode: 0o600 },
+    );
+
+    // Nothing is listening on `port`, so signalGateway falls through to the port
+    // path and finds no owner — the process must survive either way.
+    expect(() => stop(port)).not.toThrow();
+    expect(pidIsAliveForTest(child.pid!)).toBe(true);
+  });
 });
+
+function pidIsAliveForTest(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 describe("shouldSignalPidFileProcess", () => {
   it("prefers the Jinn daemon when a proxy and the gateway both listen on the configured port", () => {

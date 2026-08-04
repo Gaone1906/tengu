@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import { gatewayBaseUrl, readGatewayInfo } from "../gateway/gateway-info.js";
+import { gatewayBaseUrl, readGatewayInfo, resolveGatewayEndpoint } from "../gateway/gateway-info.js";
 import { describeWorkflowIssues, parseWorkflowIssues, type WorkflowValidationIssue } from "../workflows/issues.js";
 import { loadConfig } from "../shared/config.js";
 import { GATEWAY_INFO_FILE, JINN_HOME } from "../shared/paths.js";
@@ -51,10 +51,10 @@ export async function requestWorkflow(options: WorkflowRequestOptions): Promise<
 
 function connection(): { baseUrl: string; token: string } {
   const info = readGatewayInfo(GATEWAY_INFO_FILE);
-  let port = info?.port ?? 7777; let host = info?.host;
-  try { const config = loadConfig(); port = info?.port ?? config.gateway.port; host = info?.host ?? config.gateway.host; } catch { /* gateway info is sufficient */ }
+  let configBinding: { host?: string; port?: number } = {};
+  try { configBinding = loadConfig().gateway; } catch { /* gateway info is sufficient */ }
   if (!info?.token) throw new Error("Gateway auth token was not found. Start Jinn first, then retry.");
-  return { baseUrl: gatewayBaseUrl({ port, host }), token: info.token };
+  return { baseUrl: gatewayBaseUrl(resolveGatewayEndpoint(info, configBinding)), token: info.token };
 }
 
 function fileObject(file: string): Record<string, unknown> {

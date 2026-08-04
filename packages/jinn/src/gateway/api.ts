@@ -124,7 +124,7 @@ import {
   TEMPLATE_MIGRATIONS_DIR,
   resolveHomeIdentity,
 } from "../shared/paths.js";
-import { saveConfigAtomic } from "../shared/config.js";
+import { saveConfigAtomic, gatewayEnvOverrides, gatewayFileBinding } from "../shared/config.js";
 import { messageBodyError } from "../shared/message-body.js";
 import { logger } from "../shared/logger.js";
 import { redactText } from "../shared/redact.js";
@@ -2671,7 +2671,9 @@ export async function handleApiRequest(
           name: body.name,
           port: body.port as number | undefined,
           currentPort,
-          gatewayHost: currentConfig.gateway.host,
+          // The file's host, not the effective one: this is written into the new
+          // workspace's config.yaml, so JINN_HOST would follow the container home.
+          gatewayHost: gatewayFileBinding().host,
           authRequired: shouldRequireGatewayAuth(currentConfig),
         });
       } catch (error) {
@@ -6067,17 +6069,37 @@ export async function handleApiRequest(
       if (unknownKeys.length > 0) {
         return badRequest(res, `Unknown config keys: ${unknownKeys.join(", ")}`);
       }
-      // Validate critical field types
+      // Validate critical field types. A value the shape validator would reject must
+      // not reach the file: loadConfig() then throws and the gateway cannot restart.
       if (body.gateway !== undefined) {
-        if (typeof body.gateway !== "object" || Array.isArray(body.gateway)) {
+        if (typeof body.gateway !== "object" || body.gateway === null || Array.isArray(body.gateway)) {
           return badRequest(res, "gateway must be an object");
         }
         if (body.gateway.port !== undefined && typeof body.gateway.port !== "number") {
           return badRequest(res, "gateway.port must be a number");
         }
+        if (body.gateway.host !== undefined && typeof body.gateway.host !== "string") {
+          return badRequest(res, "gateway.host must be a string");
+        }
       }
       if (body.engines !== undefined && (typeof body.engines !== "object" || Array.isArray(body.engines))) {
         return badRequest(res, "engines must be an object");
+      }
+      // GET /api/config serves the EFFECTIVE binding, so the Settings page echoes
+      // JINN_HOST/JINN_PORT back with every unrelated edit; saveConfigAtomic drops those.
+      // A different value is a real edit, and refusing beats accepting a no-op.
+      const envGateway = gatewayEnvOverrides();
+      for (const key of ["host", "port"] as const) {
+        const override = envGateway[key];
+        if (override === undefined || body.gateway?.[key] === undefined) continue;
+        if (body.gateway[key] !== override) {
+          const variable = key === "host" ? "JINN_HOST" : "JINN_PORT";
+          return badRequest(
+            res,
+            `gateway.${key} is set to ${JSON.stringify(override)} by ${variable} in this environment and cannot be ` +
+            `changed here. Unset ${variable} to manage gateway.${key} from config.yaml.`,
+          );
+        }
       }
       // Deep-merge incoming config with existing config to preserve
       // fields not included in the update (e.g. connector tokens).

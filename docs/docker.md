@@ -28,7 +28,7 @@ Open **http://localhost:7777** and enter the code at the **Pair This Browser** p
 
 ### Why pairing, when a host install just opens the dashboard
 
-`jinn setup` writes `authRequired: true`, and inside a container the entrypoint rebinds `gateway.host` to `0.0.0.0` — which also counts as network-exposed — so the gateway requires authentication. A host install skips the prompt because `jinn start` runs on a TTY and mints a short-lived local credential for the browser it opens, and that exchange is loopback-only. Your browser reaches the container through Docker's NAT, arriving as `172.x` rather than `127.0.0.1`, so it cannot use that path.
+`jinn setup` writes `authRequired: true`, and inside a container the entrypoint binds `0.0.0.0` — which also counts as network-exposed — so the gateway requires authentication. A host install skips the prompt because `jinn start` runs on a TTY and mints a short-lived local credential for the browser it opens, and that exchange is loopback-only. Your browser reaches the container through Docker's NAT, arriving as `172.x` rather than `127.0.0.1`, so it cannot use that path.
 
 `jinn pair` is the way in: run inside the container it dials loopback and proves it controls `JINN_HOME`, then hands you a code to type into the browser. You only do this once per browser.
 
@@ -73,8 +73,8 @@ Prefer `:ro` wherever the agents only need to read — that list is the blast ra
 - **Network egress is unrestricted.** The container has to reach the Anthropic API; it can therefore reach anything else, so treat data inside mounts as exfiltratable.
 - **Credentials in the container are real.** The `jinn-claude` volume holds a live token for your account.
 - **Only the `claude` engine is installed.** `codex`, `grok` and `hermes` appear in the default config but their binaries are not in the image, so selecting one in the dashboard will fail. A Homebrew or npm install does not provide them either.
-- **Voice features are not installed.** Speech-to-text needs `whisper-cli`, `ffmpeg` and `curl` — see [Enabling speech-to-text](#enabling-speech-to-text). Voice *output* (kokoro TTS) additionally shells out to `python`, which the runtime stage does not include, so `/talk` playback is unavailable without extending the image further.
-- **Git has no identity.** `git commit` inside a mounted repo fails with *"Author identity unknown"* unless you supply `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL`, and on a Linux host whose user is not uid 1000 the bind-mounted files are not writable by the container's `node` user.
+- **Voice features are not installed.** Speech-to-text needs `whisper-cli` and `ffmpeg`, neither of which is in the image — see [Enabling speech-to-text](#enabling-speech-to-text). Voice *output* (kokoro TTS) additionally shells out to `python`, which the runtime stage does not include, so `/talk` playback is unavailable without extending the image further.
+- **Git has no identity.** `git commit` inside a mounted repo fails with *"Author identity unknown"* unless you supply `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL`, and on a Linux host whose user is not uid 1000 the bind-mounted files are not writable by the container's `node` user. Reading them does work: the image sets `safe.directory = *` system-wide, without which git refuses a foreign-owned repository outright — `git status` and `git log` included, not just writes.
 
 ## Enabling speech-to-text
 
@@ -94,8 +94,9 @@ Then create `Dockerfile.stt`:
 FROM jinn:base
 USER root
 ARG WHISPER_CPP_REF=v1.7.4
-# curl is needed too: the model download shells out to it, and node:*-slim has no curl.
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg curl cmake g++ git \
+# curl is not listed: the base image already installs it, because agent turns reach
+# the gateway with it. The model download shells out to the same binary.
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg cmake g++ git \
  && git clone --depth 1 -b "$WHISPER_CPP_REF" https://github.com/ggerganov/whisper.cpp /tmp/w \
  && cmake -S /tmp/w -B /tmp/w/build \
  && cmake --build /tmp/w/build -j --target whisper-cli \
@@ -134,7 +135,9 @@ The image avoids that by setting `CLAUDE_CONFIG_DIR=/home/node/.claude`, which m
 docker compose exec jinn ls -la ~/.claude/.claude.json
 ```
 
-> **A note on that setting.** `CLAUDE_CONFIG_DIR` works (verified against Claude Code 2.1.220) but is not in the published settings documentation, and [anthropics/claude-code#25762](https://github.com/anthropics/claude-code/issues/25762), which asks for exactly this variable, is still open. The use here is deliberately safe: it points at the directory Claude Code already uses, so if a future release stops honouring it the only consequence is that `.claude.json` returns to its unpersisted default — nothing is corrupted. The entrypoint warns loudly in `docker compose logs` if it detects that, so you would not find out silently.
+> **A note on that setting.** `CLAUDE_CONFIG_DIR` works (verified against Claude Code 2.1.220) but is not in the published settings documentation, and [anthropics/claude-code#25762](https://github.com/anthropics/claude-code/issues/25762), which asks for exactly this variable, is still open. The use here is deliberately safe: it points at the directory Claude Code already uses, so if a future release stops honouring it the only consequence is that `.claude.json` returns to its unpersisted default — nothing is corrupted.
+>
+> There is a second net under it. `~/.claude.json` is a symlink into the volume, so a release that ignores `CLAUDE_CONFIG_DIR` and updates that path in place still writes to persistent storage. Only a write that *replaces* the path — temp file, then rename — replaces the link with a real file in the container layer; the entrypoint copies that file onto the volume as `.claude.json.stray` on the next boot and says so loudly in `docker compose logs`. It has to copy rather than only warn, because the layer holding it does not survive the `docker compose up -d --build` that upgrades the image.
 
 After upgrading, run `jinn migrate` as you would on a host install.
 
@@ -142,7 +145,11 @@ After upgrading, run `jinn migrate` as you would on a host install.
 
 ## Notes on the container
 
-- **Bind address.** The entrypoint rewrites `gateway.host` from `127.0.0.1` to `0.0.0.0` in `config.yaml`. Inside a container the shipped default binds the container's own loopback, so a published port would resolve to nothing. The published port is still `127.0.0.1:7777:7777`, so the gateway is not exposed beyond the host.
+- **Bind address.** The entrypoint starts the gateway with `JINN_HOST=0.0.0.0` when `config.yaml` names a loopback address or none. Inside a container the shipped default binds the container's own loopback, so a published port would resolve to nothing. The published port is still `127.0.0.1:…`, so the gateway is not exposed beyond the host. `config.yaml` is left untouched — the override is an environment variable, so a `jinn-home` volume you later open on a workstation does not carry the container's binding with it. Set `gateway.host` to a non-loopback address yourself and the entrypoint leaves it alone.
+- **Port.** `JINN_PORT` moves it — set it in a `.env` file beside `docker-compose.yml` and both sides of the mapping follow, as does the gateway, which reads `JINN_PORT` in preference to `gateway.port`. Do not change only one of them: a gateway bound where the mapping does not reach refuses connections under a boot log that reads perfectly healthy. `jinn status` inside the container sees the same variable, so it stays in agreement. Passing `--port` to the container is rejected outright, because it would move the gateway without moving the mapping.
+- **Editing the binding from the dashboard.** Settings shows the *effective* host and port, so in the container it shows what `JINN_HOST`/`JINN_PORT` resolved to. Saving that page never writes those two values back into `config.yaml` — that is what would carry the container's binding onto the volume. Changing either one there is refused with an explicit message instead of being silently ignored: unset the variable and the field becomes yours again.
+- **Health.** The image ships a `HEALTHCHECK` that asks `/api/status` at the address *and* port the gateway actually bound, both read from `gateway.json` — so a deliberate non-loopback `gateway.host` stays healthy. It catches the failure a restart policy cannot see: a live process that is no longer serving. Docker reports it in `docker compose ps` and does not restart on it.
+- **Running one-off commands.** `docker compose run --rm jinn <command>` replaces the gateway with your command; the setup and container-configuration steps are skipped for it deliberately, since they rewrite `gateway.json`, `gateway.pid` and `.claude.json` — state the running gateway owns. Use `docker compose exec` to run something inside the live container instead.
 - **Bypass consent.** `bypassPermissionsModeAccepted` is recorded in `~/.claude/.claude.json`. Claude Code answers `--dangerously-skip-permissions` with a one-time blocking dialog, and nothing in a PTY presses a key — without this, every turn hangs and is eventually abandoned with *"no completion signal and no recoverable transcript"*. Claude Code 2.1.170 implied the consent through global onboarding and 2.1.220 does not, so the gateway now seeds it on every install, host ones included; the entrypoint still writes it before boot, which is also where an unparseable `.claude.json` gets rescued.
 - **Config location.** `CLAUDE_CONFIG_DIR=/home/node/.claude` keeps Claude Code's `.claude.json` inside the volume; see [Persistence and upgrades](#persistence-and-upgrades).
 - **Engine version.** `@anthropic-ai/claude-code` is pinned by the `CLAUDE_CODE_VERSION` build arg so two builds of the same commit get the same engine, and `DISABLE_AUTOUPDATER=1` stops the CLI relocating itself onto the volume and drifting past the pin. Override with `docker compose build --build-arg CLAUDE_CODE_VERSION=<version>`.
@@ -155,11 +162,13 @@ After upgrading, run `jinn migrate` as you would on a host install.
 
 **Dashboard shows a pairing screen.** Expected on a new browser — run `docker compose exec jinn jinn pair` and enter the code. See [Why pairing](#why-pairing-when-a-host-install-just-opens-the-dashboard).
 
-**Dashboard doesn't load at all.** Check `docker compose logs jinn` for `Jinn gateway listening on http://0.0.0.0:7777`. The entrypoint refuses to start if it cannot read or parse `config.yaml`, so that shows up as a restart loop with an explanatory message in the log rather than a silently dead dashboard. A missing `gateway.host` is written rather than treated as fatal.
+**Dashboard doesn't load at all.** Check `docker compose logs jinn` for `Jinn gateway listening on http://0.0.0.0:7777`. The entrypoint refuses to start if it cannot read or parse `config.yaml`, so that shows up as a restart loop with an explanatory message in the log rather than a silently dead dashboard. A missing `gateway.host` is overridden rather than treated as fatal. If the log says it is listening on a *different* port, the published mapping and the gateway have drifted apart — set `JINN_PORT` and recreate, which moves both.
 
-**A warning about `~/.claude.json` in the logs.** The `CLAUDE_CONFIG_DIR` redirect stopped taking effect, so Claude Code's config is being written outside the volume and will not survive your next upgrade. See the note under [Persistence and upgrades](#persistence-and-upgrades).
+**A warning about `~/.claude.json` in the logs.** The `CLAUDE_CONFIG_DIR` redirect stopped taking effect *and* the write replaced the symlink standing in for it, so Claude Code's config is a real file in the container layer. The entrypoint has already copied it to `~/.claude/.claude.json.stray` on the volume; merge what you need back into `~/.claude/.claude.json`. See the note under [Persistence and upgrades](#persistence-and-upgrades).
 
-**A warning that `.claude.json` does not parse.** The entrypoint side-copies the damaged file to `~/.claude/.claude.json.corrupt`, then writes a fresh config so turns still run. Your MCP servers and per-project trust are not restored automatically — recover what you need from the `.corrupt` copy and re-add them.
+**A warning that `.claude.json` does not parse.** The entrypoint side-copies the damaged file to `~/.claude/.claude.json.corrupt`, then writes a fresh config so turns still run. A second incident gets its own slot (`.corrupt.1`, `.corrupt.2`, …) rather than overwriting the first. Your MCP servers and per-project trust are not restored automatically — recover what you need from the copy and re-add them.
+
+**`docker compose ps` shows `unhealthy`.** The process is alive but `/api/status` stopped answering — a wedged turn, or an HTTP server that stopped accepting. Docker reports this; it does not act on it, because `restart:` policies react to exits and nothing exited. `docker compose restart jinn` is the fix; `docker compose logs jinn` is where the cause will be.
 
 **Every turn stalls, then reports no completion signal.** The bypass consent is missing. Confirm with:
 

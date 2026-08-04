@@ -7,8 +7,8 @@ import { CONFIG_PATH, PID_FILE, GATEWAY_INFO_FILE, JINN_HOME, JINN_HOME_IDENTITY
 import { logger } from "../shared/logger.js";
 import type { JinnConfig } from "../shared/types.js";
 import { startGateway } from "./server.js";
-import { loadConfig } from "../shared/config.js";
-import { gatewayBaseUrl, readGatewayInfo } from "./gateway-info.js";
+import { loadConfig, gatewayFileBinding } from "../shared/config.js";
+import { gatewayBaseUrl, readGatewayInfo, recordedInThisNamespace, resolveGatewayEndpoint } from "./gateway-info.js";
 import { ensureGatewayAuthToken } from "./auth.js";
 import { buildRestartEntryArgv } from "./restart-entry-options.js";
 
@@ -210,7 +210,7 @@ export function assertPortTakeoverAllowed(port: number, options: LifecycleKillOp
   if (portOwner.status === "none") return;
   if (portOwner.status === "unknown") throw new PortOwnershipError(port, "unknown");
 
-  assertPidBelongsToThisInstance(portOwner.pid, port, options);
+  assertPidBelongsToThisInstance(portOwner.pid, port, options, portOwner);
 }
 
 export function readProcessJinnHome(pid: number): ProcessJinnHomeLookup {
@@ -258,6 +258,7 @@ function assertPidBelongsToThisInstance(
   pid: number,
   port: number,
   options: LifecycleKillOptions,
+  portOwner?: PortOwnerLookup,
 ): void {
   if (options.takePort) return;
 
@@ -269,15 +270,15 @@ function assertPidBelongsToThisInstance(
   // daemon gets one injected. The env lookup therefore reports "unknown" and we
   // would refuse to stop/restart our own gateway.
   //
-  // gateway.json lives inside THIS home and records the running gateway's own
-  // pid, so a match is proof of ownership. Note gateway.pid is NOT usable here:
-  // only startDaemon() writes it, so it is absent in exactly the broken case.
-  //
-  // Consulted only when the env did NOT name a different home, so a genuinely
-  // foreign instance is still refused; the port check kills the recycled-pid case.
+  // gateway.json records the running gateway's own pid, so a match proves ownership;
+  // gateway.pid is no use here because only startDaemon() writes it. Trustworthy on one
+  // of two grounds: the pid holds the port we are about to free (a recycled number does
+  // not inherit the listener), or the file was written in this pid namespace. Neither
+  // holds once a reboot leaves gateway.json naming an unrelated live process.
   if (owner.status !== "found") {
     const info = readGatewayInfo(GATEWAY_INFO_FILE);
-    if (info && info.pid === pid && info.port === port) return;
+    const ownsPort = portOwner?.status === "found" && portOwner.pid === pid;
+    if (info && info.pid === pid && info.port === port && (ownsPort || recordedInThisNamespace(info))) return;
   }
 
   if (!pidIsAlive(pid)) return;
@@ -311,7 +312,7 @@ function signalGateway(port?: number, options: LifecycleKillOptions = {}): numbe
       );
       fs.unlinkSync(PID_FILE);
     } else {
-      assertPidBelongsToThisInstance(pid, targetPort, options);
+      assertPidBelongsToThisInstance(pid, targetPort, options, portOwner);
       try {
         process.kill(pid, "SIGTERM");
         logger.info(`Sent SIGTERM to gateway process ${pid}`);
@@ -334,7 +335,7 @@ function signalGateway(port?: number, options: LifecycleKillOptions = {}): numbe
   const portOwner = lookupPidOnPort(targetPort);
   if (portOwner.status === "found") {
     const pid = portOwner.pid;
-    assertPidBelongsToThisInstance(pid, targetPort, options);
+    assertPidBelongsToThisInstance(pid, targetPort, options, portOwner);
     try {
       process.kill(pid, "SIGTERM");
       logger.info(`Killed process ${pid} on port ${targetPort}`);
@@ -457,6 +458,19 @@ function resolveHost(): string {
   }
 }
 
+/**
+ * Where ANOTHER instance's gateway is expected, for getInstanceStatus's port check.
+ * Not resolveHost()/resolvePort(): those read the AMBIENT config, so `jinn list` judged
+ * every row against this shell's own gateway. Loopback is the last resort because a
+ * wildcard would match any listener on the port, including an unrelated one.
+ */
+export function resolveInstanceEndpoint(home: string, registryPort: number): { host: string; port: number } {
+  const recorded = readGatewayInfo(path.join(home, "gateway.json"));
+  const onFile = gatewayFileBinding(path.join(home, "config.yaml"));
+  const endpoint = resolveGatewayEndpoint(recorded, { port: onFile.port ?? registryPort, host: onFile.host });
+  return { host: endpoint.host?.trim() || "127.0.0.1", port: endpoint.port };
+}
+
 function lsofListenerHost(name: string): string {
   const ipv6 = name.match(/^\[([^\]]+)\]:\d+$/);
   if (ipv6) return ipv6[1];
@@ -548,7 +562,7 @@ export function selectNetstatPortOwnerPid(output: string, host: string, port: nu
   return readAnyRow ? { status: "none" } : { status: "unknown" };
 }
 
-export function lookupPidOnPort(port: number): PortOwnerLookup {
+export function lookupPidOnPort(port: number, bindHost?: string): PortOwnerLookup {
   try {
     if (process.platform === "win32") {
       // No shell: the port went straight into a `netstat | findstr` command
@@ -567,9 +581,9 @@ export function lookupPidOnPort(port: number): PortOwnerLookup {
         windowsHide: true,
       }).trim();
       if (!output) return { status: "unknown" }; // netstat always prints a header
-      return selectNetstatPortOwnerPid(output, resolveHost(), port);
+      return selectNetstatPortOwnerPid(output, bindHost ?? resolveHost(), port);
     } else {
-      const host = resolveHost();
+      const host = bindHost ?? resolveHost();
       const output = execFileSync(
         process.platform === "darwin" ? "/usr/sbin/lsof" : "lsof",
         ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fpn"],
@@ -585,19 +599,35 @@ export function lookupPidOnPort(port: number): PortOwnerLookup {
   }
 }
 
-function findPidOnPort(port: number): number | null {
-  const lookup = lookupPidOnPort(port);
+function findPidOnPort(port: number, bindHost?: string): number | null {
+  const lookup = lookupPidOnPort(port, bindHost);
   return lookup.status === "found" ? lookup.pid : null;
 }
 
-function pidLooksLikeGateway(pid: number): boolean {
+/**
+ * What the process table says a pid is running. Tri-state on purpose: collapsing "not a
+ * gateway" and "could not ask" into false reports a live daemon stopped on a host with no
+ * `ps`. Exit 1 IS an answer — `ps -p` uses it for "no process matches".
+ */
+type PidCommandLookup = "gateway" | "other" | "unknown";
+
+function inspectPidCommand(pid: number): PidCommandLookup {
+  if (process.platform === "win32") return "unknown";
   try {
-    if (process.platform === "win32") return false;
-    const output = execSync(`ps -p ${pid} -o command=`, { encoding: "utf-8" }).trim();
-    return output.includes("daemon-entry.js");
-  } catch {
-    return false;
+    const output = execFileSync("ps", ["-p", String(pid), "-o", "command="], {
+      encoding: "utf-8",
+      timeout: 1_000,
+    }).trim();
+    return output.includes("daemon-entry.js") ? "gateway" : "other";
+  } catch (err: unknown) {
+    // Exit 1 is "no such process", which is a real answer. Anything else (ENOENT
+    // because `ps` is not installed, a timeout) means we did not get to ask.
+    return (err as { status?: number | null }).status === 1 ? "other" : "unknown";
   }
+}
+
+function pidLooksLikeGateway(pid: number): boolean {
+  return inspectPidCommand(pid) === "gateway";
 }
 
 /**
@@ -675,25 +705,53 @@ async function dashboardIsReady(port: number, host: string): Promise<boolean> {
 export interface GatewayStatus {
   running: boolean;
   pid: number | null;
+  /**
+   * Why `running` is false, when a pid file named someone. "dead" — the pid does not
+   * answer kill(pid, 0). "not-ours" — it answers but is an unrelated process that
+   * inherited the recycled number, for which "process is not alive" would be a lie.
+   */
+  reason?: "dead" | "not-ours";
+}
+
+/**
+ * Status of the gateway for a specific instance home — the whole ownership question, once.
+ * `jinn list` used to ask it with a bare kill(pid, 0), which answers for whatever process
+ * inherited a recycled number. `bindHost` only narrows the lsof match; a wildcard bind
+ * matches regardless, so pass the instance's own (resolveInstanceEndpoint).
+ */
+export function getInstanceStatus(pidFile: string, port: number, bindHost?: string): GatewayStatus {
+  if (fs.existsSync(pidFile)) {
+    const pid = parseInt(fs.readFileSync(pidFile, "utf-8").trim(), 10);
+    if (Number.isSafeInteger(pid) && pid > 0 && pidIsAlive(pid)) {
+      // Alive is not ours: a container restarts pids from 1, so the recorded number
+      // answers kill(pid, 0) as an unrelated process, and believing it makes
+      // `jinn start` detach and exit PID 1 into a restart loop. Whoever owns the port
+      // is the gateway; failing that the process must at least look like one, except on
+      // Windows where there is no `ps` and the file is the only evidence.
+      const portOwner = lookupPidOnPort(port, bindHost);
+      if (portOwner.status === "found") return { running: true, pid: portOwner.pid };
+      if (process.platform === "win32") return { running: true, pid };
+
+      const command = inspectPidCommand(pid);
+      if (command === "gateway") return { running: true, pid };
+      // Neither probe could answer: no lsof AND no ps. Calling a live, port-holding
+      // daemon stopped here is the worse error — `jinn start` skips the restart path
+      // and races the running one into EADDRINUSE — so fall back to the pid file,
+      // which is the only evidence left. A probe that DID answer is still believed.
+      if (command === "unknown" && portOwner.status === "unknown") return { running: true, pid };
+      return { running: false, pid, reason: "not-ours" };
+    }
+    // Process not alive, stale PID file — fall back to port check.
+    const portPid = findPidOnPort(port, bindHost);
+    if (portPid) return { running: true, pid: portPid };
+    return { running: false, pid: Number.isSafeInteger(pid) && pid > 0 ? pid : null, reason: "dead" };
+  }
+
+  const portPid = findPidOnPort(port, bindHost);
+  if (portPid) return { running: true, pid: portPid };
+  return { running: false, pid: null };
 }
 
 export function getStatus(): GatewayStatus {
-  const targetPort = resolvePort();
-
-  if (fs.existsSync(PID_FILE)) {
-    const pid = parseInt(fs.readFileSync(PID_FILE, "utf-8").trim(), 10);
-    try {
-      process.kill(pid, 0);
-      return { running: true, pid };
-    } catch {
-      // Process not alive, stale PID file — fall back to port check.
-      const portPid = findPidOnPort(targetPort);
-      if (portPid) return { running: true, pid: portPid };
-      return { running: false, pid };
-    }
-  }
-
-  const portPid = findPidOnPort(targetPort);
-  if (portPid) return { running: true, pid: portPid };
-  return { running: false, pid: null };
+  return getInstanceStatus(PID_FILE, resolvePort());
 }

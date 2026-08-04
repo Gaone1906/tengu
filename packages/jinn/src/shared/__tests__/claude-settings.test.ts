@@ -1,33 +1,10 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { buildSessionSettings, writeSessionSettings, sessionSettingsPath, seedTrust, claudeJsonPath } from "../claude-settings.js";
+import { buildSessionSettings, writeSessionSettings, sessionSettingsPath, seedTrust } from "../claude-settings.js";
 
 describe("claude-settings", () => {
-  describe("claudeJsonPath", () => {
-    // Seeding a file the CLI does not read leaves the PTY blocked on the consent
-    // dialogs, so this has to track CLAUDE_CONFIG_DIR.
-    const original = process.env.CLAUDE_CONFIG_DIR;
-    afterEach(() => {
-      if (original === undefined) delete process.env.CLAUDE_CONFIG_DIR;
-      else process.env.CLAUDE_CONFIG_DIR = original;
-    });
-
-    // path.resolve on both sides: on Windows the production path picks up the cwd's
-    // drive letter, which a bare path.join expectation would not have.
-    it("follows CLAUDE_CONFIG_DIR when set", () => {
-      const configDir = path.join("/somewhere", ".claude");
-      process.env.CLAUDE_CONFIG_DIR = configDir;
-      expect(claudeJsonPath()).toBe(path.join(path.resolve(configDir), ".claude.json"));
-    });
-
-    it("falls back to the home directory when unset", () => {
-      delete process.env.CLAUDE_CONFIG_DIR;
-      expect(claudeJsonPath()).toBe(path.join(os.homedir(), ".claude.json"));
-    });
-  });
-
   it("buildSessionSettings registers Stop/SessionStart/StopFailure hooks pointing at the relay with the session id", () => {
     const s = buildSessionSettings({ sessionId: "jinn-abc", relayScript: "/h/relay.mjs", statusLineDir: "/tmp/limits", appendSystemPrompt: "SYS" });
     const stop = s.hooks.Stop[0].hooks[0];
@@ -86,6 +63,17 @@ describe("claude-settings", () => {
     expect(fs.readFileSync(backup, "utf-8")).toBe(original); // pristine pre-Jinn copy
     seedTrust(claudeJson, projB); // second modification must NOT overwrite the backup
     expect(fs.readFileSync(backup, "utf-8")).toBe(original);
+  });
+
+  it("seedTrust creates the config directory when it does not exist yet", () => {
+    // Under CLAUDE_CONFIG_DIR the target is a directory Claude Code may not have
+    // created yet — unlike the old os.homedir() target. An ENOENT here is swallowed
+    // by the caller, and every turn then hangs on the Bypass Permissions dialog.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "home-"));
+    const claudeJson = path.join(root, "not-created-yet", ".claude.json");
+    const projectDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "proj-")));
+    seedTrust(claudeJson, projectDir);
+    expect(JSON.parse(fs.readFileSync(claudeJson, "utf-8")).bypassPermissionsModeAccepted).toBe(true);
   });
 
   it("seedTrust does not create a backup when ~/.claude.json doesn't exist yet", () => {

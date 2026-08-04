@@ -37,7 +37,7 @@ import { HermesAcpEngine } from "../engines/hermes-acp.js";
 import { HermesInteractiveEngine } from "../engines/hermes-interactive.js";
 import type { PtyViewEngine } from "../engines/pty-view-engine.js";
 import { HookRegistry } from "./hook-registry.js";
-import { writeGatewayInfo, readGatewayInfo, updateGatewayPtyPids, staleGatewayPids, gatewayBaseUrl } from "./gateway-info.js";
+import { writeGatewayInfo, readGatewayInfo, updateGatewayPtyPids, staleGatewayPids, recordedGatewayPids, recordedInThisNamespace, currentNamespace, gatewayBaseUrl } from "./gateway-info.js";
 import { authenticateGatewayRequest, authRequiredForRequest, ensureGatewayAuthToken, shouldRequireGatewayAuth, validateGatewayExposure, verifyGatewayAuth } from "./auth.js";
 import { reconcileWorkItemsOnStartup, startWorkItemReconciler } from "../work-items/reconcile.js";
 import { setTodoLiveEmitter } from "../work-items/live-events.js";
@@ -46,7 +46,8 @@ import { requestApproval, setTodoApprovalDecisionListener } from "../work-items/
 import { linkSession } from "../work-items/store.js";
 import { parseTodoApprovalRef } from "../workflows/todo-approval-ref.js";
 import { workflowTodoApprovals, workflowTodoLifecycle } from "./workflow-todo-surface.js";
-import { seedTrust, cleanupSessionSettings, claudeJsonPath } from "../shared/claude-settings.js";
+import { seedTrust, cleanupSessionSettings } from "../shared/claude-settings.js";
+import { claudeJsonPath } from "../shared/home.js";
 import { GATEWAY_INFO_FILE, HOOK_RELAY_SCRIPT, JINN_HOME, CLAUDE_SETTINGS_DIR } from "../shared/paths.js";
 import { enforceOwnerOnlyDirectory, pathIsOwnerOnly } from "../shared/owner-only.js";
 import { handleApiRequest, isSameOriginBrowserRequest, resumePendingWebQueueItems, type ApiContext } from "./api.js";
@@ -614,6 +615,19 @@ export async function startGateway(
   // Reap any orphaned PTYs from a prior crashed run before writing the fresh gateway.json.
   const oldInfo = readGatewayInfo(GATEWAY_INFO_FILE);
   if (oldInfo) {
+    // Say so when the file names pids we refuse to touch: off Linux an NTP step can make
+    // the derived namespace read as another boot (BOOT_INSTANT_TOLERANCE_MS), which is the
+    // safe direction but silently turns this reaper off.
+    if (!recordedInThisNamespace(oldInfo)) {
+      const unreaped = recordedGatewayPids(oldInfo);
+      if (unreaped.length) {
+        logger.warn(
+          `Not reaping ${unreaped.length} pid(s) from a prior gateway (${unreaped.join(", ")}): ` +
+          `recorded under namespace ${oldInfo.namespace ?? "(none — written before namespaces)"}, ` +
+          `this process is ${currentNamespace()}. If those PTYs are still running, stop them by hand.`,
+        );
+      }
+    }
     for (const pid of staleGatewayPids(oldInfo)) {
       try {
         process.kill(pid, "SIGTERM");

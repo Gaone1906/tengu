@@ -1,82 +1,108 @@
-// Container-only configuration, run by docker-entrypoint.sh before the gateway
-// starts. Every step is wrong on a workstation and required here.
-// Idempotent: safe on every boot, writes only when something changed.
+// Container-only configuration, run by docker-entrypoint.sh immediately before the
+// gateway starts — and ONLY then: every step rewrites state a running gateway owns
+// (gateway.json, gateway.pid, .claude.json). Idempotent, writes only on change.
 
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createRequire } from "node:module";
 
-// Mirrors resolveJinnHome() in packages/jinn/src/shared/home.ts, JINN_INSTANCE
-// branch included — assuming ~/.jinn would patch a file the gateway never reads.
-const home = process.env.HOME ?? os.homedir();
-const jinnHome = process.env.JINN_HOME
-  ? path.resolve(process.env.JINN_HOME)
-  : path.join(home, `.${process.env.JINN_INSTANCE || "jinn"}`);
+// Through the package's declared `main`, not dist/src/** directly: that tree is
+// scripts/build.mjs output whose shape the package never promised, so a relative import
+// into it breaks at container boot and nowhere else.
+const packageJsonUrl = new URL("../packages/jinn/package.json", import.meta.url);
 
-// pnpm links `yaml` under packages/jinn/node_modules rather than hoisting it, so
-// a bare import from this directory would not resolve.
-const requireFromJinn = createRequire(new URL("../packages/jinn/package.json", import.meta.url));
-const YAML = requireFromJinn("yaml");
+let loadConfig;
+let resolveJinnHome;
+let claudeJsonPath;
+let isLoopbackHost;
+try {
+  const pkg = JSON.parse(fs.readFileSync(packageJsonUrl, "utf-8"));
+  if (!pkg.main) throw new Error("packages/jinn/package.json declares no \"main\"");
+  ({ loadConfig, resolveJinnHome, claudeJsonPath, isLoopbackHost } = await import(
+    new URL(pkg.main, packageJsonUrl).href
+  ));
+} catch (err) {
+  console.error(`docker-configure: cannot load the jinn package entry point (${err.message})`);
+  process.exit(1);
+}
+
+const homeDir = os.homedir();
+const jinnHome = resolveJinnHome();
 
 let failed = false;
 
-function writeAtomic(file, contents) {
+/** Where the resolved bind address is left for docker-entrypoint.sh to export as
+ *  JINN_HOST. A bare value, read — never sourced. Not config.yaml: that sits on a volume
+ *  outliving the container, and "bind every interface" is true only in here. Reaches the
+ *  gateway's process tree, not a later `docker exec` session. */
+const BIND_HOST_FILE = path.join(jinnHome, "container-bind-host");
+
+function writeAtomic(file, contents, mode = 0o600) {
   const tmp = `${file}.docker-configure.tmp`;
-  fs.writeFileSync(tmp, contents, { mode: 0o600 });
+  fs.writeFileSync(tmp, contents, { mode });
   fs.renameSync(tmp, file);
-  fs.chmodSync(file, 0o600);
+  fs.chmodSync(file, mode);
+}
+
+/** Copy `file` to the first free slot: `base`, then `base.1`, `base.2`, … A fixed name
+ *  is a one-shot: the second incident finds it taken, skips the copy, and the caller
+ *  overwrites the original anyway. Returns the path written, or null. */
+function copyToFreeSlot(file, base, limit = 20) {
+  for (let i = 0; i < limit; i++) {
+    const dest = i === 0 ? base : `${base}.${i}`;
+    try {
+      fs.copyFileSync(file, dest, fs.constants.COPYFILE_EXCL);
+      return dest;
+    } catch (err) {
+      if (err.code !== "EEXIST") return null;
+    }
+  }
+  return null;
 }
 
 /**
- * Rebind the gateway off loopback, which inside a container binds the container's
- * own loopback so a published port resolves to nothing.
+ * Loopback as a BIND ADDRESS, which is not the question isLoopbackHost asks: that one
+ * parses a Host header and strips a trailing `:<port>`, so a bare "::1" comes back as
+ * ":" and reads as routable. Bracket it first, as a Host header would have.
  *
- * Uses the document API like patchWorkspaceConfig() in instances/create.ts, so
- * comments and quoting survive and only gateway.host is touched.
+ * 127.0.0.0/8 and the IPv4-mapped form are added here rather than there because
+ * widening the auth check's idea of loopback would relax authentication.
  */
-function rebindGatewayHost(configPath) {
-  let raw;
+function isLoopbackBindAddress(host) {
+  const value = host.trim().replace(/^\[(.+)\]$/, "$1");
+  // "::ffff:127.0.0.1" is loopback written as IPv6; auth.ts's isLoopbackAddress()
+  // strips the prefix for the same reason.
+  const bare = value.replace(/^::ffff:/i, "");
+  if (/^127\./.test(bare)) return true;
+  return isLoopbackHost(bare.includes(":") ? `[${bare}]` : bare);
+}
+
+/**
+ * Resolve the address the gateway must bind for the published port to reach it: loopback
+ * in a container is the container's own, so the port resolves to nothing under a boot log
+ * that reads healthy. Decided against loadConfig(), which is what the gateway will see.
+ */
+function configureGatewayBinding() {
+  let config;
   try {
-    raw = fs.readFileSync(configPath, "utf-8");
+    config = loadConfig();
   } catch (err) {
-    // ENOENT is expected before `jinn setup`. Anything else (EACCES on a
-    // root-owned volume) must not pass for "no config yet" — skipping the rebind
-    // silently is what produces a dead dashboard with a clean boot log.
-    if (err.code === "ENOENT") return;
-    console.error(`docker-configure: cannot read ${configPath}: ${err.message}`);
+    // Fatal, not "nothing to do": skipping the rebind silently produces a dead
+    // dashboard under a clean boot log. `jinn setup` has already run by here.
+    console.error(`docker-configure: cannot read the gateway config: ${err.message}`);
     failed = true;
     return;
   }
 
-  const doc = YAML.parseDocument(raw);
-  if (doc.errors.length) {
-    console.error(`docker-configure: ${configPath} is not valid YAML: ${doc.errors[0].message}`);
-    failed = true;
-    return;
-  }
+  const gateway = config.gateway ?? {};
 
-  const current = doc.getIn(["gateway", "host"]);
-  if (current === "0.0.0.0") return;
-
-  // A bare `host:` parses as null: absent, not a deliberate choice. Treating it as
-  // one would skip the rebind and leave the published port pointing at nothing.
-  const absent = current === undefined || current === null;
-
-  // A host that is neither loopback nor absent was chosen deliberately.
-  if (!absent && current !== "127.0.0.1" && current !== "localhost") {
-    console.log(`docker-configure: leaving gateway.host as ${JSON.stringify(current)} (not loopback)`);
-    return;
-  }
-
-  // Rebinding a config that disabled auth turns a setup that is legal on loopback
-  // into one the gateway refuses to start (validateGatewayExposure in gateway/auth.ts)
-  // — an endless restart loop under `restart: unless-stopped`, whose error tells the
-  // operator to weaken auth to undo a change made here. Stop with the real fix instead.
-  if (doc.getIn(["gateway", "authDisabled"]) === true
-      && doc.getIn(["gateway", "insecureAllowUnauthenticatedNetwork"]) !== true) {
+  // Before the early returns below: every path here leaves the gateway network-visible,
+  // which validateGatewayExposure refuses to serve without auth — a restart loop whose
+  // error tells the operator to weaken auth. `host: 0.0.0.0` returns early, so checking
+  // inside the rebind branch would miss exactly the configs that hit it.
+  if (gateway.authDisabled === true && gateway.insecureAllowUnauthenticatedNetwork !== true) {
     console.error(
-      `docker-configure: ${configPath} sets gateway.authDisabled: true, which cannot be combined with ` +
+      `docker-configure: the gateway config sets gateway.authDisabled: true, which cannot be combined with ` +
       `the published port this container needs. Remove gateway.authDisabled (the dashboard authenticates ` +
       `with the gateway token — run \`jinn pair\`), or set gateway.insecureAllowUnauthenticatedNetwork: true ` +
       `if the published port is only reachable from a network you trust.`,
@@ -85,45 +111,107 @@ function rebindGatewayHost(configPath) {
     return;
   }
 
-  doc.setIn(["gateway", "host"], "0.0.0.0");
-  writeAtomic(configPath, doc.toString({ lineWidth: 0 }));
-  console.log(`docker-configure: gateway.host ${absent ? "set" : "->"} 0.0.0.0`);
-}
+  // A bare `host:` parses as null — absent, not a deliberate choice.
+  const currentHost = typeof gateway.host === "string" ? gateway.host : undefined;
+  const needsRebind = !currentHost || isLoopbackBindAddress(currentHost);
 
-/** Mirrors claudeJsonPath() in packages/jinn/src/shared/claude-settings.ts. */
-function claudeJsonPath() {
-  return process.env.CLAUDE_CONFIG_DIR
-    ? path.join(path.resolve(process.env.CLAUDE_CONFIG_DIR), ".claude.json")
-    : path.join(home, ".claude.json");
-}
+  if (!needsRebind) {
+    // Chosen deliberately, and reachable as long as the mapping agrees. Clear any
+    // override a previous boot left, or the change never takes effect.
+    clearBindHostOverride();
+    console.log(`docker-configure: leaving gateway.host as ${JSON.stringify(currentHost)} (not loopback)`);
+    return;
+  }
 
-/**
- * Warn if Claude Code's config reappears outside the volume.
- *
- * CLAUDE_CONFIG_DIR works but is undocumented (anthropics/claude-code#25762 is
- * open), so if a release stops honouring it the file silently returns to a path
- * no volume covers and state is lost on the next upgrade.
- */
-function checkConfigRedirect() {
-  const stray = path.join(home, ".claude.json");
-  if (stray === claudeJsonPath() || !fs.existsSync(stray)) return;
-  console.warn(
-    `docker-configure: WARNING — ${stray} exists but CLAUDE_CONFIG_DIR should keep the config at ` +
-    `${claudeJsonPath()}. That path is not on a volume, so anything written there is lost on the ` +
-    `next image upgrade. See anthropics/claude-code#25762.`,
+  try {
+    writeAtomic(BIND_HOST_FILE, "0.0.0.0\n");
+  } catch (err) {
+    console.error(`docker-configure: cannot write ${BIND_HOST_FILE}: ${err.message}`);
+    failed = true;
+    return;
+  }
+  console.log(
+    `docker-configure: gateway will bind 0.0.0.0 via JINN_HOST ` +
+    `(config says ${currentHost ? JSON.stringify(currentHost) : "nothing"}, which the published port cannot reach)`,
   );
 }
 
+function clearBindHostOverride() {
+  try {
+    fs.unlinkSync(BIND_HOST_FILE);
+  } catch (err) {
+    if (err.code !== "ENOENT") {
+      console.error(`docker-configure: cannot remove ${BIND_HOST_FILE}: ${err.message}`);
+      failed = true;
+    }
+  }
+}
+
 /**
- * Record Claude Code's Bypass Permissions consent.
- *
- * The engine passes --dangerously-skip-permissions on every spawn, and Claude Code
- * answers that with a blocking dialog nothing in a PTY can dismiss, so every turn
- * hangs with "no completion signal and no recoverable transcript". 2.1.170 implied
- * the consent through global onboarding and 2.1.220 does not, so seedTrust() records
- * it explicitly for every install. This runs before the gateway anyway: it is the
- * only step that rescues an unparseable .claude.json (below) before seedTrust
- * overwrites it, and it keeps the container correct if that seeding ever moves.
+ * Warn if Claude Code's config reappears outside the volume, keep a copy, restore the
+ * redirect. CLAUDE_CONFIG_DIR is undocumented (anthropics/claude-code#25762), so a
+ * release that stops honouring it writes to ~/.claude.json — a symlink into the volume,
+ * unless the write replaced it with a real file in the container layer. Copy rather than
+ * warn, because that layer does not survive the rebuild that upgrades the image; relink,
+ * or every later boot copies it again until the 20 slots are gone.
+ */
+function checkConfigRedirect() {
+  const stray = path.join(homeDir, ".claude.json");
+  const target = claudeJsonPath();
+  if (stray === target) return;
+
+  let stat;
+  try {
+    stat = fs.lstatSync(stray);
+  } catch {
+    return; // absent: the redirect is holding
+  }
+  if (stat.isSymbolicLink()) {
+    // The image's link into the volume: writes through it are already persistent.
+    let linked;
+    try {
+      linked = path.resolve(homeDir, fs.readlinkSync(stray));
+    } catch { /* unreadable link */ }
+    if (linked === target) return;
+    console.warn(
+      `docker-configure: WARNING — ${stray} links to ${linked ?? "an unreadable target"} rather than ` +
+      `${target}, so a config written there if CLAUDE_CONFIG_DIR ever stops working would not be on a volume.`,
+    );
+    return;
+  }
+
+  const saved = copyToFreeSlot(stray, `${target}.stray`);
+  // Only ever replace the file once its contents are safely on the volume.
+  const relinked = saved !== null && restoreConfigLink(stray, target);
+  console.warn(
+    `docker-configure: WARNING — ${stray} is a real file, so CLAUDE_CONFIG_DIR is no longer keeping ` +
+    `Claude Code's config at ${target}. That path is in the container layer, which is discarded by the ` +
+    `next \`docker compose up -d --build\`. ` +
+    (saved
+      ? `Copied to ${saved} on the volume; merge what you need back into ${target}. `
+      : `It could NOT be copied onto the volume, so the next upgrade loses it. `) +
+    (relinked
+      ? `The symlink into the volume has been restored. `
+      : `The symlink into the volume could NOT be restored, so this will recur on the next boot. `) +
+    `See anthropics/claude-code#25762.`,
+  );
+}
+
+function restoreConfigLink(stray, target) {
+  try {
+    fs.unlinkSync(stray);
+    fs.symlinkSync(target, stray);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Record Claude Code's Bypass Permissions consent, which the engine's
+ * --dangerously-skip-permissions otherwise answers with a dialog no PTY can dismiss.
+ * seedTrust() does this too; kept here because it is the only step that rescues an
+ * unparseable .claude.json before seedTrust overwrites it.
  */
 function acceptBypassPermissions() {
   const claudeJson = claudeJsonPath();
@@ -134,24 +222,17 @@ function acceptBypassPermissions() {
       const parsed = JSON.parse(fs.readFileSync(claudeJson, "utf-8"));
       if (parsed && typeof parsed === "object") data = parsed;
     } catch (err) {
-      // Side-copy before continuing: seedTrust() runs moments later, treats a file
-      // it cannot parse as new, and overwrites it — and its .jinn-backup is
-      // one-time, so by the second boot that slot is already taken.
-      const rescue = `${claudeJson}.corrupt`;
-      let rescued = false;
-      try {
-        if (!fs.existsSync(rescue)) {
-          fs.copyFileSync(claudeJson, rescue, fs.constants.COPYFILE_EXCL);
-          rescued = true;
-        }
-      } catch { /* best effort */ }
+      // Side-copy first: seedTrust() runs moments later and overwrites what it cannot
+      // parse, and its one-time .jinn-backup slot is taken by the second boot.
+      const rescue = copyToFreeSlot(claudeJson, `${claudeJson}.corrupt`);
       console.warn(
         `docker-configure: WARNING — ${claudeJson} does not parse (${err.message}). ` +
-        (rescued ? `Copied to ${rescue}. ` : "") +
+        (rescue
+          ? `Copied to ${rescue}. `
+          : `It could NOT be copied aside, so this copy of it is gone. `) +
         `MCP servers and project trust it held are not recoverable automatically.`,
       );
-      // Fall through with an empty object: the file is already lost, and a clean
-      // rewrite is what lets the gateway boot without the dialog.
+      // The file is lost either way; a clean rewrite at least clears the dialog.
       data = {};
     }
   }
@@ -164,15 +245,27 @@ function acceptBypassPermissions() {
 }
 
 /**
- * Drop pids recorded by a previous container.
+ * Drop the pid state a previous container left on the volume. Nothing of ours runs yet,
+ * and a container restarts pids from 1, so every recorded number now names an unrelated
+ * live process — one that answers kill(pid, 0), making `jinn start` hand the restart to a
+ * detached helper and return, which exits PID 1 into a restart loop that never serves.
  *
- * gateway.json survives an ungraceful stop, and a container restarts pids from 1,
- * so the reaper would signal numbers now held by unrelated live processes. Zeroed
- * rather than deleted because writeGatewayInfo only carries `secret` forward from
- * the previous file. staleGatewayPids also checks the recorded namespace; this
- * stays so the container is safe on its own if that ever changes.
+ * gateway.json is zeroed rather than deleted: writeGatewayInfo only carries `secret`
+ * forward. Redundant with staleGatewayPids' namespace check, kept so the container stands
+ * alone if that changes.
  */
-function clearStaleGatewayPids() {
+function clearStalePidState() {
+  const pidFile = path.join(jinnHome, "gateway.pid");
+  try {
+    fs.unlinkSync(pidFile);
+    console.log("docker-configure: removed stale gateway.pid");
+  } catch (err) {
+    if (err.code !== "ENOENT") {
+      console.error(`docker-configure: cannot remove ${pidFile}: ${err.message}`);
+      failed = true;
+    }
+  }
+
   const file = path.join(jinnHome, "gateway.json");
   let info;
   try {
@@ -188,9 +281,28 @@ function clearStaleGatewayPids() {
   console.log("docker-configure: cleared stale pids from gateway.json");
 }
 
-rebindGatewayHost(path.join(jinnHome, "config.yaml"));
-checkConfigRedirect();
-acceptBypassPermissions();
-clearStaleGatewayPids();
+/**
+ * Run one step, turning an unexpected throw into an explanation — an EACCES on a
+ * bind-mounted `.claude` otherwise loops the container forever on a raw stack trace.
+ * `fatal` separates steps the gateway cannot boot without from lost diagnostics.
+ */
+function step(name, fn, { fatal }) {
+  try {
+    fn();
+  } catch (err) {
+    const message = `docker-configure: ${name} failed: ${err.message}`;
+    if (fatal) {
+      console.error(`${message} — the gateway cannot start without it.`);
+      failed = true;
+    } else {
+      console.warn(`${message} — continuing without it.`);
+    }
+  }
+}
+
+step("resolving the gateway bind address", configureGatewayBinding, { fatal: true });
+step("checking the Claude Code config redirect", checkConfigRedirect, { fatal: false });
+step("recording the Bypass Permissions consent", acceptBypassPermissions, { fatal: true });
+step("clearing stale pid state", clearStalePidState, { fatal: true });
 
 if (failed) process.exit(1);

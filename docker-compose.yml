@@ -12,15 +12,17 @@ services:
 
     # Loopback on the HOST, deliberately: the dashboard authenticates with a shared
     # gateway token, so publishing on 0.0.0.0 would expose agent control — with the
-    # permission gate disabled — to the whole network.
+    # permission gate disabled — to the whole network. Both sides read JINN_PORT, and so
+    # does the gateway; set it in a .env file beside this one to move them together.
     ports:
-      - "127.0.0.1:7777:7777"
+      - "127.0.0.1:${JINN_PORT:-7777}:${JINN_PORT:-7777}"
 
-    # The container is UTC. Shells do not normally export TZ, so set it here or in a
-    # .env file beside this one; a cron job with no explicit timezone fires in the
-    # container's zone, not yours.
     environment:
+      # The container is UTC. Shells do not normally export TZ, so set it here or in
+      # a .env file beside this one; a cron job with no explicit timezone fires in
+      # the container's zone, not yours.
       TZ: ${TZ:-UTC}
+      JINN_PORT: ${JINN_PORT:-7777}
 
     volumes:
       # config.yaml, your CLAUDE.md, session registry and transcripts, paired
@@ -38,6 +40,9 @@ services:
       # - ${HOME}/code/my-project:/work/my-project
       # - ${HOME}/code/design-system:/work/design-system:ro
 
+    # Covers a crash and a host reboot. It does NOT cover a gateway that is alive but
+    # no longer serving: Docker's restart policies react to exits, not to health. The
+    # image's HEALTHCHECK is what surfaces that case — watch `docker compose ps`.
     restart: unless-stopped
 
     # Headroom only: the gateway arms its own 5s force-exit on SIGTERM
