@@ -27,8 +27,8 @@ persona: |
 | `displayName` | string | yes | Human-readable name |
 | `department` | string | yes | Department directory name |
 | `rank` | string | yes | One of: executive, manager, senior, employee |
-| `engine` | string | yes | Engine to use: "claude" or "codex" |
-| `model` | string | no | Model override (default from config) |
+| `engine` | string | yes | One of: claude, codex, antigravity, grok, pi, hermes |
+| `model` | string | no | Engine-compatible model override (default from config) |
 | `persona` | string | yes | System prompt defining personality and behavior |
 
 ## Departments
@@ -52,7 +52,7 @@ description: Builds and maintains the product codebase.
 
 ### Todos and Workflows
 
-Todos are deliberately authored work in the live ledger. Employees find and update their assigned Todos, move finished work to `in_review`, and use `blocked` or `escalated` only when they cannot proceed.
+Todos are deliberately authored work in the live ledger. Employees find and update their assigned Todos, move finished work to in review, and use blocked or escalated only when they cannot proceed.
 
 Workflows are reusable automations - the HOW. Use or propose one when the same job is repeatable, scheduled, event-driven, or multi-step. A Workflow invocation never creates, links, transitions, approves, or mutates a Todo. A Todo-status trigger is a one-way input; the resulting Workflow run is independent.
 

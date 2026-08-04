@@ -15,7 +15,7 @@ Use this skill for deliberately authored, durable work ownership and status trac
 - Use `get_work_item` before changing a Todo so you understand its acceptance criteria, assignee, source/provenance, verification policy, and current status.
 - Use `get_work_item_tree` when the work has child Todos; it returns the nested breakdown and roll-up.
 
-The statuses are `backlog`, `assigned`, `executing`, `in_review`, `done`, `blocked`, `escalated`, and `cancelled`. Agent updates intentionally expose only `in_review`, `blocked`, `escalated`, and `done`; other lifecycle decisions stay on their owning surface.
+The statuses are backlog, assigned, executing, in_review, done, blocked, escalated, and cancelled. Agent updates intentionally expose only in_review, blocked, escalated, and done; other lifecycle decisions stay on their owning surface.
 
 ## Shape the hierarchy
 
@@ -87,9 +87,9 @@ Approvals are routed records on a Todo, separate from its lifecycle status. Gene
 }
 ```
 
-   The resolved routed owner cannot decide their own approval, but an employee hierarchy root/COO is exempt from that enforcement check. Linked execution alone is not checked, so routed managers/COO should avoid approving work they personally executed and use another authorized reviewer when possible. For a native approval on an `in_review` Todo, `approve` atomically records the decision and moves the Todo to `done`. `reject` records the critique, returns it to `executing`, and increments `rounds`; when the increment reaches `verifyPolicy.maxRounds`, it moves to `escalated` instead. Without an explicit limit, the effective ceilings are 2 rounds for `trust`/`verify` and 3 for `thorough`. On another status, the decision is recorded but status stays unchanged.
+   The resolved routed owner cannot decide their own approval, but an employee hierarchy root/COO is exempt from that enforcement check. Linked execution alone is not checked, so routed managers/COO should avoid approving work they personally executed and use another authorized reviewer when possible. For a native approval on an in_review Todo, `approve` atomically records the decision and moves the Todo to `done`. `reject` records the critique, returns it to `executing`, and increments `rounds`; when the increment reaches `verifyPolicy.maxRounds`, it moves to `escalated` instead. Without an explicit limit, the effective ceilings are 2 rounds for `trust`/`verify` and 3 for `thorough`. On another status, the decision is recorded but status stays unchanged.
 
-3. After a rejection, the worker revises the work, uses `update_work_item` to return it to `in_review`, and calls `request_work_item_approval` again for the next bounded review. Do not create a duplicate Todo.
+3. After a rejection, the worker revises the work, uses `update_work_item` to return it to in_review, and calls `request_work_item_approval` again for the next bounded review. Do not create a duplicate Todo.
 
 4. If the routed manager/COO deliberately needs operator/aCEO authority, call `escalate_work_item_approval` with the pending Todo id and an optional reason. Escalation exposes the pending approval to that path; it does not approve or reject it.
 
@@ -97,7 +97,7 @@ Todo approvals affect only the Todo. Workflow operations never mutate Todos. A T
 
 ## Keep status honest
 
-- Worker finished and ready for review: `update_work_item` to `in_review` with a note naming artifacts, checks, and remaining risks.
+- Worker finished and ready for review: `update_work_item` to in_review with a note naming artifacts, checks, and remaining risks.
 - Cannot proceed without an external change: move to `blocked` and state the concrete blocker plus what would unblock it.
 - A non-approval manager/operator decision is required: move to `escalated` and summarize the options and recommendation. For a pending approval, use `escalate_work_item_approval` instead.
 - Reviewer accepts ungated work: move it to `done` with verification evidence. If an approval is pending, use `decide_work_item_approval` instead so the Todo approval consequence is recorded atomically.
@@ -119,7 +119,7 @@ Use `archive_work_item` for obsolete or historical clutter while preserving its 
 
 1. Reviewer calls `get_work_item` and inspects the linked execution session plus any separately supplied evidence.
 2. If the Todo has a pending approval, use `decide_work_item_approval`; approve or reject with a precise evidence note.
-3. After a rejection, the worker revises, returns the Todo to `in_review`, and requests the next approval. The rejection path increments rounds and auto-escalates when the effective limit is reached.
+3. After a rejection, the worker revises, returns the Todo to in_review, and requests the next approval. The rejection path increments rounds and auto-escalates when the effective limit is reached.
 4. Use `escalate_work_item_approval` before the round cap only when the routed approver needs an operator/aCEO decision.
 
 Report Todo id, title, assignee, status, verification result, and next owner. Do not create a second Todo merely because the first is blocked or under review.

@@ -5,6 +5,8 @@ description: Find and install skills from skills.sh when a capability gap is det
 
 # Find & Install Skills
 
+`$JINN_HOME` is the active instance home and defaults to `~/.jinn`.
+
 ## Trigger
 
 This skill activates when you detect a capability gap that a community skill might fill, the user explicitly asks to find or install a skill and a task would benefit from a specialized skill you don't currently have
@@ -38,14 +40,14 @@ This places files into `~/.claude/skills/<name>/` or `~/.agents/skills/<name>/`.
 ### Step 2: Copy into {{portalSlug}} skills directory
 
 ```bash
-cp -r ~/.claude/skills/<name>/ ~/.{{portalSlug}}/skills/<name>/
+cp -r ~/.claude/skills/<name>/ "$JINN_HOME/skills/<name>/"
 ```
 
 The {{portalName}} file watcher will detect the new directory and create the appropriate symlinks automatically.
 
 ### Step 3: Update the skills manifest
 
-Read `~/.{{portalSlug}}/skills.json`, add the new skill entry, and write it back.
+Read `$JINN_HOME/skills.json`, add the new skill entry, and write it back.
 
 The manifest format:
 
@@ -62,7 +64,7 @@ The manifest format:
 
 ### Step 4: Apply the skill immediately
 
-Read the newly installed `~/.{{portalSlug}}/skills/<name>/SKILL.md` and follow its instructions to complete the current task.
+Read the newly installed `$JINN_HOME/skills/<name>/SKILL.md` and follow its instructions to complete the current task.
 
 ## When No Skills Are Found
 
@@ -79,7 +81,7 @@ If `npx skills find` returns no results:
 npx skills find "vercel deploy"
 # → vercel-labs/ai-skills@vercel-deploy (🟢 VERIFIED, 5200 installs)
 npx skills add vercel-labs/ai-skills@vercel-deploy -g -y
-cp -r ~/.claude/skills/vercel-deploy/ ~/.{{portalSlug}}/skills/vercel-deploy/
+cp -r ~/.claude/skills/vercel-deploy/ "$JINN_HOME/skills/vercel-deploy/"
 # → update skills.json → read SKILL.md → follow deploy instructions
 ```
 

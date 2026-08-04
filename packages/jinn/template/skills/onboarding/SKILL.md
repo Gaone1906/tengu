@@ -37,5 +37,5 @@ Ask if there's anything recurring they'd like handled automatically (a weekly su
 Recap what's set up (employee, skill, any cron), point them to where things live (Organization, Cron, Chat), and **set `portal.setupComplete: true` in `config.yaml`** so this setup conversation never repeats. (The wizard already set `portal.onboarded: true` when you finished the install wizard; `setupComplete` is the separate flag that stops this conversational onboarding from re-triggering.) Invite their first real task.
 
 ## Notes
-- Use instance-safe paths (`~/.{{portalSlug}}` or `$JINN_HOME`), not a hardcoded `~/.jinn`.
+- Use the active instance home at `$JINN_HOME` (defaults to `~/.jinn`).
 - Keep turns short and human. This should feel like meeting a capable new teammate, not filling a form.

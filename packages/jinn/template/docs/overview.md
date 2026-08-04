@@ -4,7 +4,7 @@
 
 ## Core Principle
 
-**{{portalName}} is a bus, not a brain.** All AI intelligence comes from the engines natively. {{portalName}} adds no custom agentic loop, no prompt engineering layer, no opinions on how AI should behave. It delegates everything to professional tools (Claude Code CLI, Codex SDK, and the Antigravity engine for Gemini models) and focuses solely on routing, scheduling, and connectivity.
+**{{portalName}} is a bus, not a brain.** All AI intelligence comes from the engines natively. {{portalName}} adds no custom agentic loop and focuses on routing, scheduling, and connectivity. The canonical engines are claude, codex, antigravity, grok, pi, hermes.
 
 The company operating model is in [company-doctrine.md](company-doctrine.md). The public blocks are Employees, Todos, Workflows, Chats, Notes, and Experiments.
 
@@ -19,7 +19,7 @@ The company operating model is in [company-doctrine.md](company-doctrine.md). Th
 
 ## How It Differs from Custom Agentic Frameworks
 
-Traditional approaches build custom tool-calling loops, manage context windows, and implement retry logic. {{portalName}} does none of that. The engines (Claude Code, Codex, and Antigravity for Gemini models) already handle tool use, file editing, command execution, and multi-step reasoning. {{portalName}} just connects them to the outside world.
+Traditional approaches build custom tool-calling loops, manage context windows, and implement retry logic. {{portalName}} leaves those behaviors to the selected engine and connects it to company state and external systems.
 
 ## Directory Structure
 

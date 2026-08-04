@@ -30,16 +30,13 @@ Read `~/.jinn/config.yaml` and verify:
 - The file is valid YAML (no syntax errors)
 - The `gateway.port` field is a valid number (default `7777`)
 - Required sections are present: `gateway` (with `port`) and `engines` (with a `default` and a config block for that engine)
-- `engines.default` is one of: `claude`, `codex`, `antigravity`
+- `engines.default` is one of: claude, codex, antigravity, grok, pi, hermes
 - The default engine has a model set under `engines.<name>.model` (e.g. `engines.claude.model`)
 - No duplicate keys or malformed values
 
 ### 3. Verify Engine Availability
 
-Check that the configured AI engine is installed and accessible:
-- For Claude: run `claude --version` and confirm it returns a version number
-- For Codex: run `codex --version` and confirm it returns a version number
-- For Antigravity (Gemini models): confirm the configured `engines.antigravity.bin` is on the PATH
+Check that the selected engine's configured binary is on the PATH and run it with `--version` when the adapter supports that flag. Use the binary under `engines.<name>.bin`; do not assume every instance uses the default command name.
 
 If the engine command is not found, inform the user that the engine is not installed or not on their PATH.
 
@@ -63,7 +60,7 @@ If the gateway appears to be in a bad state (crash loops, unresponsive, port con
 
 Tell the user to run:
 ```bash
-jinn stop && jinn start
+jinn restart
 ```
 
 ### Clear Temp Directory

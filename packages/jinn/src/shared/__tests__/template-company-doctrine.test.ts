@@ -15,6 +15,29 @@ function readPackage(rel: string): string {
   return fs.readFileSync(path.join(process.cwd(), rel), "utf-8");
 }
 
+function activeTemplateFiles(): string[] {
+  const root = path.join(process.cwd(), "template");
+  const files: string[] = [];
+  const visit = (directory: string): void => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      if (entry.name === "migrations") continue;
+      const entryPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) visit(entryPath);
+      else files.push(entryPath);
+    }
+  };
+  visit(root);
+  return files.sort();
+}
+
+function lineCount(content: string): number {
+  return content.trimEnd().split(/\r?\n/).length;
+}
+
+function skillInventory(content: string): string[] {
+  return [...content.matchAll(/^- \*\*([a-z0-9-]+)\*\*:/gm)].map((match) => match[1]).sort();
+}
+
 describe("template company doctrine", () => {
   it("ships the seven locked company-doctrine headings", () => {
     const doctrine = readTemplate("docs/company-doctrine.md");
@@ -153,20 +176,21 @@ describe("template company doctrine", () => {
     expect(template).not.toContain("org/` changes");
   });
 
-  it("teaches the complete company surface without obsolete service routing", () => {
+  it("points each company concern to its owning compact playbook", () => {
     const template = readTemplate("CLAUDE.md");
+    const owners = [
+      ["Todos", "skills/todo-handling/SKILL.md"],
+      ["Workflows", "skills/workflow/SKILL.md"],
+      ["Delegation", "skills/delegation/SKILL.md"],
+      ["Cron", "skills/cron-manager/SKILL.md"],
+      ["Organization", "skills/management/SKILL.md"],
+      ["Notes", "skills/notes/SKILL.md"],
+      ["Experiments", "skills/experiments/SKILL.md"],
+    ];
 
-    expect(template).toContain("### Todos");
-    expect(template).toContain("### Workflows");
-    expect(template).toContain("#### Triggers");
-    expect(template).toContain("### Notes");
-    expect(template).toContain("fire_workflow_event");
-    expect(template).toContain("decide_workflow_approval");
-    expect(template).toContain("list_notes");
-    expect(template).toContain("read_note");
-    expect(template).toContain("create_note");
-    expect(template).toContain("update_note");
-    expect(template).toContain("the IC's manager is notified");
+    for (const [concern, owner] of owners) {
+      expect(template, concern).toContain(`| ${concern} | \`${owner}\` |`);
+    }
 
     expect(template).not.toContain("### Cross-Department Services");
     expect(template).not.toContain("org/service tools");
@@ -182,29 +206,88 @@ describe("template company doctrine", () => {
     }
     const template = readTemplate("CLAUDE.md");
     const doctrine = readTemplate("docs/company-doctrine.md");
+    const notesSkill = readTemplate("skills/notes/SKILL.md");
     expect(template).toContain("Triggers are a Workflow detail");
     expect(doctrine).toContain("Triggers are a Workflow detail");
-    expect(template).toContain("read it before updating and pass its returned revision as expectedRevision");
-    expect(template).toContain("`docs/` remains read-only");
+    expect(notesSkill).toContain("read it before updating and pass its returned revision as expectedRevision");
+    expect(notesSkill).toContain("`docs/` remains read-only");
   });
 
   it("ships compact delegation doctrine for nested callbacks and execution quality", () => {
     const template = readTemplate("CLAUDE.md");
+    const delegation = readTemplate("skills/delegation/SKILL.md");
+    const todoHandling = readTemplate("skills/todo-handling/SKILL.md");
 
-    expect(template).toContain("any session at any depth");
-    expect(template).toContain("COO -> lead -> pod -> sub-report");
-    expect(template).toContain("Employees =");
-    expect(template).toContain("Sub-agents =");
-    expect(template).toContain("different role -> employee; more hands for your own task -> sub-agents");
-    expect(template).toContain("Select by fit");
+    expect(delegation).toContain("use native sub-agents only for extra hands inside your own role");
+    expect(delegation).toContain("Select by role and persona fit");
+    expect(delegation).toContain("The child's reply wakes the parent session");
+    expect(delegation).toContain("Delegate through the relevant manager");
     expect(template).not.toContain("Agent teams for multi-phase tasks");
-
     expect(template).toContain("PLAN -> REFINE -> IMPLEMENT -> REVIEW -> VERIFY");
-    expect(template).toContain("at least two independent reviewers");
-    expect(template).toContain("in_review");
-    expect(template).toContain("Managers and the COO should orchestrate, not implement");
-    expect(template).toContain("explicit, testable stop condition and a budget");
-    expect(template).toContain("If an engine exposes a native goal loop");
+    expect(todoHandling).toContain("in_review");
+    expect(delegation).toContain("explicit stop condition");
+    expect(delegation).toContain("deadline/budget");
+    expect(delegation).toContain("THOROUGH for architecture, security, breaking, or irreversible work");
+  });
+
+  it("keeps shipped instruction surfaces lean and free of stale identifiers", () => {
+    const files = activeTemplateFiles();
+    const content = files.map((file) => fs.readFileSync(file, "utf-8")).join("\n");
+    const canonicalEngines = "claude, codex, antigravity, grok, pi, hermes";
+
+    expect(content).not.toContain("~/.{{portalSlug}}");
+    expect(content).not.toMatch(/claude. or .codex/i);
+    expect(content).not.toMatch(/\bo3\b/);
+
+    for (const rel of [
+      "docs/org.md",
+      "docs/cron.md",
+      "skills/management/SKILL.md",
+      "skills/cron-manager/SKILL.md",
+      "skills/self-heal/SKILL.md",
+    ]) {
+      expect(readTemplate(rel), rel).toContain(canonicalEngines);
+    }
+
+    const findAndInstall = readTemplate("skills/find-and-install/SKILL.md");
+    expect(findAndInstall.match(/\$JINN_HOME/g)?.length ?? 0).toBeGreaterThanOrEqual(4);
+    expect(findAndInstall).toContain("defaults to `~/.jinn`");
+    expect(readTemplate("skills/onboarding/SKILL.md")).toContain("`$JINN_HOME` (defaults to `~/.jinn`)");
+
+    expect(lineCount(readTemplate("CLAUDE.md"))).toBeLessThanOrEqual(150);
+    expect(lineCount(readTemplate("skills/management/SKILL.md"))).toBeLessThanOrEqual(120);
+    expect(lineCount(readTemplate("skills/cron-manager/SKILL.md"))).toBeLessThanOrEqual(70);
+
+    const workflow = readTemplate("skills/workflow/SKILL.md");
+    expect(workflow).not.toMatch(/legacy-v1-import-report\.json|v1 import|active v1 runs|drain active v1/i);
+  });
+
+  it("lists every shipped skill exactly once on both discovery surfaces", () => {
+    const directories = fs.readdirSync(path.join(process.cwd(), "template", "skills"), { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort();
+
+    expect(skillInventory(readTemplate("CLAUDE.md"))).toEqual(directories);
+    expect(skillInventory(readTemplate("docs/skills.md"))).toEqual(directories);
+  });
+
+  it("only backticks registered snake_case MCP tool names", () => {
+    const registered = new Set<string>();
+    const mcpDirectory = path.join(process.cwd(), "src", "mcp");
+    for (const entry of fs.readdirSync(mcpDirectory, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".ts")) continue;
+      const source = fs.readFileSync(path.join(mcpDirectory, entry.name), "utf-8");
+      for (const match of source.matchAll(/name:\s*"([a-z][a-z0-9]*(?:_[a-z0-9]+)+)"/g)) registered.add(match[1]);
+    }
+
+    const referenced = new Set<string>();
+    for (const file of activeTemplateFiles()) {
+      const content = fs.readFileSync(file, "utf-8");
+      for (const match of content.matchAll(/`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`/g)) referenced.add(match[1]);
+    }
+
+    expect([...referenced].filter((tool) => !registered.has(tool)).sort()).toEqual([]);
   });
 
   it("keeps shipped management/onboarding/sync skills on MCP tools, not raw gateway HTTP", () => {
@@ -224,12 +307,14 @@ describe("template company doctrine", () => {
 
     expect(readTemplate("skills/management/SKILL.md")).toContain("delegate_task");
     expect(readTemplate("skills/management/SKILL.md")).toContain("get_employee");
+    expect(readTemplate("skills/cron-manager/SKILL.md")).toContain("list_cron_jobs");
+    expect(readTemplate("skills/cron-manager/SKILL.md")).toContain("get_cron_run_history");
     expect(readTemplate("skills/onboarding/SKILL.md")).toContain("spawn_session");
     expect(readTemplate("skills/sync/SKILL.md")).toContain("list_sessions");
     expect(readTemplate("skills/sync/SKILL.md")).toContain("read_session");
   });
 
-  it("ships discoverable MCP-first playbooks for workflows, Todos, and delegation", () => {
+  it("ships discoverable MCP-first playbooks for core company operations", () => {
     const shipped = [
       {
         directory: "workflow",
@@ -284,6 +369,28 @@ describe("template company doctrine", () => {
           "managed file IDs",
         ],
       },
+      {
+        directory: "notes",
+        tools: [
+          "list_notes",
+          "read_note",
+          "create_note",
+          "update_note",
+          "expectedRevision",
+          "`knowledge/`",
+          "`docs/` remains read-only",
+        ],
+      },
+      {
+        directory: "experiments",
+        tools: [
+          "list_experiments",
+          "get_experiment",
+          "create_experiment",
+          "update_experiment",
+          "conclude_experiment",
+        ],
+      },
     ];
 
     for (const { directory, tools } of shipped) {
@@ -298,6 +405,9 @@ describe("template company doctrine", () => {
       expect(content, rel).not.toMatch(/\b(?:GET|POST|PUT|PATCH|DELETE)\s+\/api\//);
       expect(content, rel).not.toMatch(/\bcurl\b.*\/api\//);
       expect(content, rel).not.toContain("gateway API");
+      if (directory === "notes" || directory === "experiments") {
+        expect(lineCount(content), rel).toBeLessThanOrEqual(80);
+      }
       for (const expected of tools) expect(content, `${rel}: ${expected}`).toContain(expected);
     }
 

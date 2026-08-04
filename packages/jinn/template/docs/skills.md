@@ -1,63 +1,29 @@
 # Skills
 
-Skills are markdown instruction sets that engines read and follow. There is no runtime, no loading system, no plugin API. Engines handle skills natively by reading the SKILL.md file.
+Skills are Markdown playbooks that engines discover and follow natively. Each directory under `$JINN_HOME/skills/` contains a `SKILL.md` with YAML frontmatter whose `name` matches the directory and whose `description` says when the skill applies.
 
-## How Skills Work
+Read the relevant playbook before acting. Keep durable procedure in the skill, supporting material beside it, and only a short routing pointer in root instructions or employee personas.
 
-Each skill is a directory in `~/.jinn/skills/` containing at minimum a `SKILL.md` file. When an engine starts a session, it has access to the skills directory and can read any skill's instructions.
+## Shipped skills
 
-The `SKILL.md` file contains:
-- **Trigger description**: When this skill should be activated
-- **Instructions**: Step-by-step directions for the engine
-- **Data file references**: Paths to any supporting files in the skill directory
+- **cron-manager**: Manage scheduled jobs and inspect run history.
+- **delegation**: Delegate tracked work and coordinate child sessions.
+- **experiments**: Create, measure, update, and conclude experiments.
+- **find-and-install**: Find and install community skills.
+- **management**: Manage departments, employees, hierarchy, and ownership.
+- **migrate**: Apply packaged workspace migrations.
+- **new**: Start a fresh chat session.
+- **notes**: Find, read, create, and safely update durable Notes.
+- **onboarding**: Guide a new operator through first-run setup.
+- **self-heal**: Diagnose and repair configuration or runtime problems.
+- **skill-creator**: Create focused local skills.
+- **status**: Report current session and system status.
+- **sync**: Catch up on an employee conversation.
+- **todo-handling**: Create, assign, update, review, and archive Todos.
+- **workflow**: Create, invoke, observe, and maintain Workflows.
 
-## Creating a Skill
+## Creating or installing
 
-```
-~/.jinn/skills/
-  my-skill/
-    SKILL.md          # Required: instructions
-    data.json         # Optional: supporting data
-    template.txt      # Optional: templates, examples, etc.
-```
+Use `skill-creator` for a recurring local procedure. Use `find-and-install` when a trusted community skill may already cover the gap. Search is read-only; get approval before installation.
 
-### Example SKILL.md
-
-```markdown
-# Deploy Notification Skill
-
-## Trigger
-When the user says "deploy" or asks about deployment status.
-
-## Instructions
-1. Read the deployment config from `data/deploy-targets.json` in this skill directory
-2. Check the current git branch and latest commit
-3. Format a deployment summary with target environment, branch, and commit hash
-4. Ask for confirmation before proceeding
-
-## Data Files
-- `deploy-targets.json`: List of deployment targets with URLs and environment names
-```
-
-## Pre-packaged Skills
-
-{{portalName}} ships with these default skills (in `~/.jinn/skills/`):
-
-- **onboarding**: First-run setup — gets a new install configured and oriented
-- **status**: Report current session, org, and system status
-- **new**: Start a fresh chat session
-- **sync**: Catch up on an employee's recent conversation before responding
-- **management**: Hire, fire, restructure, and manage the org and its hierarchy
-- **cron-manager**: Create, edit, and manage scheduled jobs
-- **skill-creator**: Author new skills (scaffold a SKILL.md and supporting files)
-- **find-and-install**: Discover and install community skills via `skills find`
-- **migrate**: Apply version migrations to the workspace
-- **self-heal**: Diagnose and fix configuration and runtime problems
-
-## Key Points
-
-- Skills are just files. Engines read them as context.
-- No compilation, no imports, no runtime hooks.
-- Any file format works as supporting data (JSON, YAML, CSV, plain text).
-- Skills can reference other skills by path.
-- Engines decide when and how to apply skill instructions based on the trigger description.
+Keep skills focused, executable, and free of secrets. Put examples or scripts beside the playbook only when they are needed to carry out its procedure.
