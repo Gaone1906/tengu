@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { patchConfigFile, ConfigDocumentError } from "../config-document.js";
+import { expectPosixMode } from "../test-support/posix-mode.js";
 
 let dir: string;
 let configPath: string;
@@ -66,7 +67,7 @@ describe("patchConfigFile", () => {
   it("leaves the result owner-only", () => {
     fs.writeFileSync(configPath, SAMPLE, { mode: 0o644 });
     patchConfigFile(configPath, [{ path: ["gateway", "port"], value: 8080 }]);
-    expect(fs.statSync(configPath).mode & 0o777).toBe(0o600);
+    expectPosixMode(configPath, 0o600);
   });
 
   it("reports invalid YAML rather than writing over it", () => {

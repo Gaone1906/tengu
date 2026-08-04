@@ -124,7 +124,7 @@ import {
   TEMPLATE_MIGRATIONS_DIR,
   resolveHomeIdentity,
 } from "../shared/paths.js";
-import { saveConfigAtomic, gatewayEnvOverrides, gatewayFileBinding } from "../shared/config.js";
+import { saveConfigAtomic, gatewayEnvOverrides } from "../shared/config.js";
 import { messageBodyError } from "../shared/message-body.js";
 import { logger } from "../shared/logger.js";
 import { redactText } from "../shared/redact.js";
@@ -2665,15 +2665,18 @@ export async function handleApiRequest(
       }
       const currentConfig = context.getConfig();
       const currentPort = context.runtimePort ?? currentConfig.gateway.port ?? 7777;
+      // The configured host, not the one JINN_HOST resolved: this goes into the NEW
+      // workspace's config.yaml, and the variable describes this container, not that
+      // home. Undefined leaves the new config's own loopback default alone.
+      const envHost = gatewayEnvOverrides().host;
+      const configuredHost = currentConfig.gateway.host;
       let created: CreateInstanceResult;
       try {
         created = await (context.createWorkspaceInstance ?? createInstance)({
           name: body.name,
           port: body.port as number | undefined,
           currentPort,
-          // The file's host, not the effective one: this is written into the new
-          // workspace's config.yaml, so JINN_HOST would follow the container home.
-          gatewayHost: gatewayFileBinding().host,
+          gatewayHost: configuredHost === envHost ? undefined : configuredHost,
           authRequired: shouldRequireGatewayAuth(currentConfig),
         });
       } catch (error) {
