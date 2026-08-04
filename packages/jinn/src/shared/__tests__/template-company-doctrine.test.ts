@@ -222,11 +222,15 @@ describe("template company doctrine", () => {
     expect(delegation).toContain("Select by role and persona fit");
     expect(delegation).toContain("The child's reply wakes the parent session");
     expect(delegation).toContain("Delegate through the relevant manager");
+    expect(delegation).toContain("the IC's manager is notified");
     expect(template).not.toContain("Agent teams for multi-phase tasks");
     expect(template).toContain("PLAN -> REFINE -> IMPLEMENT -> REVIEW -> VERIFY");
     expect(todoHandling).toContain("in_review");
+    expect(delegation).toContain("at least two independent reviewers");
+    expect(delegation).toContain("Managers and the COO should orchestrate, not implement");
     expect(delegation).toContain("explicit stop condition");
     expect(delegation).toContain("deadline/budget");
+    expect(delegation).toContain("If an engine exposes a native goal loop");
     expect(delegation).toContain("THOROUGH for architecture, security, breaking, or irreversible work");
   });
 

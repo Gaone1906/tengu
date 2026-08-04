@@ -11,7 +11,7 @@ Use this skill when another employee or engine is a better fit for a bounded pie
 
 1. Use `list_employees` for the roster, `find_employees` to filter by department/rank/engine, and `get_employee` to inspect persona, manager, and direct reports.
 2. Select by role and persona fit, not novelty or a desire to spread work around. One employee can have several parallel sessions.
-3. Delegate through the relevant manager when they should own decomposition and review. Direct delegation remains valid when it is the clearest route.
+3. Delegate through the relevant manager when they should own decomposition and review. Direct delegation remains valid when it is the clearest route, but the IC's manager is notified so they retain visibility.
 
 ## Tracked work versus a quick session
 
@@ -62,9 +62,11 @@ Every delegation brief should state:
 - whether changes are allowed or the task is read-only;
 - the effort level, deadline/budget, and explicit stop condition.
 
-Review at the risk-appropriate level: TRUST for simple lookups, VERIFY for routine implementation, and THOROUGH for architecture, security, breaking, or irreversible work. Do not forward raw employee output without checking it at the chosen level.
+Review at the risk-appropriate level: TRUST for simple lookups, VERIFY for routine implementation, and THOROUGH for architecture, security, breaking, or irreversible work. Non-trivial work uses at least two independent reviewers who did not produce it. Do not forward raw employee output without checking it at the chosen level.
 
-Use bounded feedback loops: low effort up to 4 rounds, medium up to 8, high up to 12. When the cap is reached, stop and escalate with the Todo id, child session id, what passed, what failed, and the decision needed.
+Managers and the COO should orchestrate, not implement, when the task benefits from delegation; direct implementation remains valid for small organizations or tiny tasks.
+
+Use bounded feedback loops: low effort up to 4 rounds, medium up to 8, high up to 12. If an engine exposes a native goal loop, bind it to the same stop condition, budget, and escalation path. When the cap is reached, stop and escalate with the Todo id, child session id, what passed, what failed, and the decision needed.
 
 ## External and operator boundaries
 
