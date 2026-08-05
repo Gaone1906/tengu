@@ -48,7 +48,7 @@ import { parseTodoApprovalRef } from "../workflows/todo-approval-ref.js";
 import { workflowTodoApprovals, workflowTodoLifecycle } from "./workflow-todo-surface.js";
 import { seedTrust, cleanupSessionSettings } from "../shared/claude-settings.js";
 import { claudeJsonPath } from "../shared/home.js";
-import { GATEWAY_INFO_FILE, HOOK_RELAY_SCRIPT, JINN_HOME, CLAUDE_SETTINGS_DIR } from "../shared/paths.js";
+import { GATEWAY_INFO_FILE, HOOK_RELAY_SCRIPT, JINN_HOME, JINN_HOME_IDENTITY, CLAUDE_SETTINGS_DIR } from "../shared/paths.js";
 import { enforceOwnerOnlyDirectory, pathIsOwnerOnly } from "../shared/owner-only.js";
 import { handleApiRequest, isSameOriginBrowserRequest, resumePendingWebQueueItems, type ApiContext } from "./api.js";
 import { resolveCallerIdentity, sessionCommGuards, LATERAL_MAX_HOPS, type CallerIdentityOptions } from "./session-comm-guards.js";
@@ -628,7 +628,7 @@ export async function startGateway(
         );
       }
     }
-    for (const pid of staleGatewayPids(oldInfo)) {
+    for (const pid of staleGatewayPids(oldInfo, JINN_HOME_IDENTITY)) {
       try {
         process.kill(pid, "SIGTERM");
         logger.info(`Reaping stale pid ${pid} from prior gateway`);

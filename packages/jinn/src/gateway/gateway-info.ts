@@ -2,6 +2,8 @@ import fs from "node:fs";
 import os from "node:os";
 import crypto from "node:crypto";
 import { execFileSync } from "node:child_process";
+import path from "node:path";
+import { windowsRoot } from "../shared/windows-spawn.js";
 
 export interface GatewayInfo {
   port: number;
@@ -13,6 +15,52 @@ export interface GatewayInfo {
   ptyPids?: number[];
   namespace?: string;
   processIncarnations?: Record<string, string>;
+  homeIdentity?: string;
+}
+
+type TextExecFileSync = (
+  file: string,
+  args: string[],
+  options: {
+    encoding: "utf-8";
+    windowsHide: true;
+    timeout: number;
+    stdio: ["ignore", "pipe", "ignore"];
+  },
+) => string;
+
+/** Windows exposes the kernel process creation timestamp through Process.StartTime.
+ * Invoke the system PowerShell by absolute path so PATH cannot substitute a binary.
+ * Decimal .NET ticks are an exact lifetime discriminator; any other output fails closed. */
+export function windowsProcessIncarnation(
+  pid: number,
+  run: TextExecFileSync = execFileSync as unknown as TextExecFileSync,
+  systemRoot = windowsRoot(),
+): string | null {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+  const powershell = path.win32.join(
+    systemRoot,
+    "System32",
+    "WindowsPowerShell",
+    "v1.0",
+    "powershell.exe",
+  );
+  const command = `[Console]::Out.Write([System.Diagnostics.Process]::GetProcessById(${pid}).StartTime.ToUniversalTime().Ticks)`;
+  try {
+    const ticks = run(
+      powershell,
+      ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+      {
+        encoding: "utf-8",
+        windowsHide: true,
+        timeout: 5_000,
+        stdio: ["ignore", "pipe", "ignore"],
+      },
+    ).trim();
+    return /^\d+$/.test(ticks) ? `windows-start-utc-ticks:${ticks}` : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -35,7 +83,7 @@ export function processIncarnation(pid: number): string | null {
       return null;
     }
   }
-  if (process.platform === "win32") return null;
+  if (process.platform === "win32") return windowsProcessIncarnation(pid);
   try {
     const started = execFileSync("ps", ["-p", String(pid), "-o", "lstart="], {
       encoding: "utf-8",
@@ -134,6 +182,7 @@ export function recordedGatewayPids(
 
 export function staleGatewayPids(
   info: Partial<GatewayInfo> | null | undefined,
+  expectedHomeIdentity: string,
   currentPid = process.pid,
   namespace = currentNamespace(),
   readIncarnation: (pid: number) => string | null = processIncarnation,
@@ -143,6 +192,10 @@ export function staleGatewayPids(
   // restarts pids from 1, so a gateway.json left by an ungraceful stop names
   // numbers now held by unrelated live processes. Absent field: assume foreign.
   if (!recordedInThisNamespace(info, namespace)) return [];
+  // Runtime records are portable files. Copying one into another JINN_HOME must
+  // never transfer authority to signal the source gateway or any of its PTYs.
+  // Legacy records without an owning home are unprovable and therefore inert.
+  if (!expectedHomeIdentity || info.homeIdentity !== expectedHomeIdentity) return [];
   return recordedGatewayPids(info, currentPid).filter((pid) =>
     recordedProcessMatches(info, pid, readIncarnation)
   );
@@ -173,6 +226,7 @@ export function writeGatewayInfo(file: string, opts: { port: number; host?: stri
     token: opts.token ?? previous?.token,
     ptyPids: [],
     namespace: currentNamespace(),
+    homeIdentity: gatewayHomeIdentity(file),
   };
   const incarnation = processIncarnation(opts.pid);
   if (incarnation) info.processIncarnations = { [String(opts.pid)]: incarnation };
@@ -183,6 +237,15 @@ export function writeGatewayInfo(file: string, opts: { port: number; host?: stri
   // with broader permissions some filesystems may not reset them — be explicit.
   fs.chmodSync(file, 0o600);
   return info;
+}
+
+function gatewayHomeIdentity(file: string): string {
+  const home = path.resolve(path.dirname(file));
+  try {
+    return fs.realpathSync.native(home);
+  } catch {
+    return home;
+  }
 }
 
 export function readGatewayInfo(file: string): GatewayInfo | null {

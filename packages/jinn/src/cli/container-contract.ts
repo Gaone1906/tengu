@@ -17,7 +17,7 @@ export function assertContainerPrimaryCommand(
   selectedInstance: string | undefined,
   env: NodeJS.ProcessEnv = process.env,
 ): void {
-  if (env.JINN_CONTAINER !== "1" || (command !== "setup" && command !== "start")) return;
+  if (env.JINN_CONTAINER !== "1" || !["setup", "start", "restart"].includes(command)) return;
 
   const primaryHome = env.JINN_CONTAINER_PRIMARY_HOME?.trim();
   const selectedHome = env.JINN_HOME?.trim();
@@ -31,7 +31,7 @@ export function assertContainerPrimaryCommand(
 
   throw new Error(
     "The Docker image supports one Jinn instance at its primary container home. "
-    + "Do not retarget setup/start with -i, JINN_INSTANCE, or JINN_HOME; run another instance "
+    + "Do not retarget setup/start/restart with -i, JINN_INSTANCE, or JINN_HOME; run another instance "
     + "in its own container with dedicated Jinn/Claude volumes and a separately published port.",
   );
 }

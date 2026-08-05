@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { gatewayBaseUrl, writeGatewayInfo, readGatewayInfo, staleGatewayPids, sameNamespace } from "../gateway-info.js";
+import { gatewayBaseUrl, writeGatewayInfo, readGatewayInfo, staleGatewayPids, sameNamespace, processIncarnation, recordedProcessMatches } from "../gateway-info.js";
 
 describe("gateway-info", () => {
   it("writeGatewayInfo round-trips and generates a secret", () => {
@@ -12,6 +12,7 @@ describe("gateway-info", () => {
     expect(info.port).toBe(7777);
     expect(info.host).toBe("100.95.1.62");
     expect(info.pid).toBe(1234);
+    expect(info.homeIdentity).toBe(fs.realpathSync.native(dir));
     expect(typeof info.secret).toBe("string");
     expect(info.secret.length).toBeGreaterThanOrEqual(32);
     expect(readGatewayInfo(file)).toEqual(info);
@@ -22,8 +23,8 @@ describe("gateway-info", () => {
   });
 
   it("ignores token-only gateway info when deriving stale pids to reap", () => {
-    expect(staleGatewayPids({ token: "tok", namespace: "h1" } as any, 1234, "h1")).toEqual([]);
-    expect(staleGatewayPids({ pid: undefined, ptyPids: [111, undefined, 1234, 0, -1], namespace: "h1" } as any, 1234, "h1")).toEqual([]);
+    expect(staleGatewayPids({ token: "tok", namespace: "h1" } as any, "/instances/current", 1234, "h1")).toEqual([]);
+    expect(staleGatewayPids({ pid: undefined, ptyPids: [111, undefined, 1234, 0, -1], namespace: "h1" } as any, "/instances/current", 1234, "h1")).toEqual([]);
   });
 
   // A container restarts pids from 1, so pids recorded by a previous container
@@ -33,15 +34,16 @@ describe("gateway-info", () => {
       pid: 7,
       ptyPids: [14, 22],
       namespace: "old-container",
+      homeIdentity: "/instances/current",
       processIncarnations: { "7": "i-7", "14": "i-14", "22": "i-22" },
     } as any;
     const incarnation = (pid: number) => `i-${pid}`;
-    expect(staleGatewayPids(info, 1234, "old-container", incarnation)).toEqual([14, 22, 7]);
-    expect(staleGatewayPids(info, 1234, "new-container", incarnation)).toEqual([]);
+    expect(staleGatewayPids(info, "/instances/current", 1234, "old-container", incarnation)).toEqual([14, 22, 7]);
+    expect(staleGatewayPids(info, "/instances/current", 1234, "new-container", incarnation)).toEqual([]);
   });
 
   it("does not reap pids from gateway info written before namespaces were recorded", () => {
-    expect(staleGatewayPids({ pid: 7, ptyPids: [14] } as any, 1234, "h1")).toEqual([]);
+    expect(staleGatewayPids({ pid: 7, ptyPids: [14] } as any, "/instances/current", 1234, "h1")).toEqual([]);
   });
 
   it("does not reap startup-recorded pids that were reused within the same boot", () => {
@@ -49,10 +51,34 @@ describe("gateway-info", () => {
       pid: 7,
       ptyPids: [14],
       namespace: "same-boot",
+      homeIdentity: "/instances/current",
       processIncarnations: { "7": "old-gateway", "14": "old-pty" },
     } as any;
 
-    expect(staleGatewayPids(info, 1234, "same-boot")).toEqual([]);
+    expect(staleGatewayPids(info, "/instances/current", 1234, "same-boot")).toEqual([]);
+  });
+
+  it("does not reap a copied runtime record owned by another JINN_HOME", () => {
+    const info = {
+      pid: 7,
+      ptyPids: [14],
+      namespace: "same-boot",
+      homeIdentity: "/instances/source",
+      processIncarnations: { "7": "i-7", "14": "i-14" },
+    } as any;
+
+    expect(staleGatewayPids(info, "/instances/copied-to", 1234, "same-boot", (pid) => `i-${pid}`)).toEqual([]);
+  });
+
+  it.skipIf(process.platform !== "win32")("round-trips a newly written record through the production Windows source", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-windows-incarnation-"));
+    const info = writeGatewayInfo(path.join(dir, "gateway.json"), { port: 7777, pid: process.pid });
+    const incarnation = processIncarnation(process.pid);
+
+    expect(incarnation).toMatch(/^windows-start-utc-ticks:\d+$/);
+    expect(info.processIncarnations?.[String(process.pid)]).toBe(incarnation);
+    expect(recordedProcessMatches(info, process.pid)).toBe(true);
+    expect(staleGatewayPids(info, info.homeIdentity!, process.pid + 1)).toEqual([process.pid]);
   });
 
   // Hostname AND boot identity: a reboot keeps the hostname while recycling every
@@ -86,9 +112,10 @@ describe("gateway-info", () => {
       pid: 7,
       ptyPids: [14],
       namespace: stamped,
+      homeIdentity: "/instances/current",
       processIncarnations: { "7": "i-7", "14": "i-14" },
     } as any;
-    expect(staleGatewayPids(info, 1234, stamped, (pid) => `i-${pid}`)).toEqual([14, 7]);
+    expect(staleGatewayPids(info, "/instances/current", 1234, stamped, (pid) => `i-${pid}`)).toEqual([14, 7]);
   });
 
   // The /proc-less form (macOS, Windows) derives the boot instant from uptime, whose
@@ -107,6 +134,7 @@ describe("gateway-info", () => {
       expect(sameNamespace("mac:boot-1700000000000", "mac:boot-1700000030000")).toBe(false);
       expect(staleGatewayPids(
         { pid: 7, ptyPids: [14, 22], namespace: "mac:boot-1700000000000" } as any,
+        "/instances/current",
         1234,
         "mac:boot-1700000030000",
       )).toEqual([]);

@@ -6,10 +6,12 @@ import path from "node:path";
 const handlers = vi.hoisted(() => ({
   start: vi.fn(async () => undefined),
   setup: vi.fn(async () => undefined),
+  restart: vi.fn(async () => undefined),
 }));
 
 vi.mock("../start.js", () => ({ runStart: handlers.start }));
 vi.mock("../setup.js", () => ({ runSetup: handlers.setup }));
+vi.mock("../restart.js", () => ({ runRestart: handlers.restart }));
 vi.mock("../../shared/runtime-guard.js", () => ({
   assertNativeRuntime: vi.fn(),
   repairNodePtySpawnHelper: vi.fn(),
@@ -74,5 +76,23 @@ describe("container CLI single-instance contract", () => {
 
     await expect(program.parseAsync(["node", "jinn", "-i", "jinn", "start"])).rejects.toThrow(/one Jinn instance|primary container home/i);
     expect(handlers.start).not.toHaveBeenCalled();
+  });
+
+  it("rejects restart against an alternate JINN_HOME before the handler runs", async () => {
+    handlers.restart.mockClear();
+    process.env.JINN_HOME = alternateHome;
+    delete process.env.JINN_INSTANCE;
+
+    await expect(program.parseAsync(["node", "jinn", "restart"])).rejects.toThrow(/one Jinn instance|primary container home/i);
+    expect(handlers.restart).not.toHaveBeenCalled();
+  });
+
+  it("rejects -i alternate restart before the handler runs", async () => {
+    handlers.restart.mockClear();
+    process.env.JINN_HOME = primaryHome;
+    delete process.env.JINN_INSTANCE;
+
+    await expect(program.parseAsync(["node", "jinn", "-i", "alternate", "restart"])).rejects.toThrow(/one Jinn instance|primary container home/i);
+    expect(handlers.restart).not.toHaveBeenCalled();
   });
 });
