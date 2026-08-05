@@ -86,40 +86,50 @@ describe("readSharedSttSettings", () => {
     }));
 
     expect(readSharedSttSettings(settingsPath)).toEqual({
-      enabled: true,
-      model: "medium",
-      languages: ["en", "bg"],
+      state: "loaded",
+      settings: {
+        enabled: true,
+        model: "medium",
+        languages: ["en", "bg"],
+      },
     });
   });
 
-  it("returns null quietly when the file is missing", () => {
+  it("reports missing quietly when the file does not exist", () => {
     const warn = vi.fn();
 
-    expect(readSharedSttSettings(path.join(tempDir(), "missing.json"), warn)).toBeNull();
+    expect(readSharedSttSettings(path.join(tempDir(), "missing.json"), warn)).toEqual({ state: "missing" });
     expect(warn).not.toHaveBeenCalled();
   });
 
-  it("warns and returns null when the file is malformed", () => {
+  it("warns once and reports unreadable when the file is malformed", () => {
     const settingsPath = path.join(tempDir(), "stt.json");
     fs.writeFileSync(settingsPath, "{not-json");
     const warn = vi.fn();
 
-    expect(readSharedSttSettings(settingsPath, warn)).toBeNull();
+    expect(readSharedSttSettings(settingsPath, warn)).toEqual({ state: "unreadable" });
+    expect(warn).toHaveBeenCalledTimes(1);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("Could not read shared STT settings"));
   });
 
-  it("warns and returns null when the file is unreadable", () => {
+  it("warns once and reports unreadable when the body is not an object", () => {
     const settingsPath = path.join(tempDir(), "stt.json");
-    fs.writeFileSync(settingsPath, "{}");
-    vi.spyOn(fs, "readFileSync").mockImplementationOnce(() => {
-      const error = new Error("permission denied") as NodeJS.ErrnoException;
-      error.code = "EACCES";
-      throw error;
-    });
+    fs.writeFileSync(settingsPath, "[]");
     const warn = vi.fn();
 
-    expect(readSharedSttSettings(settingsPath, warn)).toBeNull();
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining("permission denied"));
+    expect(readSharedSttSettings(settingsPath, warn)).toEqual({ state: "unreadable" });
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("expected a JSON object"));
+  });
+
+  it.runIf(process.platform !== "win32")("warns once and reports unreadable when the file mode is 000", () => {
+    const settingsPath = path.join(tempDir(), "stt.json");
+    fs.writeFileSync(settingsPath, "{}", { mode: 0o000 });
+    const warn = vi.fn();
+
+    expect(readSharedSttSettings(settingsPath, warn)).toEqual({ state: "unreadable" });
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("Could not read shared STT settings"));
   });
 });
 
@@ -147,7 +157,10 @@ describe("seedSharedSttSettings", () => {
 
     seedSharedSttSettings(settingsPath, { model: "small", languages: ["en"] });
 
-    expect(readSharedSttSettings(settingsPath)).toEqual({ model: "medium", languages: ["en", "bg"] });
+    expect(readSharedSttSettings(settingsPath)).toEqual({
+      state: "loaded",
+      settings: { model: "medium", languages: ["en", "bg"] },
+    });
   });
 
   it.each([undefined, {}])("does not create a file for absent or empty local settings", (localSettings) => {
@@ -173,9 +186,12 @@ describe("writeSharedSttSettings", () => {
 
     expect(rename).toHaveBeenCalledWith(`${settingsPath}.tmp-${process.pid}`, settingsPath);
     expect(readSharedSttSettings(settingsPath)).toEqual({
-      enabled: true,
-      model: "small",
-      languages: ["en", "bg"],
+      state: "loaded",
+      settings: {
+        enabled: true,
+        model: "small",
+        languages: ["en", "bg"],
+      },
     });
     expect(fs.readdirSync(path.dirname(settingsPath))).toEqual(["stt.json"]);
     if (process.platform !== "win32") expect(fs.statSync(settingsPath).mode & 0o777).toBe(0o600);
@@ -189,37 +205,60 @@ describe("writeSharedSttSettings", () => {
     });
 
     expect(() => writeSharedSttSettings(settingsPath, { model: "small", languages: ["bg"] })).toThrow("rename failed");
-    expect(readSharedSttSettings(settingsPath)).toEqual({ model: "medium", languages: ["en"] });
+    expect(readSharedSttSettings(settingsPath)).toEqual({
+      state: "loaded",
+      settings: { model: "medium", languages: ["en"] },
+    });
     expect(fs.readdirSync(path.dirname(settingsPath))).toEqual(["stt.json"]);
   });
 });
 
 describe("resolveEffectiveSttSettings", () => {
+  it("uses defaults instead of the local block when shared settings are malformed", () => {
+    const settingsPath = path.join(tempDir(), "stt.json");
+    fs.writeFileSync(settingsPath, "{not-json");
+
+    expect(resolveEffectiveSttSettings(
+      readSharedSttSettings(settingsPath, vi.fn()),
+      { model: "tiny", languages: ["bg"] },
+    )).toEqual({ model: "small", languages: ["en"] });
+  });
+
+  it.runIf(process.platform !== "win32")("uses defaults instead of the local block when shared settings are unreadable", () => {
+    const settingsPath = path.join(tempDir(), "stt.json");
+    fs.writeFileSync(settingsPath, "{}", { mode: 0o000 });
+
+    expect(resolveEffectiveSttSettings(
+      readSharedSttSettings(settingsPath, vi.fn()),
+      { model: "tiny", languages: ["bg"] },
+    )).toEqual({ model: "small", languages: ["en"] });
+  });
+
   it("uses shared settings before the local block", () => {
     expect(resolveEffectiveSttSettings(
-      { enabled: false, model: "medium", languages: ["bg"] },
+      { state: "loaded", settings: { enabled: false, model: "medium", languages: ["bg"] } },
       { enabled: true, model: "small", languages: ["en"] },
     )).toEqual({ enabled: false, model: "medium", languages: ["bg"] });
   });
 
   it("uses the local block, including the deprecated language field, when no shared file exists", () => {
-    expect(resolveEffectiveSttSettings(null, {
+    expect(resolveEffectiveSttSettings({ state: "missing" }, {
       enabled: true,
       model: "base",
       languages: [],
-      language: "bg",
-    })).toEqual({ enabled: true, model: "base", languages: ["bg"] });
+      language: "en",
+    })).toEqual({ enabled: true, model: "base", languages: ["en"] });
   });
 
   it("fills missing fields from defaults rather than a lower-priority source", () => {
     expect(resolveEffectiveSttSettings(
-      { languages: ["bg"] },
+      { state: "loaded", settings: { languages: ["bg"] } },
       { enabled: true, model: "medium", languages: ["en"] },
     )).toEqual({ model: "small", languages: ["bg"] });
   });
 
   it("preserves today's defaults when neither source exists", () => {
-    expect(resolveEffectiveSttSettings(null, undefined)).toEqual({
+    expect(resolveEffectiveSttSettings({ state: "missing" }, undefined)).toEqual({
       model: "small",
       languages: ["en"],
     });
@@ -235,9 +274,12 @@ describe("initStt", () => {
       initStt({ enabled: true, model: "small", languages: ["en", "bg"] });
 
       expect(readSharedSttSettings(settingsPath)).toEqual({
-        enabled: true,
-        model: "small",
-        languages: ["en", "bg"],
+        state: "loaded",
+        settings: {
+          enabled: true,
+          model: "small",
+          languages: ["en", "bg"],
+        },
       });
     });
   });
@@ -252,6 +294,20 @@ describe("initStt", () => {
       const { initStt } = await import("../stt.js");
 
       expect(() => initStt()).not.toThrow();
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("Could not read shared STT settings"));
+    });
+  });
+
+  it.runIf(process.platform !== "win32")("warns but does not throw when shared settings mode is 000", async () => {
+    const root = tempDir();
+    await withSttPaths(root, async (settingsPath) => {
+      fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+      fs.writeFileSync(settingsPath, "{}", { mode: 0o000 });
+      const { logger: freshLogger } = await import("../../shared/logger.js");
+      const warn = vi.spyOn(freshLogger, "warn").mockImplementation(() => undefined);
+      const { initStt } = await import("../stt.js");
+
+      expect(() => initStt({ model: "tiny", languages: ["bg"] })).not.toThrow();
       expect(warn).toHaveBeenCalledWith(expect.stringContaining("Could not read shared STT settings"));
     });
   });

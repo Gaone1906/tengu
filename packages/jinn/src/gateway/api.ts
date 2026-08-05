@@ -129,8 +129,7 @@ import { logger } from "../shared/logger.js";
 import { redactText } from "../shared/redact.js";
 import { getSttStatus, downloadModel, transcribe as sttTranscribe, WHISPER_LANGUAGES } from "../stt/stt.js";
 import {
-  readSharedSttSettings,
-  resolveEffectiveSttSettings,
+  getEffectiveSttSettings,
   writeSharedSttSettings,
 } from "../stt/settings-store.js";
 import { CODEX_HOMES_DIR, JINN_HOME } from "../shared/paths.js";
@@ -6605,14 +6604,14 @@ export async function handleApiRequest(
     // ── STT (Speech-to-Text) ──────────────────────────────────
     if (method === "GET" && pathname === "/api/stt/status") {
       const config = context.getConfig();
-      const settings = resolveEffectiveSttSettings(readSharedSttSettings(STT_SETTINGS_FILE, logger.warn), config.stt);
+      const settings = getEffectiveSttSettings(config.stt, STT_SETTINGS_FILE, logger.warn);
       const status = getSttStatus(settings.model, settings.languages);
       return json(res, status);
     }
 
     if (method === "POST" && pathname === "/api/stt/download") {
       const config = context.getConfig();
-      const settings = resolveEffectiveSttSettings(readSharedSttSettings(STT_SETTINGS_FILE, logger.warn), config.stt);
+      const settings = getEffectiveSttSettings(config.stt, STT_SETTINGS_FILE, logger.warn);
       const model = settings.model;
 
       downloadModel(model, (progress) => {
@@ -6635,7 +6634,7 @@ export async function handleApiRequest(
 
     if (method === "POST" && pathname === "/api/stt/transcribe") {
       const config = context.getConfig();
-      const settings = resolveEffectiveSttSettings(readSharedSttSettings(STT_SETTINGS_FILE, logger.warn), config.stt);
+      const settings = getEffectiveSttSettings(config.stt, STT_SETTINGS_FILE, logger.warn);
       const model = settings.model;
       const languages = settings.languages;
       // Accept language from query param, fall back to first configured language
@@ -6686,7 +6685,7 @@ export async function handleApiRequest(
 
       try {
         const config = context.getConfig();
-        const settings = resolveEffectiveSttSettings(readSharedSttSettings(STT_SETTINGS_FILE, logger.warn), config.stt);
+        const settings = getEffectiveSttSettings(config.stt, STT_SETTINGS_FILE, logger.warn);
         writeSharedSttSettings(STT_SETTINGS_FILE, { ...settings, languages: langs });
         return json(res, { status: "ok", languages: langs });
       } catch (err) {

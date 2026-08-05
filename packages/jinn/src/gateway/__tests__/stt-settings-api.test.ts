@@ -137,6 +137,32 @@ describe("shared STT settings API", () => {
     });
   });
 
+  it("returns defaults instead of local settings when the shared file is malformed", async () => {
+    currentConfig = {
+      ...configWithoutStt(),
+      stt: { model: "tiny", languages: ["bg"] },
+    };
+    fs.writeFileSync(settingsPath, "{not-json");
+
+    const response = await call("GET", "/api/stt/status");
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ model: "small", languages: ["en"] });
+  });
+
+  it.runIf(process.platform !== "win32")("returns defaults instead of local settings when the shared file mode is 000", async () => {
+    currentConfig = {
+      ...configWithoutStt(),
+      stt: { model: "tiny", languages: ["bg"] },
+    };
+    fs.writeFileSync(settingsPath, "{}", { mode: 0o000 });
+
+    const response = await call("GET", "/api/stt/status");
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ model: "small", languages: ["en"] });
+  });
+
   it("writes languages to the shared file and exposes them on the next GET", async () => {
     settingsStore.writeSharedSttSettings(settingsPath, {
       enabled: true,
@@ -149,9 +175,12 @@ describe("shared STT settings API", () => {
 
     expect(update.status).toBe(200);
     expect(settingsStore.readSharedSttSettings(settingsPath)).toEqual({
-      enabled: true,
-      model: "tiny",
-      languages: ["en", "bg"],
+      state: "loaded",
+      settings: {
+        enabled: true,
+        model: "tiny",
+        languages: ["en", "bg"],
+      },
     });
     expect(nextStatus.body).toMatchObject({ model: "tiny", languages: ["en", "bg"] });
   });
@@ -168,9 +197,12 @@ describe("shared STT settings API", () => {
     expect(response.body).toEqual({ status: "downloading", model: "tiny" });
     await vi.waitFor(() => {
       expect(settingsStore.readSharedSttSettings(settingsPath)).toEqual({
-        enabled: true,
-        model: "tiny",
-        languages: ["bg"],
+        state: "loaded",
+        settings: {
+          enabled: true,
+          model: "tiny",
+          languages: ["bg"],
+        },
       });
     });
   });

@@ -18,6 +18,11 @@ export interface EffectiveSttSettings {
   languages: string[];
 }
 
+export type SharedSttSettingsReadResult =
+  | { state: "missing" }
+  | { state: "loaded"; settings: SharedSttSettings }
+  | { state: "unreadable" };
+
 function pathApi(platform: NodeJS.Platform): typeof path.posix | typeof path.win32 {
   return platform === "win32" ? path.win32 : path.posix;
 }
@@ -66,13 +71,16 @@ function settingsFromLocal(localSettings: LocalSttSettings): SharedSttSettings {
 export function readSharedSttSettings(
   settingsPath: string,
   warn: (message: string) => void = (message) => console.warn(message),
-): SharedSttSettings | null {
+): SharedSttSettingsReadResult {
   try {
-    return parseSharedSttSettings(JSON.parse(fs.readFileSync(settingsPath, "utf8")));
+    return {
+      state: "loaded",
+      settings: parseSharedSttSettings(JSON.parse(fs.readFileSync(settingsPath, "utf8"))),
+    };
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { state: "missing" };
     warn(`Could not read shared STT settings at ${settingsPath}: ${error instanceof Error ? error.message : String(error)}`);
-    return null;
+    return { state: "unreadable" };
   }
 }
 
@@ -116,12 +124,12 @@ export function writeSharedSttSettings(
 }
 
 export function resolveEffectiveSttSettings(
-  sharedSettings: SharedSttSettings | null,
+  sharedSettings: SharedSttSettingsReadResult,
   localSettings?: LocalSttSettings,
 ): EffectiveSttSettings {
-  const source = sharedSettings !== null
-    ? parseSharedSttSettings(sharedSettings)
-    : localSettings
+  const source = sharedSettings.state === "loaded"
+    ? parseSharedSttSettings(sharedSettings.settings)
+    : sharedSettings.state === "missing" && localSettings
       ? settingsFromLocal(localSettings)
       : {};
   return {
@@ -129,4 +137,12 @@ export function resolveEffectiveSttSettings(
     model: source.model || "small",
     languages: source.languages && source.languages.length > 0 ? [...source.languages] : ["en"],
   };
+}
+
+export function getEffectiveSttSettings(
+  localSettings?: LocalSttSettings,
+  settingsPath = resolveSttSettingsPath(),
+  warn: (message: string) => void = (message) => console.warn(message),
+): EffectiveSttSettings {
+  return resolveEffectiveSttSettings(readSharedSttSettings(settingsPath, warn), localSettings);
 }
