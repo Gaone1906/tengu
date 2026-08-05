@@ -83,7 +83,13 @@ export interface RestartDetachedOptions extends LifecycleKillOptions {
   port?: number;
 }
 
+export const CONTAINER_RESTART_UNSUPPORTED_MESSAGE =
+  "Gateway self-restart is unsupported inside Docker; use docker compose restart jinn instead.";
+
 export function restartDetached(options: RestartDetachedOptions = {}): void {
+  if (process.env.JINN_CONTAINER === "1") {
+    throw new Error(CONTAINER_RESTART_UNSUPPORTED_MESSAGE);
+  }
   assertContainerTakeoverSafe(options);
   const loadedConfig = loadConfig();
   const port = options.port ?? loadedConfig.gateway.port ?? 7777;

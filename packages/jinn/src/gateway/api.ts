@@ -300,7 +300,11 @@ import {
   validateTtsText,
 } from "../talk/tts-stream.js";
 import { onboardingNeeded, applyEngineChoice } from "./onboarding-policy.js";
-import { restartDetached, type RestartDetachedOptions } from "./lifecycle.js";
+import {
+  CONTAINER_RESTART_UNSUPPORTED_MESSAGE,
+  restartDetached,
+  type RestartDetachedOptions,
+} from "./lifecycle.js";
 import { updateSkillContent } from "./skills.js";
 import type { WorkflowService } from "../workflows/service.js";
 import { handleWorkflowApi } from "./workflow-api.js";
@@ -2582,6 +2586,12 @@ export async function handleApiRequest(
     if (method === "POST" && pathname === "/api/system/restart") {
       const auth = authenticateGatewayRequest(req, context.gatewayAuthToken, jinnHome);
       if (!auth.ok) return json(res, { error: auth.reason || "Unauthorized" }, 401);
+      if (process.env.JINN_CONTAINER === "1") {
+        return json(res, {
+          code: "container_restart_unsupported",
+          error: CONTAINER_RESTART_UNSUPPORTED_MESSAGE,
+        }, 409);
+      }
       const requestingSessionId = headerValue(req, "x-jinn-session-id")?.trim();
       if (requestingSessionId) {
         const requestingSession = getSession(requestingSessionId);
