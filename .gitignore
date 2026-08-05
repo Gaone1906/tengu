@@ -21,3 +21,7 @@ packages/jinn/.npmrc
 .jinn-*-sprint/
 # Local one-off recording/capture harnesses (contain personal paths) — never commit
 .tmp-*
+
+# Docker Compose local overrides — personal host paths, merged automatically.
+# The tracked docker-compose.yml carries the inline mount examples.
+docker-compose.override.yml

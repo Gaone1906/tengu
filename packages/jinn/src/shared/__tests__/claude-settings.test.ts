@@ -65,6 +65,30 @@ describe("claude-settings", () => {
     expect(fs.readFileSync(backup, "utf-8")).toBe(original);
   });
 
+  it("seedTrust does not accept bypass-permissions consent for a host user", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "home-"));
+    const claudeJson = path.join(home, ".claude.json");
+    const projectDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "proj-")));
+    fs.writeFileSync(claudeJson, JSON.stringify({ bypassPermissionsModeAccepted: false }));
+
+    seedTrust(claudeJson, projectDir);
+
+    expect(JSON.parse(fs.readFileSync(claudeJson, "utf-8")).bypassPermissionsModeAccepted).toBe(false);
+  });
+
+  it("seedTrust creates the config directory when it does not exist yet", () => {
+    // Under CLAUDE_CONFIG_DIR the target is a directory Claude Code may not have
+    // created yet — unlike the old os.homedir() target. An ENOENT here is swallowed
+    // by the caller and leaves project trust unseeded.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "home-"));
+    const claudeJson = path.join(root, "not-created-yet", ".claude.json");
+    const projectDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "proj-")));
+    seedTrust(claudeJson, projectDir);
+    const data = JSON.parse(fs.readFileSync(claudeJson, "utf-8"));
+    expect(data.projects[projectDir].hasTrustDialogAccepted).toBe(true);
+    expect(data.bypassPermissionsModeAccepted).toBeUndefined();
+  });
+
   it("seedTrust does not create a backup when ~/.claude.json doesn't exist yet", () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "home-"));
     const claudeJson = path.join(home, ".claude.json");

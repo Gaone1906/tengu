@@ -7,7 +7,7 @@ import { CONFIG_PATH, PID_FILE, GATEWAY_INFO_FILE, JINN_HOME, JINN_HOME_IDENTITY
 import { logger } from "../shared/logger.js";
 import type { JinnConfig } from "../shared/types.js";
 import { startGateway } from "./server.js";
-import { loadConfig } from "../shared/config.js";
+import { loadConfig, gatewayEnvOverrides, gatewayFileBinding } from "../shared/config.js";
 import { gatewayBaseUrl, readGatewayInfo } from "./gateway-info.js";
 import { ensureGatewayAuthToken } from "./auth.js";
 import { buildRestartEntryArgv } from "./restart-entry-options.js";
@@ -83,7 +83,14 @@ export interface RestartDetachedOptions extends LifecycleKillOptions {
   port?: number;
 }
 
+export const CONTAINER_RESTART_UNSUPPORTED_MESSAGE =
+  "Gateway self-restart is unsupported inside Docker; use docker compose restart jinn instead.";
+
 export function restartDetached(options: RestartDetachedOptions = {}): void {
+  if (process.env.JINN_CONTAINER === "1") {
+    throw new Error(CONTAINER_RESTART_UNSUPPORTED_MESSAGE);
+  }
+  assertContainerTakeoverSafe(options);
   const loadedConfig = loadConfig();
   const port = options.port ?? loadedConfig.gateway.port ?? 7777;
   const config: JinnConfig = {
@@ -127,6 +134,8 @@ export function buildGatewayChildEnv(
     ...env,
     JINN_HOME,
     JINN_HOME_IDENTITY,
+    JINN_HOST: host,
+    JINN_PORT: String(port),
     JINN_GATEWAY_URL: gatewayBaseUrl({ port, host }),
     JINN_GATEWAY_TOKEN: ensureGatewayAuthToken(JINN_HOME),
   };
@@ -190,6 +199,21 @@ export class PortOwnershipError extends Error {
   }
 }
 
+export class UnsafeContainerTakeoverError extends Error {
+  constructor() {
+    super(
+      "--take-port is disabled inside Docker because one-off commands use the shared container home and Claude volume. Stop the container, or run the other instance in its own container with dedicated volumes and a published port.",
+    );
+    this.name = "UnsafeContainerTakeoverError";
+  }
+}
+
+function assertContainerTakeoverSafe(options: LifecycleKillOptions): void {
+  if (options.takePort && process.env.JINN_CONTAINER === "1") {
+    throw new UnsafeContainerTakeoverError();
+  }
+}
+
 export function formatPortOwnedByAnotherInstanceError(port: number, ownerJinnHome: string): string {
   return `port ${port} is owned by another jinn instance (JINN_HOME=${ownerJinnHome}); change this instance's port in ${CONFIG_PATH}, or pass --take-port to override.`;
 }
@@ -204,6 +228,7 @@ export function shouldSignalPidFileProcess(
 }
 
 export function assertPortTakeoverAllowed(port: number, options: LifecycleKillOptions = {}): void {
+  assertContainerTakeoverSafe(options);
   if (options.takePort) return;
 
   const portOwner = lookupPidOnPort(port);
@@ -270,11 +295,9 @@ function assertPidBelongsToThisInstance(
   // would refuse to stop/restart our own gateway.
   //
   // gateway.json lives inside THIS home and records the running gateway's own
-  // pid, so a match is proof of ownership. Note gateway.pid is NOT usable here:
-  // only startDaemon() writes it, so it is absent in exactly the broken case.
-  //
-  // Consulted only when the env did NOT name a different home, so a genuinely
-  // foreign instance is still refused; the port check kills the recycled-pid case.
+  // pid, so a match is the established foreground ownership fallback. It is
+  // consulted only when the process environment did not name a different home;
+  // port ownership was already verified by the caller.
   if (owner.status !== "found") {
     const info = readGatewayInfo(GATEWAY_INFO_FILE);
     if (info && info.pid === pid && info.port === port) return;
@@ -294,6 +317,7 @@ function pidIsAlive(pid: number): boolean {
 }
 
 function signalGateway(port?: number, options: LifecycleKillOptions = {}): number | null {
+  assertContainerTakeoverSafe(options);
   const targetPort = port ?? resolvePort();
 
   // Try PID file first
@@ -455,6 +479,33 @@ function resolveHost(): string {
   } catch {
     return "127.0.0.1";
   }
+}
+
+export interface LocalGatewayConnection {
+  host?: string;
+  port: number;
+  token?: string;
+}
+
+/**
+ * Local CLI commands use the durable instance config plus the supported process
+ * environment overrides for routing. gateway.json contributes only the bearer
+ * credential: its host, port, pid, and URL are ephemeral runtime metadata and
+ * never override the configured endpoint.
+ */
+export function resolveLocalGatewayConnection(
+  home: string,
+  registryPort = 7777,
+  env: NodeJS.ProcessEnv = process.env,
+): LocalGatewayConnection {
+  const recorded = readGatewayInfo(path.join(home, "gateway.json"));
+  const onFile = gatewayFileBinding(path.join(home, "config.yaml"));
+  const overrides = gatewayEnvOverrides(env);
+  return {
+    port: overrides.port ?? onFile.port ?? registryPort,
+    host: overrides.host ?? onFile.host,
+    token: recorded?.token,
+  };
 }
 
 function lsofListenerHost(name: string): string {

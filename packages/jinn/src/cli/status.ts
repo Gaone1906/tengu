@@ -1,5 +1,5 @@
-import { getStatus } from "../gateway/lifecycle.js";
-import { loadConfig } from "../shared/config.js";
+import { getStatus, resolveLocalGatewayConnection } from "../gateway/lifecycle.js";
+import { gatewayBaseUrl } from "../gateway/gateway-info.js";
 import { JINN_HOME, PID_FILE } from "../shared/paths.js";
 import fs from "node:fs";
 
@@ -35,14 +35,15 @@ export async function runStatus(): Promise<void> {
     // ignore
   }
 
-  // Try to get live stats from the gateway
+  // Try to get live stats from the gateway. gatewayBaseUrl rather than concatenation
+  // because gateway.host is a BIND address: 0.0.0.0 is routine there and does not
+  // connect on macOS or Windows.
+  const endpoint = resolveLocalGatewayConnection(JINN_HOME);
   try {
-    const config = loadConfig();
-    const url = `http://${config.gateway.host}:${config.gateway.port}/api/status`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(3000) });
+    const res = await fetch(`${gatewayBaseUrl(endpoint)}/api/status`, { signal: AbortSignal.timeout(3000) });
     if (res.ok) {
       const data = await res.json();
-      console.log(`  Port: ${config.gateway.port}`);
+      console.log(`  Port: ${endpoint.port}`);
       if (data.sessions !== undefined) {
         if (typeof data.sessions === "object" && data.sessions && !Array.isArray(data.sessions)) {
           const s = data.sessions as { total?: number; active?: number; running?: number };
@@ -60,11 +61,6 @@ export async function runStatus(): Promise<void> {
     }
   } catch {
     // Gateway not responding to HTTP, that's fine
-    try {
-      const config = loadConfig();
-      console.log(`  Port: ${config.gateway.port} (not responding to HTTP)`);
-    } catch {
-      // no config
-    }
+    console.log(`  Port: ${endpoint.port} (not responding to HTTP)`);
   }
 }

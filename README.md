@@ -69,6 +69,22 @@ brew install jinn
 jinn setup && jinn start
 ```
 
+Or run it in **Docker**. The engine spawns `claude` with its permission gate disabled, so containerising bounds that to the directories you choose to mount instead of your whole home directory:
+
+```bash
+# First edit docker-compose.yml and uncomment at least one entry under "Project
+# mounts" — without one, /work is empty and the agents have nothing to work on.
+docker compose up -d --build
+docker compose exec jinn claude     # run once, use /login, then quit
+docker compose exec jinn jinn pair  # prints a code for the browser
+```
+
+Then open **[http://localhost:7777](http://localhost:7777)** and enter the code at the pairing prompt. The gateway binds `0.0.0.0` inside the container, so it requires auth, and your browser reaches it through Docker's NAT rather than loopback — which is why pairing replaces the automatic sign-in a host install gets.
+
+The compose image runs one Jinn instance. Additional instances need separate containers, dedicated Jinn/Claude volumes and separately published ports. The writable blast radius includes those state volumes (OAuth, sessions and plugins), every writable project mount, and unrestricted network egress; see the Docker guide before mounting sensitive data.
+
+The image ships the `claude` engine only. `codex`, `grok` and `hermes` are not included, and neither are `ffmpeg`/`whisper-cli` for speech-to-text — the same as a Homebrew or npm install, which leave those to you. See **[docs/docker.md](docs/docker.md)** for the mount model, what persists across upgrades, how to add speech-to-text, and what the isolation does and does not cover.
+
 > **`--version` ≠ signed in.** Jinn drives the official engine CLIs, so authenticate each one *before* `jinn start` (run `claude` → `/login`, run `codex` to sign in, and so on). Without this, sessions can't reach the models - the most common fresh-install gotcha.
 
 Everyday commands:
@@ -337,7 +353,7 @@ On deck:
 
 - **Engines** - local models (Ollama / llama.cpp), engine fallback chains.
 - **Connectors** - iMessage and email (IMAP/SMTP).
-- **Platform** - installable plugins, multi-user roles, and a Docker image.
+- **Platform** - installable plugins and multi-user roles.
 
 Want to suggest something? [Open an issue](https://github.com/hristo2612/jinn/issues).
 

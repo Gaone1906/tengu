@@ -1,8 +1,8 @@
 import fs from "node:fs";
-import { gatewayBaseUrl, readGatewayInfo } from "../gateway/gateway-info.js";
+import { gatewayBaseUrl } from "../gateway/gateway-info.js";
+import { resolveLocalGatewayConnection } from "../gateway/lifecycle.js";
 import { describeWorkflowIssues, parseWorkflowIssues, type WorkflowValidationIssue } from "../workflows/issues.js";
-import { loadConfig } from "../shared/config.js";
-import { GATEWAY_INFO_FILE, JINN_HOME } from "../shared/paths.js";
+import { JINN_HOME } from "../shared/paths.js";
 
 type JsonOptions = { json?: boolean };
 type Method = "GET" | "POST" | "PUT";
@@ -50,11 +50,9 @@ export async function requestWorkflow(options: WorkflowRequestOptions): Promise<
 }
 
 function connection(): { baseUrl: string; token: string } {
-  const info = readGatewayInfo(GATEWAY_INFO_FILE);
-  let port = info?.port ?? 7777; let host = info?.host;
-  try { const config = loadConfig(); port = info?.port ?? config.gateway.port; host = info?.host ?? config.gateway.host; } catch { /* gateway info is sufficient */ }
-  if (!info?.token) throw new Error("Gateway auth token was not found. Start Jinn first, then retry.");
-  return { baseUrl: gatewayBaseUrl({ port, host }), token: info.token };
+  const info = resolveLocalGatewayConnection(JINN_HOME);
+  if (!info.token) throw new Error("Gateway auth token was not found. Start Jinn first, then retry.");
+  return { baseUrl: gatewayBaseUrl(info), token: info.token };
 }
 
 function fileObject(file: string): Record<string, unknown> {

@@ -7,9 +7,9 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import YAML from "yaml";
 import { cloneCurrentTailscaleServe, type AccessProvisionResult, type ExecFileFn } from "./access.js";
 import { ensureGatewayAuthToken } from "../gateway/auth.js";
+import { patchConfigFile, ConfigDocumentError } from "../shared/config-document.js";
 import {
   loadInstances,
   saveInstances,
@@ -47,6 +47,13 @@ export interface CreateInstanceDependencies extends DirectoryOptions {
   waitForHealth?: (port: number) => Promise<boolean>;
   provisionAccess?: (options: { currentPort: number; newPort: number }) => Promise<AccessProvisionResult>;
   now?: () => Date;
+}
+
+export function assertSecondaryInstancesSupported(env: NodeJS.ProcessEnv = process.env): void {
+  if (env.JINN_CONTAINER !== "1") return;
+  throw new Error(
+    "The Docker image supports one Jinn instance. Run each additional instance in its own container with dedicated jinn-home and jinn-claude volumes and a separately published port.",
+  );
 }
 
 export function normalizeWorkspaceName(input: string): NormalizedWorkspaceName {
@@ -133,13 +140,17 @@ function patchWorkspaceConfig(
 ): void {
   const configPath = path.join(home, "config.yaml");
   if (!fs.existsSync(configPath)) throw new Error(`Setup did not create ${configPath}`);
-  const document = YAML.parseDocument(fs.readFileSync(configPath, "utf8"));
-  if (document.errors.length) throw new Error(`Setup created invalid config.yaml: ${document.errors[0].message}`);
-  document.setIn(["gateway", "port"], port);
-  if (network.gatewayHost?.trim()) document.setIn(["gateway", "host"], network.gatewayHost.trim());
-  if (network.authRequired === true) document.setIn(["gateway", "authRequired"], true);
-  document.setIn(["portal", "companyName"], displayName);
-  fs.writeFileSync(configPath, document.toString({ lineWidth: 0 }), "utf8");
+  try {
+    patchConfigFile(configPath, [
+      { path: ["gateway", "port"], value: port },
+      { path: ["gateway", "host"], value: network.gatewayHost?.trim() || undefined },
+      { path: ["gateway", "authRequired"], value: network.authRequired === true ? true : undefined },
+      { path: ["portal", "companyName"], value: displayName },
+    ]);
+  } catch (err) {
+    if (err instanceof ConfigDocumentError) throw new Error(`Setup created invalid config.yaml: ${err.message}`);
+    throw err;
+  }
   ensureGatewayAuthToken(home);
 }
 
@@ -170,6 +181,7 @@ export async function createInstance(
   input: CreateInstanceInput,
   dependencies: CreateInstanceDependencies = {},
 ): Promise<CreateInstanceResult> {
+  assertSecondaryInstancesSupported();
   const naming = normalizeWorkspaceName(input.name);
   const homeDir = dependencies.homeDir ?? os.homedir();
   const home = path.join(homeDir, naming.homeName);
@@ -193,6 +205,12 @@ export async function createInstance(
     JINN_SETUP_NAME: naming.displayName,
     JINN_NO_OPEN: "1",
   };
+  // JINN_HOST/JINN_PORT name THIS gateway's binding — compose sets JINN_PORT for the
+  // whole service — and the child is a different instance on a port just allocated for
+  // it. Inherited, it starts on ours instead, fails the port-ownership check, and the
+  // rollback below deletes the workspace it had just created.
+  delete childEnv.JINN_HOST;
+  delete childEnv.JINN_PORT;
 
   try {
     await execFile(process.execPath, [cliEntry, "setup"], { env: childEnv, timeout: 120_000 });

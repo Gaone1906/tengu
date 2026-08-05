@@ -1,3 +1,5 @@
+import path from "node:path";
+
 export interface EngineChildEnvOptions {
   scrubClaudeCode?: boolean;
   scrubCodex?: boolean;
@@ -19,6 +21,11 @@ export function buildEngineChildEnv(
     if (shouldScrubEngineChildEnv(key, options, denyExact)) continue;
     if (value !== undefined) env[key] = value;
   }
+  // resolveClaudeConfigDir() resolves this against the GATEWAY's cwd, but engines are
+  // spawned in the session's working directory — so a relative value would send the
+  // child to a different directory than the one the gateway seeded consent flags in
+  // and watches for transcripts. Hand it the path already resolved.
+  if (env.CLAUDE_CONFIG_DIR) env.CLAUDE_CONFIG_DIR = path.resolve(env.CLAUDE_CONFIG_DIR);
   return env;
 }
 

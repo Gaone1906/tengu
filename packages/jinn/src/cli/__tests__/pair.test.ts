@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -9,12 +9,14 @@ import {
   requestPairedDevices,
   requestPairingCode,
   requestUnpairDevice,
+  runPair,
 } from "../pair.js";
 
 describe("pair CLI helpers", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
   });
+  afterEach(() => vi.unstubAllGlobals());
 
   it("completes a loopback filesystem challenge without sending bearer auth", async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-pair-cli-"));
@@ -57,6 +59,92 @@ describe("pair CLI helpers", () => {
       expect(new Headers(init?.headers).has("authorization")).toBe(false);
     }
     expect(fs.existsSync(challengePath)).toBe(false);
+  });
+
+  it("uses the resolved IPv6 loopback endpoint for both pairing requests", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-pair-cli-ipv6-"));
+    const challengeId = "challenge-id-ipv60001";
+    const challengePath = path.join(home, `pair-challenge-${challengeId}`);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        challengeId,
+        nonce: "nonce-value-ipv60001",
+        path: challengePath,
+        expiresAt: "2026-07-14T20:00:10.000Z",
+      }), { status: 200, headers: { "content-type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        code: "ABCD-EFGH-JKLM",
+        expiresAt: "2026-07-14T20:05:00.000Z",
+      }), { status: 200, headers: { "content-type": "application/json" } }));
+
+    await requestPairingCode({
+      port: 7777,
+      host: "::1",
+      jinnHome: home,
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+      "http://[::1]:7777/api/auth/pairing-challenges",
+      "http://[::1]:7777/api/auth/pairing-codes",
+    ]);
+  });
+
+  it("applies JINN_HOST/JINN_PORT over durable config without trusting runtime routing", async () => {
+    const home = process.env.JINN_HOME!;
+    fs.mkdirSync(home, { recursive: true });
+    const configPath = path.join(home, "config.yaml");
+    const gatewayInfoPath = path.join(home, "gateway.json");
+    const priorConfig = fs.existsSync(configPath) ? fs.readFileSync(configPath, "utf-8") : null;
+    const priorGatewayInfo = fs.existsSync(gatewayInfoPath) ? fs.readFileSync(gatewayInfoPath, "utf-8") : null;
+    fs.writeFileSync(
+      configPath,
+      "engines:\n  default: claude\n  claude: {}\ngateway:\n  host: 127.0.0.1\n  port: 7791\n",
+    );
+    fs.writeFileSync(gatewayInfoPath, JSON.stringify({
+      port: 65528,
+      host: "127.0.0.1",
+      pid: process.pid,
+      secret: "stale",
+      token: "stale-pair-bearer",
+    }));
+    const challengeId = "challenge-stale-runtime";
+    const challengePath = path.join(home, `pair-challenge-${challengeId}`);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        challengeId,
+        nonce: "nonce-stale-runtime",
+        path: challengePath,
+        expiresAt: "2026-07-14T20:00:10.000Z",
+      }), { status: 200, headers: { "content-type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        code: "ABCD-EFGH-JKLM",
+        expiresAt: "2026-07-14T20:05:00.000Z",
+      }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const previousHost = process.env.JINN_HOST;
+    const previousPort = process.env.JINN_PORT;
+    process.env.JINN_HOST = "::1";
+    process.env.JINN_PORT = "8891";
+
+    try {
+      await runPair({ json: true });
+
+      expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+        "http://[::1]:8891/api/auth/pairing-challenges",
+        "http://[::1]:8891/api/auth/pairing-codes",
+      ]);
+    } finally {
+      if (previousHost === undefined) delete process.env.JINN_HOST;
+      else process.env.JINN_HOST = previousHost;
+      if (previousPort === undefined) delete process.env.JINN_PORT;
+      else process.env.JINN_PORT = previousPort;
+      if (priorConfig === null) fs.rmSync(configPath, { force: true });
+      else fs.writeFileSync(configPath, priorConfig);
+      if (priorGatewayInfo === null) fs.rmSync(gatewayInfoPath, { force: true });
+      else fs.writeFileSync(gatewayInfoPath, priorGatewayInfo);
+    }
   });
 
   it("cleans up its proof file on failure and refuses a server path outside JINN_HOME", async () => {

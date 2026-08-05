@@ -1,0 +1,57 @@
+# Build outputs and caches are produced inside the image; host copies would bloat
+# the context and risk shipping macOS-built native addons into a Linux image.
+node_modules
+**/node_modules
+dist
+**/dist
+.next
+**/.next
+out
+**/out
+.turbo
+**/.turbo
+*.tsbuildinfo
+
+# Test and E2E artifacts.
+test-results
+playwright-report
+blob-report
+coverage
+**/coverage
+
+# Version control and local editor/tooling state.
+.git
+.gitignore
+.gitattributes
+.github
+.claude
+.agents
+# Untracked by .gitignore too, so `COPY . .` is the only thing standing between a
+# maintainer's IDE state and the published image.
+.idea
+.vscode
+.DS_Store
+**/.DS_Store
+
+# Secrets and local scratch, mirroring .gitignore. Excluding .gitignore itself
+# protects nothing, so these have to be repeated: without them `COPY . .` bakes
+# whatever a maintainer has lying around into the image.
+.env
+.env.local
+packages/jinn/.npmrc
+.worktrees/
+.superpowers/
+.hermes/
+.jinn-*-sprint/
+.tmp-*
+
+# Container definitions do not belong in their own build context; the override
+# additionally carries personal host paths.
+Dockerfile
+.dockerignore
+docker-compose.yml
+docker-compose.override.yml
+
+# Docs are not needed at runtime; the image serves the dashboard, not the repo.
+docs
+CHANGELOG.md

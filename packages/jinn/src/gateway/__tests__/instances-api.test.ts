@@ -132,6 +132,46 @@ describe("workspace instance API", () => {
     });
   });
 
+  // The container's binding must not follow a new workspace into its config.yaml: that
+  // home outlives the container, and a workstation opening it later would bind every
+  // interface. loadConfig() resolves JINN_HOST into the config this handler reads, so
+  // the only way to tell "the user chose this" from "the environment did" is the
+  // variable itself.
+  it("does not copy an environment-resolved gateway.host into a new workspace", async () => {
+    const previous = process.env.JINN_HOST;
+    process.env.JINN_HOST = "0.0.0.0";
+    try {
+      const created: Instance = {
+        id: "new-id",
+        name: "jinn-john",
+        displayName: "John",
+        port: 7788,
+        home: "/workspaces/john",
+        createdAt: "2026-07-20T00:00:00.000Z",
+        pinned: true,
+        accessUrls: { remote: "https://machine.example.ts.net:7788" },
+      };
+      const createWorkspaceInstance = vi.fn(async () => ({ instance: created }));
+      // What loadConfig() hands the gateway inside the container: the resolved binding.
+      const ctx = context({
+        createWorkspaceInstance,
+        issueWorkspacePairingCode: vi.fn(() => "ABCD-EFGH-JKLM"),
+        getConfig: () => ({ gateway: { port: 7801, host: "0.0.0.0", authRequired: true }, engines: { default: "codex" } }),
+      } as unknown as Partial<ApiContext>);
+
+      const capture = responseCapture();
+      await handleApiRequest(request("POST", "/api/instances", { name: "John" }, true), capture.res, ctx);
+
+      expect(capture.status()).toBe(201);
+      expect(createWorkspaceInstance).toHaveBeenCalledWith(
+        expect.objectContaining({ gatewayHost: undefined }),
+      );
+    } finally {
+      if (previous === undefined) delete process.env.JINN_HOST;
+      else process.env.JINN_HOST = previous;
+    }
+  });
+
   it("keeps offline start operator-only and returns the started workspace URL", async () => {
     const started = { ...stoppedLegacy, pinned: true, accessUrls: { remote: "https://machine.example.ts.net:7999" } };
     const startWorkspaceInstance = vi.fn(async () => ({ instance: started }));

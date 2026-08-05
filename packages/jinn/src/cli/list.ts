@@ -1,5 +1,4 @@
 import { loadInstances, ensureDefaultInstance } from "./instances.js";
-import { getStatus } from "../gateway/lifecycle.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -22,7 +21,7 @@ export async function runList(): Promise<void> {
   console.log(`  ${"─".repeat(16)} ${"─".repeat(8)} ${"─".repeat(12)} ${"─".repeat(30)}`);
 
   for (const inst of instances) {
-    // Check if PID file exists and process is alive
+    // Check if PID file exists and process is alive.
     const pidFile = path.join(inst.home, "gateway.pid");
     let status = "stopped";
     if (fs.existsSync(pidFile)) {

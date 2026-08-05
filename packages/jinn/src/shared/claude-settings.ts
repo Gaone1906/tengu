@@ -103,24 +103,19 @@ export function cleanupSessionSettings(dir: string, sessionId: string): void {
 }
 
 /**
- * Idempotently mark a project directory trusted AND complete the global first-run
- * onboarding in the real ~/.claude.json, so the interactive (PTY) `claude` never
- * blocks on a one-time consent dialog.
+ * Idempotently mark a project directory trusted and complete non-destructive global
+ * onboarding in the real ~/.claude.json.
  *
  * Recent Claude Code versions gate the interactive TUI behind blocking first-run
- * prompts: the "Bypass Permissions mode" consent (triggered by
- * --dangerously-skip-permissions) and the "Claude in Chrome (beta)" intro
- * (triggered by --chrome). The InteractiveClaudeEngine launches `claude`
- * interactively with both flags and never sends a keystroke to dismiss the
- * dialogs, so on any install where onboarding is not already complete (fresh,
- * headless/CI, or after a Claude Code upgrade resets onboarding for a new
- * version) every work turn hangs forever before reaching the API. Pre-seeding
- * these flags at gateway boot answers the dialogs up front. See upstream issue #66.
+ * Host startup must not accept Claude Code's Bypass Permissions consent on the user's
+ * behalf. The Docker entrypoint handles that container-only consent explicitly inside
+ * the dedicated Claude volume; this host path only handles ordinary onboarding and
+ * per-project trust. See upstream issue #66.
  */
-export function seedTrust(claudeJsonPath: string, projectDir: string): void {
+export function seedTrust(claudeJsonFile: string, projectDir: string): void {
   const realDir = fs.realpathSync(projectDir);
   let data: any = {};
-  try { data = JSON.parse(fs.readFileSync(claudeJsonPath, "utf-8")); } catch { /* new file */ }
+  try { data = JSON.parse(fs.readFileSync(claudeJsonFile, "utf-8")); } catch { /* new file */ }
   data.projects ??= {};
   const proj = (data.projects[realDir] ??= {});
   const alreadySeeded =
@@ -131,24 +126,28 @@ export function seedTrust(claudeJsonPath: string, projectDir: string): void {
   if (alreadySeeded) return;
   // About to modify the user's real ~/.claude.json — keep a one-time backup of the
   // pre-Jinn original (no timestamped proliferation; first write wins).
-  const backupPath = `${claudeJsonPath}.jinn-backup`;
-  if (fs.existsSync(claudeJsonPath) && !fs.existsSync(backupPath)) {
-    try { fs.copyFileSync(claudeJsonPath, backupPath, fs.constants.COPYFILE_EXCL); } catch { /* best effort */ }
+  const backupPath = `${claudeJsonFile}.jinn-backup`;
+  if (fs.existsSync(claudeJsonFile) && !fs.existsSync(backupPath)) {
+    try { fs.copyFileSync(claudeJsonFile, backupPath, fs.constants.COPYFILE_EXCL); } catch { /* best effort */ }
   }
-  // Global onboarding: dismisses the Bypass Permissions consent
-  // (hasCompletedOnboarding) and the Claude in Chrome (beta) intro
-  // (hasCompletedClaudeInChromeOnboarding) that otherwise block the interactive PTY.
+  // Global onboarding: dismisses the first-run intro (hasCompletedOnboarding) and
+  // the Claude in Chrome (beta) intro (hasCompletedClaudeInChromeOnboarding) that
+  // otherwise block the interactive PTY.
   data.hasCompletedOnboarding = true;
   data.hasCompletedClaudeInChromeOnboarding = true;
   // Per-project trust: dismisses the folder-trust dialog.
   proj.hasTrustDialogAccepted = true;
   proj.hasCompletedProjectOnboarding = true;
   proj.allowedTools ??= [];
-  const tmp = `${claudeJsonPath}.tmp`;
+  // Under CLAUDE_CONFIG_DIR the target directory may not exist yet, unlike the old
+  // os.homedir(); the caller swallows the ENOENT and every turn then hangs on the dialog
+  // this function exists to answer. 0700 because credentials and transcripts land there.
+  fs.mkdirSync(path.dirname(claudeJsonFile), { recursive: true, mode: 0o700 });
+  const tmp = `${claudeJsonFile}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
-  fs.renameSync(tmp, claudeJsonPath);
+  fs.renameSync(tmp, claudeJsonFile);
   // Defensive: ensure the final file has 0o600 even if the target pre-existed
   // with a more permissive mode (rename preserves the destination inode's perms
   // on some platforms / filesystems is not guaranteed — be explicit).
-  fs.chmodSync(claudeJsonPath, 0o600);
+  fs.chmodSync(claudeJsonFile, 0o600);
 }

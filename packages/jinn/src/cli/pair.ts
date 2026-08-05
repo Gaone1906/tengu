@@ -1,9 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
-import { gatewayBaseUrl, readGatewayInfo } from "../gateway/gateway-info.js";
+import { gatewayBaseUrl } from "../gateway/gateway-info.js";
+import { resolveLocalGatewayConnection } from "../gateway/lifecycle.js";
 import { PAIRING_CHALLENGE_FILE_PREFIX } from "../gateway/pairing-challenge.js";
-import { loadConfig } from "../shared/config.js";
-import { GATEWAY_INFO_FILE, JINN_HOME } from "../shared/paths.js";
+import { JINN_HOME } from "../shared/paths.js";
 import { resolveJinnInstance, pairCommandFor } from "../shared/home.js";
 import { loadInstances } from "./instances.js";
 
@@ -49,19 +49,7 @@ interface GatewayRuntimeInfo {
 
 function gatewayRuntimeInfo(): GatewayRuntimeInfo | null {
   if (!fs.existsSync(JINN_HOME)) return null;
-  const info = readGatewayInfo(GATEWAY_INFO_FILE);
-  let configHost: string | undefined;
-  let configPort: number | undefined;
-  try {
-    const config = loadConfig();
-    configHost = config.gateway.host;
-    configPort = config.gateway.port;
-  } catch {
-    // gateway.json is enough for local CLI pairing when config.yaml is temporarily invalid.
-  }
-  const port = info?.port ?? configPort ?? 7777;
-  const host = info?.host ?? configHost;
-  return { port, host, token: info?.token };
+  return resolveLocalGatewayConnection(JINN_HOME);
 }
 
 function gatewayConnection(): { port: number; host?: string; token: string } | null {
@@ -86,6 +74,7 @@ async function jsonOrThrow<T>(res: Response, fallback: string): Promise<T> {
 
 export async function requestPairingCode(opts: {
   port: number;
+  host?: string;
   jinnHome?: string;
   fetchImpl?: typeof fetch;
 }): Promise<PairingCodeResponse> {
@@ -93,7 +82,7 @@ export async function requestPairingCode(opts: {
   const jinnHome = opts.jinnHome ?? JINN_HOME;
   // Pairing challenges are intentionally sent to loopback even when the gateway
   // advertises a wildcard/LAN host. The route also verifies the Host header.
-  const baseUrl = gatewayHttpBase(opts.port);
+  const baseUrl = gatewayHttpBase(opts.port, opts.host);
   const challengeRes = await fetchImpl(`${baseUrl}/api/auth/pairing-challenges`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -232,7 +221,7 @@ export async function runPair(opts: { json?: boolean } = {}): Promise<void> {
 
   const instance = resolveJinnInstance();
   try {
-    const pairing = await requestPairingCode({ port: info.port });
+    const pairing = await requestPairingCode({ port: info.port, host: info.host });
     if (opts.json) {
       console.log(JSON.stringify({ ...pairing, instance }, null, 2));
     } else {

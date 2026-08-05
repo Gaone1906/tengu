@@ -1,19 +1,97 @@
 import fs from "node:fs";
+import net from "node:net";
 import path from "node:path";
-import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import * as workflow from "../workflow.js";
 
 const originalFetch = globalThis.fetch;
 
-beforeAll(() => {
+const server = net.createServer();
+let runtimePort = 0;
+let priorConfig: string | null = null;
+let priorGatewayInfo: string | null = null;
+
+beforeAll(async () => {
   const home = process.env.JINN_HOME!;
   fs.mkdirSync(home, { recursive: true });
-  fs.writeFileSync(path.join(home, "gateway.json"), JSON.stringify({ port: 7812, pid: process.pid, secret: "test", token: "test-token" }));
+  const configPath = path.join(home, "config.yaml");
+  const gatewayInfoPath = path.join(home, "gateway.json");
+  priorConfig = fs.existsSync(configPath) ? fs.readFileSync(configPath, "utf-8") : null;
+  priorGatewayInfo = fs.existsSync(gatewayInfoPath) ? fs.readFileSync(gatewayInfoPath, "utf-8") : null;
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      runtimePort = typeof address === "object" && address ? address.port : 0;
+      resolve();
+    });
+  });
+});
+
+beforeEach(() => {
+  const home = process.env.JINN_HOME!;
+  fs.writeFileSync(
+    path.join(home, "config.yaml"),
+    `engines:\n  default: claude\n  claude: {}\ngateway:\n  host: 127.0.0.1\n  port: ${runtimePort}\n`,
+  );
+  fs.writeFileSync(path.join(home, "gateway.json"), JSON.stringify({
+    port: runtimePort,
+    host: "127.0.0.1",
+    pid: process.pid,
+    secret: "test",
+    token: "test-token",
+  }));
+});
+
+afterAll(async () => {
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  const home = process.env.JINN_HOME!;
+  const configPath = path.join(home, "config.yaml");
+  const gatewayInfoPath = path.join(home, "gateway.json");
+  if (priorConfig === null) fs.rmSync(configPath, { force: true });
+  else fs.writeFileSync(configPath, priorConfig);
+  if (priorGatewayInfo === null) fs.rmSync(gatewayInfoPath, { force: true });
+  else fs.writeFileSync(gatewayInfoPath, priorGatewayInfo);
 });
 
 afterEach(() => { globalThis.fetch = originalFetch; process.exitCode = undefined; vi.restoreAllMocks(); });
 
 describe("Workflow v2 CLI handlers", () => {
+  it("applies JINN_HOST/JINN_PORT over config while ignoring stale runtime routing", async () => {
+    const home = process.env.JINN_HOME!;
+    fs.writeFileSync(
+      path.join(home, "config.yaml"),
+      "engines:\n  default: claude\n  claude: {}\ngateway:\n  host: 127.0.0.1\n  port: 7777\n",
+    );
+    fs.writeFileSync(path.join(home, "gateway.json"), JSON.stringify({
+      port: 65529,
+      host: "127.0.0.1",
+      pid: process.pid,
+      secret: "stale",
+      token: "stale-workflow-bearer",
+    }));
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify([]), { status: 200 })) as unknown as typeof fetch;
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const previousHost = process.env.JINN_HOST;
+    const previousPort = process.env.JINN_PORT;
+    process.env.JINN_HOST = "::1";
+    process.env.JINN_PORT = "8893";
+
+    try {
+      await workflow.listWorkflows();
+
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        "http://[::1]:8893/api/workflows",
+        expect.objectContaining({ headers: expect.objectContaining({ authorization: "Bearer stale-workflow-bearer" }) }),
+      );
+    } finally {
+      if (previousHost === undefined) delete process.env.JINN_HOST;
+      else process.env.JINN_HOST = previousHost;
+      if (previousPort === undefined) delete process.env.JINN_PORT;
+      else process.env.JINN_PORT = previousPort;
+    }
+  });
+
   it("exports one lazy handler for every Task13 command", () => {
     const names = Object.keys(workflow);
     for (const name of [
@@ -66,7 +144,7 @@ describe("Workflow v2 CLI handlers", () => {
     ];
     for (const [invoke, method, route, body] of cases) {
       await invoke();
-      expect(calls.at(-1)).toEqual({ url: `http://127.0.0.1:7812${route}`, method, ...(body === undefined ? {} : { body }) });
+      expect(calls.at(-1)).toEqual({ url: `http://127.0.0.1:${runtimePort}${route}`, method, ...(body === undefined ? {} : { body }) });
     }
   });
 

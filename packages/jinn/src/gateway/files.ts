@@ -8,6 +8,7 @@ import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
 import Busboy from "busboy";
 import { FILES_DIR, UPLOADS_DIR, JINN_HOME } from "../shared/paths.js";
+import { resolveClaudeConfigDir } from "../shared/home.js";
 import { logger } from "../shared/logger.js";
 import { redactText } from "../shared/redact.js";
 import { insertFile, getFile, getSession, listFiles, deleteFile, setFilePath, insertMessage, type FileMeta, type MessageMedia } from "../sessions/registry.js";
@@ -440,12 +441,20 @@ function assessSingleResolvedPath(resolved: string): FileReadAssessment {
   const home = realpathOrResolved(os.homedir());
   const jinnHome = realpathOrResolved(JINN_HOME);
   if (base.startsWith(".env")) return { allowed: false, reason: "Refusing to read environment secret files" };
-  if (/^(?:id_rsa|id_dsa|id_ecdsa|id_ed25519|.*\.pem|.*\.key|auth\.json|credentials(?:\.json)?|token(?:\.json|\.txt)?)$/i.test(base)) {
+  // The leading dot is optional: Claude Code's OAuth token lives in `.credentials.json`,
+  // which an anchored `credentials(\.json)?` never matched.
+  if (/^\.?(?:id_rsa|id_dsa|id_ecdsa|id_ed25519|.*\.pem|.*\.key|auth\.json|credentials(?:\.json)?|token(?:\.json|\.txt)?)$/i.test(base)) {
     return { allowed: false, reason: "Refusing to read private keys or token files" };
   }
   if (isInsidePath(resolved, path.join(home, ".ssh"))) return { allowed: false, reason: "Refusing to read SSH secrets" };
   if (isInsidePath(resolved, path.join(jinnHome, "secrets"))) return { allowed: false, reason: "Refusing to read Jinn secrets" };
-  if (segments.includes(".claude") && base.startsWith("auth")) return { allowed: false, reason: "Refusing to read Claude auth files" };
+  // A literal ".claude" segment covers project-local dirs; the resolved config dir
+  // covers the real one, which CLAUDE_CONFIG_DIR can move anywhere (the container
+  // does exactly that).
+  const claudeConfigDir = realpathOrResolved(resolveClaudeConfigDir());
+  if ((segments.includes(".claude") || isInsidePath(resolved, claudeConfigDir)) && base.startsWith("auth")) {
+    return { allowed: false, reason: "Refusing to read Claude auth files" };
+  }
   if (segments.includes(".codex") && base === "auth.json") return { allowed: false, reason: "Refusing to read Codex auth files" };
   return { allowed: true };
 }

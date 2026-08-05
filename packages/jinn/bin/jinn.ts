@@ -7,6 +7,7 @@ import pkg from "../package.json" with { type: "json" };
 import { assertNativeRuntime, repairNodePtySpawnHelper } from "../src/shared/runtime-guard.js";
 import { loadInstances } from "../src/instances/directory.js";
 import { resolveInstanceHome } from "../src/instances/create.js";
+import { assertContainerPrimaryCommand } from "../src/cli/container-contract.js";
 
 const program = new Command();
 program
@@ -16,7 +17,17 @@ program
   .option("-i, --instance <name>", "Target a specific instance (default: jinn)");
 
 // Pre-parse to set JINN_HOME before any module imports resolve paths
-program.hook("preAction", (thisCommand) => {
+program.hook("preAction", (thisCommand, actionCommand) => {
+  const opts = thisCommand.opts();
+  const command = actionCommand.name();
+  assertContainerPrimaryCommand(command, opts.instance, process.env);
+  if (
+    process.env.JINN_CONTAINER === "1"
+    && process.env._JINN_CONTAINER_SERVICE_START === "1"
+    && (command === "setup" || command === "start")
+  ) {
+    delete process.env._JINN_CONTAINER_SERVICE_START;
+  }
   // Verify the native DB addon loads under this Node BEFORE any command pulls in
   // better-sqlite3, so an ABI mismatch prints one clear instruction instead of a
   // cryptic boot crash. Runs for real commands only (not --version/--help).
@@ -24,7 +35,6 @@ program.hook("preAction", (thisCommand) => {
   // Restore node-pty's spawn-helper exec bit if an --ignore-scripts install
   // (Homebrew's default) left it at 0644. No-op on a healthy install.
   repairNodePtySpawnHelper();
-  const opts = thisCommand.opts();
   if (opts.instance) {
     process.env.JINN_INSTANCE = opts.instance;
     process.env.JINN_HOME = resolveInstanceHome(opts.instance, loadInstances(), os.homedir());

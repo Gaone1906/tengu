@@ -1,9 +1,21 @@
 import fs from "node:fs";
 import crypto from "node:crypto";
 
-export interface GatewayInfo { port: number; host?: string; secret: string; pid: number; token?: string; ptyPids?: number[]; }
+export interface GatewayInfo {
+  port: number;
+  host?: string;
+  url?: string;
+  secret: string;
+  pid: number;
+  token?: string;
+  ptyPids?: number[];
+}
 
-export function staleGatewayPids(info: Partial<GatewayInfo> | null | undefined, currentPid = process.pid): number[] {
+/** Current-main host behavior: runtime PID records are candidates for orphan cleanup. */
+export function staleGatewayPids(
+  info: Partial<GatewayInfo> | null | undefined,
+  currentPid = process.pid,
+): number[] {
   if (!info) return [];
   const candidates = [...(Array.isArray(info.ptyPids) ? info.ptyPids : []), info.pid];
   return candidates.filter((pid): pid is number =>
@@ -11,11 +23,31 @@ export function staleGatewayPids(info: Partial<GatewayInfo> | null | undefined, 
   );
 }
 
-export function writeGatewayInfo(file: string, opts: { port: number; host?: string; pid: number; secret?: string; token?: string }): GatewayInfo {
+/**
+ * Container startup is a separate trust boundary: a persisted PID belongs to a
+ * previous container and must never be signaled. Host startup retains the
+ * established stale-PID cleanup behavior.
+ */
+export function startupGatewayPids(
+  info: Partial<GatewayInfo> | null | undefined,
+  currentPid = process.pid,
+  env: NodeJS.ProcessEnv = process.env,
+): number[] {
+  return env.JINN_CONTAINER === "1" ? [] : staleGatewayPids(info, currentPid);
+}
+
+export function writeGatewayInfo(
+  file: string,
+  opts: { port: number; host?: string; pid: number; secret?: string; token?: string },
+): GatewayInfo {
   const previous = readGatewayInfo(file);
+  const host = opts.host ?? previous?.host;
   const info: GatewayInfo = {
     port: opts.port,
-    host: opts.host ?? previous?.host,
+    host,
+    // Keep the URL for the container healthcheck; it is descriptive output,
+    // never authority used by local CLI commands.
+    url: gatewayBaseUrl({ port: opts.port, host }),
     pid: opts.pid,
     secret: opts.secret ?? previous?.secret ?? crypto.randomBytes(24).toString("hex"),
     token: opts.token ?? previous?.token,
@@ -24,8 +56,6 @@ export function writeGatewayInfo(file: string, opts: { port: number; host?: stri
   const tmp = `${file}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(info, null, 2), { mode: 0o600 });
   fs.renameSync(tmp, file);
-  // rename preserves the temp file's mode, but if the target already existed
-  // with broader permissions some filesystems may not reset them — be explicit.
   fs.chmodSync(file, 0o600);
   return info;
 }
@@ -46,7 +76,10 @@ function formatHttpHost(host: string): string {
   return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
 }
 
-export function gatewayBaseUrl(info: Pick<GatewayInfo, "port" | "host">, fallbackHost?: string): string {
+export function gatewayBaseUrl(
+  info: Pick<GatewayInfo, "port" | "host">,
+  fallbackHost?: string,
+): string {
   const host = isWildcardHost(info.host)
     ? (isWildcardHost(fallbackHost) ? "127.0.0.1" : fallbackHost!)
     : info.host!;

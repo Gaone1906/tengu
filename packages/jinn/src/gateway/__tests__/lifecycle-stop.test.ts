@@ -18,7 +18,7 @@ engines:
   claude: {}
 `);
 
-const { buildGatewayChildEnv, lookupPidOnPort, selectPortOwnerPid, shouldSignalPidFileProcess, stop, stopAndWait } = await import("../lifecycle.js");
+const { assertPortTakeoverAllowed, buildGatewayChildEnv, lookupPidOnPort, selectPortOwnerPid, shouldSignalPidFileProcess, stop, stopAndWait } = await import("../lifecycle.js");
 const { CONFIG_PATH, PID_FILE, GATEWAY_INFO_FILE } = await import("../../shared/paths.js");
 const tmpHomeIdentity = fs.realpathSync.native(tmpHome);
 
@@ -136,6 +136,7 @@ describe("stop / stopAndWait PID-file race", () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
     fs.rmSync(PID_FILE, { force: true });
+    fs.rmSync(GATEWAY_INFO_FILE, { force: true });
   });
 
   itNeedsProcessEnvReads("stop() leaves the PID file in place while the process is still shutting down", async () => {
@@ -146,7 +147,6 @@ describe("stop / stopAndWait PID-file race", () => {
     await waitForListening(port);
     fs.mkdirSync(path.dirname(PID_FILE), { recursive: true });
     fs.writeFileSync(PID_FILE, String(child.pid));
-
     const stopped = stop(port);
     expect(stopped).toBe(true);
     // The fix: no early unlink — a concurrent start/status must keep seeing
@@ -165,7 +165,6 @@ describe("stop / stopAndWait PID-file race", () => {
     await waitForListening(port);
     fs.mkdirSync(path.dirname(PID_FILE), { recursive: true });
     fs.writeFileSync(PID_FILE, String(child.pid));
-
     const stopped = await stopAndWait(port, 5_000);
     expect(stopped).toBe(true);
     // Process must be gone by the time stopAndWait resolves…
@@ -182,7 +181,6 @@ describe("stop / stopAndWait PID-file race", () => {
     await waitForListening(port);
     fs.mkdirSync(path.dirname(PID_FILE), { recursive: true });
     fs.writeFileSync(PID_FILE, String(child.pid));
-
     const stopped = await stopAndWait(port, 200);
     expect(stopped).toBe(true);
     await waitForExit(child);
@@ -196,11 +194,29 @@ describe("stop / stopAndWait PID-file race", () => {
     children.push(child);
     await waitForSpawn(child);
     await waitForListening(port);
-
     const stopped = stop(port);
     expect(stopped).toBe(true);
     await waitForExit(child);
     expect(() => process.kill(child.pid!, 0)).toThrow();
+  });
+
+  itNeedsProcessEnvReads("stop() allows a verified live gateway inside the primary container without incarnation metadata", async () => {
+    const port = await freePort();
+    const child = spawnListeningGatewayChild(port, { sigtermDelayMs: 0, jinnHome: tmpHome });
+    children.push(child);
+    await waitForSpawn(child);
+    await waitForListening(port);
+    fs.rmSync(GATEWAY_INFO_FILE, { force: true });
+
+    const previous = process.env.JINN_CONTAINER;
+    process.env.JINN_CONTAINER = "1";
+    try {
+      expect(stop(port)).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env.JINN_CONTAINER;
+      else process.env.JINN_CONTAINER = previous;
+    }
+    await waitForExit(child);
   });
 
   itNeedsProcessEnvReads("stop() refuses a foreign Jinn owner with a clear remediation error", async () => {
@@ -397,9 +413,21 @@ describe("foreground gateway ownership (no JINN_HOME in env)", () => {
 
     expect(() => stop(port)).toThrow(/owned by another jinn instance/i);
   });
+
 });
 
 describe("shouldSignalPidFileProcess", () => {
+  it("rejects --take-port inside a container sharing the primary home", () => {
+    const previous = process.env.JINN_CONTAINER;
+    process.env.JINN_CONTAINER = "1";
+    try {
+      expect(() => assertPortTakeoverAllowed(7777, { takePort: true })).toThrow(/shared container home/i);
+    } finally {
+      if (previous === undefined) delete process.env.JINN_CONTAINER;
+      else process.env.JINN_CONTAINER = previous;
+    }
+  });
+
   it("prefers the Jinn daemon when a proxy and the gateway both listen on the configured port", () => {
     expect(selectPortOwnerPid([27_247, 43_201], (pid) => pid === 43_201)).toBe(43_201);
   });
@@ -419,6 +447,19 @@ describe("shouldSignalPidFileProcess", () => {
 });
 
 describe("buildGatewayChildEnv", () => {
+  it("passes the selected host and port to detached daemon children", () => {
+    const env = buildGatewayChildEnv({
+      gateway: { port: 8123, host: "::1" },
+      engines: { default: "claude" },
+    } as any, {
+      JINN_HOST: "0.0.0.0",
+      JINN_PORT: "7777",
+    });
+
+    expect(env.JINN_HOST).toBe("::1");
+    expect(env.JINN_PORT).toBe("8123");
+  });
+
   it("overrides stale gateway env from another instance", () => {
     const env = buildGatewayChildEnv({
       gateway: { port: 7789, host: "127.0.0.1" },

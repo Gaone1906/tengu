@@ -1,7 +1,6 @@
 import http from "node:http";
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -38,7 +37,7 @@ import { HermesAcpEngine } from "../engines/hermes-acp.js";
 import { HermesInteractiveEngine } from "../engines/hermes-interactive.js";
 import type { PtyViewEngine } from "../engines/pty-view-engine.js";
 import { HookRegistry } from "./hook-registry.js";
-import { writeGatewayInfo, readGatewayInfo, updateGatewayPtyPids, staleGatewayPids, gatewayBaseUrl } from "./gateway-info.js";
+import { writeGatewayInfo, readGatewayInfo, updateGatewayPtyPids, startupGatewayPids, gatewayBaseUrl } from "./gateway-info.js";
 import { authenticateGatewayRequest, authRequiredForRequest, ensureGatewayAuthToken, shouldRequireGatewayAuth, validateGatewayExposure, verifyGatewayAuth } from "./auth.js";
 import { reconcileWorkItemsOnStartup, startWorkItemReconciler } from "../work-items/reconcile.js";
 import { setTodoLiveEmitter } from "../work-items/live-events.js";
@@ -48,6 +47,7 @@ import { linkSession } from "../work-items/store.js";
 import { parseTodoApprovalRef } from "../workflows/todo-approval-ref.js";
 import { workflowTodoApprovals, workflowTodoLifecycle } from "./workflow-todo-surface.js";
 import { seedTrust, cleanupSessionSettings } from "../shared/claude-settings.js";
+import { claudeJsonPath } from "../shared/home.js";
 import { GATEWAY_INFO_FILE, HOOK_RELAY_SCRIPT, JINN_HOME, CLAUDE_SETTINGS_DIR } from "../shared/paths.js";
 import { enforceOwnerOnlyDirectory, pathIsOwnerOnly } from "../shared/owner-only.js";
 import { handleApiRequest, isSameOriginBrowserRequest, resumePendingWebQueueItems, type ApiContext } from "./api.js";
@@ -615,7 +615,7 @@ export async function startGateway(
   // Reap any orphaned PTYs from a prior crashed run before writing the fresh gateway.json.
   const oldInfo = readGatewayInfo(GATEWAY_INFO_FILE);
   if (oldInfo) {
-    for (const pid of staleGatewayPids(oldInfo)) {
+    for (const pid of startupGatewayPids(oldInfo)) {
       try {
         process.kill(pid, "SIGTERM");
         logger.info(`Reaping stale pid ${pid} from prior gateway`);
@@ -657,7 +657,7 @@ export async function startGateway(
 
   // Seed trust for the Jinn project dir so interactive Claude doesn't prompt.
   try {
-    seedTrust(path.join(os.homedir(), ".claude.json"), JINN_HOME);
+    seedTrust(claudeJsonPath(), JINN_HOME);
   } catch (err) {
     logger.warn(`Failed to seed Claude trust: ${err instanceof Error ? err.message : err}`);
   }

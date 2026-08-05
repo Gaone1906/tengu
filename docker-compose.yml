@@ -1,0 +1,58 @@
+name: jinn
+
+services:
+  jinn:
+    build:
+      context: .
+    image: jinn:local
+    # Private image/entrypoint handshake. `docker compose run ... <command>` replaces
+    # this value, so one-off commands cannot accidentally enter the service boot path.
+    command: ["__jinn_service_start__"]
+
+    # Each session spawns a PTY that spawns its own children; without an init
+    # process those accumulate as zombies.
+    init: true
+
+    # Loopback on the HOST, deliberately: the dashboard authenticates with a shared
+    # gateway token, so publishing on 0.0.0.0 would expose agent control — with the
+    # permission gate disabled — to the whole network. Both sides read JINN_PORT, and so
+    # does the gateway; set it in a .env file beside this one to move them together.
+    ports:
+      - "127.0.0.1:${JINN_PORT:-7777}:${JINN_PORT:-7777}"
+
+    environment:
+      # The container is UTC. Shells do not normally export TZ, so set it here or in
+      # a .env file beside this one; a cron job with no explicit timezone fires in
+      # the container's zone, not yours.
+      TZ: ${TZ:-UTC}
+      JINN_PORT: ${JINN_PORT:-7777}
+
+    volumes:
+      # Writable blast radius: config, secrets, OAuth-adjacent connector state,
+      # session registry/transcripts, paired browsers, cron, workflows and skills.
+      - jinn-home:/home/node/.jinn
+
+      # Writable blast radius: Claude OAuth credentials, sessions/history, plugins,
+      # MCP configuration, skills, agents, commands and .claude.json. The CLI refreshes
+      # its OAuth token in place, so this volume cannot be read-only.
+      - jinn-claude:/home/node/.claude
+
+      # Project mounts. THIS LIST IS THE BLAST RADIUS. At least one is required, or
+      # /work is empty and agents have nothing to work on. Anything here can be
+      # modified or deleted without a prompt, so prefer :ro where you can. Network
+      # egress is unrestricted, so mounted data must also be treated as exfiltratable.
+      # - ${HOME}/code/my-project:/work/my-project
+      # - ${HOME}/code/design-system:/work/design-system:ro
+
+    # Covers a crash and a host reboot. It does NOT cover a gateway that is alive but
+    # no longer serving: Docker's restart policies react to exits, not to health. The
+    # image's HEALTHCHECK is what surfaces that case — watch `docker compose ps`.
+    restart: unless-stopped
+
+    # Headroom only: the gateway arms its own 5s force-exit on SIGTERM
+    # (gateway/lifecycle.ts), so shutdown never actually reaches this.
+    stop_grace_period: 30s
+
+volumes:
+  jinn-home:
+  jinn-claude:

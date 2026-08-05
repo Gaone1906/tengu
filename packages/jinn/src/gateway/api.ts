@@ -124,12 +124,13 @@ import {
   TEMPLATE_MIGRATIONS_DIR,
   resolveHomeIdentity,
 } from "../shared/paths.js";
-import { saveConfigAtomic } from "../shared/config.js";
+import { saveConfigAtomic, gatewayEnvOverrides } from "../shared/config.js";
 import { messageBodyError } from "../shared/message-body.js";
 import { logger } from "../shared/logger.js";
 import { redactText } from "../shared/redact.js";
 import { getSttStatus, downloadModel, transcribe as sttTranscribe, resolveLanguages, WHISPER_LANGUAGES } from "../stt/stt.js";
 import { CODEX_HOMES_DIR, JINN_HOME } from "../shared/paths.js";
+import { resolveClaudeConfigDir } from "../shared/home.js";
 import { resolveEffort } from "../shared/effort.js";
 import { selectClaudeModelFallback } from "../shared/model-fallback.js";
 import { detectRateLimit, rateLimitEngineLabel } from "../shared/rateLimit.js";
@@ -299,7 +300,11 @@ import {
   validateTtsText,
 } from "../talk/tts-stream.js";
 import { onboardingNeeded, applyEngineChoice } from "./onboarding-policy.js";
-import { restartDetached, type RestartDetachedOptions } from "./lifecycle.js";
+import {
+  CONTAINER_RESTART_UNSUPPORTED_MESSAGE,
+  restartDetached,
+  type RestartDetachedOptions,
+} from "./lifecycle.js";
 import { updateSkillContent } from "./skills.js";
 import type { WorkflowService } from "../workflows/service.js";
 import { handleWorkflowApi } from "./workflow-api.js";
@@ -2581,6 +2586,12 @@ export async function handleApiRequest(
     if (method === "POST" && pathname === "/api/system/restart") {
       const auth = authenticateGatewayRequest(req, context.gatewayAuthToken, jinnHome);
       if (!auth.ok) return json(res, { error: auth.reason || "Unauthorized" }, 401);
+      if (process.env.JINN_CONTAINER === "1") {
+        return json(res, {
+          code: "container_restart_unsupported",
+          error: CONTAINER_RESTART_UNSUPPORTED_MESSAGE,
+        }, 409);
+      }
       const requestingSessionId = headerValue(req, "x-jinn-session-id")?.trim();
       if (requestingSessionId) {
         const requestingSession = getSession(requestingSessionId);
@@ -2664,13 +2675,18 @@ export async function handleApiRequest(
       }
       const currentConfig = context.getConfig();
       const currentPort = context.runtimePort ?? currentConfig.gateway.port ?? 7777;
+      // The configured host, not the one JINN_HOST resolved: this goes into the NEW
+      // workspace's config.yaml, and the variable describes this container, not that
+      // home. Undefined leaves the new config's own loopback default alone.
+      const envHost = gatewayEnvOverrides().host;
+      const configuredHost = currentConfig.gateway.host;
       let created: CreateInstanceResult;
       try {
         created = await (context.createWorkspaceInstance ?? createInstance)({
           name: body.name,
           port: body.port as number | undefined,
           currentPort,
-          gatewayHost: currentConfig.gateway.host,
+          gatewayHost: configuredHost === envHost ? undefined : configuredHost,
           authRequired: shouldRequireGatewayAuth(currentConfig),
         });
       } catch (error) {
@@ -6066,17 +6082,37 @@ export async function handleApiRequest(
       if (unknownKeys.length > 0) {
         return badRequest(res, `Unknown config keys: ${unknownKeys.join(", ")}`);
       }
-      // Validate critical field types
+      // Validate critical field types. A value the shape validator would reject must
+      // not reach the file: loadConfig() then throws and the gateway cannot restart.
       if (body.gateway !== undefined) {
-        if (typeof body.gateway !== "object" || Array.isArray(body.gateway)) {
+        if (typeof body.gateway !== "object" || body.gateway === null || Array.isArray(body.gateway)) {
           return badRequest(res, "gateway must be an object");
         }
         if (body.gateway.port !== undefined && typeof body.gateway.port !== "number") {
           return badRequest(res, "gateway.port must be a number");
         }
+        if (body.gateway.host !== undefined && typeof body.gateway.host !== "string") {
+          return badRequest(res, "gateway.host must be a string");
+        }
       }
       if (body.engines !== undefined && (typeof body.engines !== "object" || Array.isArray(body.engines))) {
         return badRequest(res, "engines must be an object");
+      }
+      // GET /api/config serves the EFFECTIVE binding, so the Settings page echoes
+      // JINN_HOST/JINN_PORT back with every unrelated edit; saveConfigAtomic drops those.
+      // A different value is a real edit, and refusing beats accepting a no-op.
+      const envGateway = gatewayEnvOverrides();
+      for (const key of ["host", "port"] as const) {
+        const override = envGateway[key];
+        if (override === undefined || body.gateway?.[key] === undefined) continue;
+        if (body.gateway[key] !== override) {
+          const variable = key === "host" ? "JINN_HOST" : "JINN_PORT";
+          return badRequest(
+            res,
+            `gateway.${key} is set to ${JSON.stringify(override)} by ${variable} in this environment and cannot be ` +
+            `changed here. Unset ${variable} to manage gateway.${key} from config.yaml.`,
+          );
+        }
       }
       // Deep-merge incoming config with existing config to preserve
       // fields not included in the update (e.g. connector tokens).
@@ -6621,11 +6657,7 @@ interface TranscriptEntry {
 }
 
 function loadRawTranscript(engineSessionId: string): TranscriptEntry[] {
-  const claudeProjectsDir = path.join(
-    process.env.HOME || process.env.USERPROFILE || "",
-    ".claude",
-    "projects",
-  );
+  const claudeProjectsDir = path.join(resolveClaudeConfigDir(), "projects");
   if (!fs.existsSync(claudeProjectsDir)) return [];
 
   const projectDirs = fs.readdirSync(claudeProjectsDir, { withFileTypes: true });
@@ -6738,12 +6770,8 @@ function scheduleTranscriptBackfill(sessionId: string, engineSessionId: string, 
 }
 
 function loadTranscriptMessages(engineSessionId: string): Array<{ role: string; content: string }> {
-  // Claude Code stores transcripts in ~/.claude/projects/<project-key>/<sessionId>.jsonl
-  const claudeProjectsDir = path.join(
-    process.env.HOME || process.env.USERPROFILE || "",
-    ".claude",
-    "projects",
-  );
+  // Claude Code stores transcripts in <config dir>/projects/<project-key>/<sessionId>.jsonl
+  const claudeProjectsDir = path.join(resolveClaudeConfigDir(), "projects");
   if (!fs.existsSync(claudeProjectsDir)) return [];
 
   // Search all project dirs for the transcript

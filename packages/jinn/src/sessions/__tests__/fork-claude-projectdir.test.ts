@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import path from "node:path";
 
 /**
@@ -29,7 +29,18 @@ vi.mock("node:os", async (importOriginal) => {
 import { claudeProjectDir } from "../fork.js";
 
 describe("claudeProjectDir", () => {
-  const base = path.join("/home/test", ".claude", "projects");
+  // Resolved like claudeProjectDir() does, or the expectation misses the drive letter
+  // path.resolve adds on Windows.
+  const base = path.join(path.resolve(path.join("/home/test", ".claude")), "projects");
+
+  // CLAUDE_CONFIG_DIR wins over the mocked homedir, so clear it to keep these
+  // assertions about slugification rather than about the ambient environment.
+  const originalConfigDir = process.env.CLAUDE_CONFIG_DIR;
+  beforeAll(() => { delete process.env.CLAUDE_CONFIG_DIR; });
+  afterAll(() => {
+    if (originalConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = originalConfigDir;
+  });
 
   it("replaces both '/' and '.' with '-' for a dotted cwd (~/.jinn → --jinn)", () => {
     expect(claudeProjectDir("/Users/x/.jinn")).toBe(path.join(base, "-Users-x--jinn"));

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Readable } from "node:stream";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
@@ -6,6 +6,7 @@ const registryMock = vi.hoisted(() => ({
   markRunningQueueItemsCompletedForSession: vi.fn(),
   updateSession: vi.fn(),
 }));
+const previousContainer = process.env.JINN_CONTAINER;
 
 vi.mock("../../sessions/registry.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../sessions/registry.js")>()),
@@ -14,6 +15,10 @@ vi.mock("../../sessions/registry.js", async (importOriginal) => ({
 }));
 
 import { handleApiRequest, type ApiContext } from "../api.js";
+
+beforeEach(() => {
+  delete process.env.JINN_CONTAINER;
+});
 
 function makeReq(
   method: string,
@@ -74,6 +79,11 @@ afterEach(() => {
   registryMock.updateSession.mockReset();
 });
 
+afterAll(() => {
+  if (previousContainer === undefined) delete process.env.JINN_CONTAINER;
+  else process.env.JINN_CONTAINER = previousContainer;
+});
+
 describe("POST /api/system/restart", () => {
   it("requires gateway authentication", async () => {
     const restartGateway = vi.fn();
@@ -102,6 +112,33 @@ describe("POST /api/system/restart", () => {
 
     await vi.runAllTimersAsync();
     expect(restartGateway).toHaveBeenCalledWith({ port: 21877 });
+  });
+
+  it("rejects an authenticated restart inside Docker without scheduling the detached helper", async () => {
+    vi.useFakeTimers();
+    const restartGateway = vi.fn();
+    const cap = makeRes();
+    const previous = process.env.JINN_CONTAINER;
+    process.env.JINN_CONTAINER = "1";
+
+    try {
+      await handleApiRequest(
+        makeReq("POST", "/api/system/restart", { authorization: "Bearer gateway-token" }),
+        cap.res,
+        ctx(restartGateway),
+      );
+      await vi.runAllTimersAsync();
+
+      expect(cap.status).toBe(409);
+      expect(cap.body).toEqual({
+        code: "container_restart_unsupported",
+        error: expect.stringMatching(/docker compose restart jinn/i),
+      });
+      expect(restartGateway).not.toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) delete process.env.JINN_CONTAINER;
+      else process.env.JINN_CONTAINER = previous;
+    }
   });
 
   it("completes the requesting session queue item before scheduling restart", async () => {

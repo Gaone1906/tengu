@@ -5,7 +5,7 @@ export async function runStop(port?: number, opts: { takePort?: boolean } = {}):
   try {
     stopped = stop(port, { takePort: opts.takePort });
   } catch (err) {
-    if (err instanceof Error && err.name === "PortOwnershipError") {
+    if (err instanceof Error && (err.name === "PortOwnershipError" || err.name === "UnsafeContainerTakeoverError")) {
       console.error(err.message);
       process.exit(1);
     }

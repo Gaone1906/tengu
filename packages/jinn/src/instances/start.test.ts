@@ -7,6 +7,7 @@ import { startInstance } from "./start.js";
 
 const scratch: string[] = [];
 afterEach(() => {
+  vi.unstubAllEnvs();
   for (const dir of scratch.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -32,6 +33,47 @@ function fixture(): { root: string; registryPath: string; legacyRegistryPath: st
 }
 
 describe("offline workspace start", () => {
+  it("rejects secondary workspace start in the single-instance Docker image", async () => {
+    vi.stubEnv("JINN_CONTAINER", "1");
+    const { registryPath, legacyRegistryPath, instance } = fixture();
+    const execFile = vi.fn(async () => ({ stdout: "", stderr: "" }));
+
+    await expect(startInstance({ instance, currentPort: 7777 }, {
+      registryPath,
+      legacyRegistryPath,
+      execFile,
+      isPortAvailable: async () => true,
+      waitForHealth: async () => true,
+      provisionAccess: async () => ({ status: "not-detected" }),
+    })).rejects.toThrow(/Docker image supports one Jinn instance/i);
+    expect(execFile).not.toHaveBeenCalled();
+  });
+
+  it("does not inherit the primary gateway binding", async () => {
+    vi.stubEnv("JINN_HOST", "0.0.0.0");
+    vi.stubEnv("JINN_PORT", "7777");
+    const { registryPath, legacyRegistryPath, instance } = fixture();
+    const execFile = vi.fn(async (
+      _file: string,
+      _args: string[],
+      _options?: { env?: NodeJS.ProcessEnv },
+    ) => ({ stdout: "", stderr: "" }));
+
+    await startInstance({ instance, currentPort: 7777 }, {
+      registryPath,
+      legacyRegistryPath,
+      cliEntry: "/package/dist/bin/jinn.js",
+      execFile,
+      isPortAvailable: async () => true,
+      waitForHealth: async () => true,
+      provisionAccess: async () => ({ status: "not-detected" }),
+    });
+
+    const childEnv = execFile.mock.calls[0]?.[2]?.env;
+    expect(childEnv?.JINN_HOST).toBeUndefined();
+    expect(childEnv?.JINN_PORT).toBeUndefined();
+  });
+
   it("checks the port, starts the registered home, waits for health, and persists discovered remote access", async () => {
     const { registryPath, legacyRegistryPath, instance } = fixture();
     const execFile = vi.fn(async () => ({ stdout: "", stderr: "" }));
