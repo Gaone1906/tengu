@@ -62,6 +62,28 @@ export interface MigrationMaterializationPlan {
   files: MigrationMaterializationFile[]
 }
 
+export type ServiceRemovalStatus = "removed" | "preserved" | "already-missing"
+
+export interface ServiceRemovalOutcome {
+  version: string
+  path: string
+  status: ServiceRemovalStatus
+  baseSha256: string
+  observedState: "missing" | "file" | "symlink" | "other"
+  observedSha256?: string
+  linkTarget?: string
+  reason?: string
+}
+
+export interface ServiceRemovalReceipt {
+  schemaVersion: 1
+  migrationKey: string
+  reconciledAt: string
+  outcomes: ServiceRemovalOutcome[]
+}
+
+export const SERVICE_REMOVAL_RECEIPT = "service-removal-receipt.json"
+
 interface ManifestRecord {
   path: string
   operation: InstanceMigrationOperation
@@ -282,7 +304,8 @@ function composePrompt(options: {
     `Instance (user-owned): \`${options.instanceHome}\``,
     "",
     "Create and verify the idempotent migration snapshot before editing. Its read-only materialized base and target payloads apply the exact portalName/portalSlug replacements selected by this instance. Compare those materialized payloads byte-for-byte with the current user file; never reverse user text into placeholders or write raw template placeholders into the instance.",
-    "For every record below, perform a three-way comparison: materialized base payload + current customized instance file + materialized target payload. User customizations win over stock defaults. An unresolved placeholder newly introduced by the target, or present in a customized user file, is a conflict that must be preserved/reported and never guessed. A placeholder already present in both base and target may be carried only when the user file equals the materialized base byte-for-byte. Do not delete user content without explicit instruction and backup.",
+    "For every non-remove record below, perform a three-way comparison: materialized base payload + current customized instance file + materialized target payload. User customizations win over stock defaults. An unresolved placeholder newly introduced by the target, or present in a customized user file, is a conflict that must be preserved/reported and never guessed. A placeholder already present in both base and target may be carried only when the user file equals the materialized base byte-for-byte.",
+    "Removal is owned by the Jinn migration service. It synchronously removes only a live regular file whose bytes exactly match the audited materialized base and records a structured service outcome. Do not delete or edit any remove path. If the service preserved a path, leave it untouched and report the conflict; a freeform completion receipt cannot authorize its deletion.",
     "",
   ]
   for (const legacy of options.legacyMigrations) {
@@ -301,12 +324,15 @@ function composePrompt(options: {
     lines.push(`## Migration ${bundle.manifest.version}`, "")
     for (const record of bundle.manifest.files) {
       const planned = options.materialization.files.find((file) => file.version === bundle.manifest.version && file.path === record.path)!
+      const reviewInstruction = record.operation === "remove"
+        ? "- Service removal: do not delete or edit this path. Report the service-owned removed, preserved, or already-missing outcome."
+        : "- Review: merge conservatively, preserve customized content, and record the path as reviewed or explicitly skipped/conflicted."
       lines.push(
         `### \`${record.path}\` (${record.operation})`,
         `- Materialized base payload: ${planned.base ? `\`${path.join(snapshotRoot, planned.base.destinationPath)}\`` : "none"}`,
         `- User file: \`${path.join(options.instanceHome, record.path)}\``,
         `- Materialized target payload: ${planned.target ? `\`${path.join(snapshotRoot, planned.target.destinationPath)}\`` : "none"}`,
-        "- Review: merge conservatively, preserve customized content, and record the path as reviewed or explicitly skipped/conflicted.",
+        reviewInstruction,
         "",
       )
     }
@@ -324,7 +350,7 @@ function composePrompt(options: {
     }, null, 2),
     "```",
     "",
-    "Replace the example entries with the real reviewed and skipped/conflicted paths. Keep either array empty when it has no entries; every manifest path must appear in one of them.",
+    "Replace the example entries with the real reviewed and skipped/conflicted non-remove paths. Keep either array empty when it has no entries; every non-remove manifest path must appear in one of them. Remove paths must not appear in reviewedFiles or skippedItems because only the structured service removal receipt can cover them.",
     `Only then run \`jinn migrate --mark-done ${options.toVersion} --migration-key ${options.migrationKey}\`. Completion is receipt- and snapshot-gated; an engine exit or interrupted session never advances the marker.`,
     "Report changed, preserved, skipped, and conflicted paths.",
   )
@@ -379,4 +405,213 @@ export function getPendingInstanceMigration(options: {
     migrationKey,
     materialization,
   }
+}
+
+interface SnapshotRemovalEntry {
+  path: string
+  state: "missing" | "file" | "symlink"
+}
+
+function serviceRemovalTarget(instanceHome: string, relative: string): string {
+  const safe = safeRelative(relative, "service removal path")
+  const resolved = path.resolve(instanceHome, safe)
+  if (!resolved.startsWith(`${instanceHome}${path.sep}`)) throw new Error(`service removal path escapes the instance: ${relative}`)
+  return resolved
+}
+
+function serviceMaterializedBase(snapshotRoot: string, relative: string): string {
+  const safe = safeRelative(relative, "materialized removal base")
+  const resolved = path.resolve(snapshotRoot, safe)
+  if (!resolved.startsWith(`${snapshotRoot}${path.sep}`)) throw new Error(`materialized removal base escapes the snapshot: ${relative}`)
+  return resolved
+}
+
+function readPreviousServiceRemovalReceipt(receiptPath: string, migrationKey: string): ServiceRemovalReceipt | null {
+  if (!fs.existsSync(receiptPath)) return null
+  let receipt: ServiceRemovalReceipt
+  try { receipt = JSON.parse(fs.readFileSync(receiptPath, "utf8")) as ServiceRemovalReceipt } catch {
+    throw new Error("service-owned removal outcome has an invalid contract")
+  }
+  if (receipt.schemaVersion !== 1 || receipt.migrationKey !== migrationKey || !Array.isArray(receipt.outcomes)) {
+    throw new Error("service-owned removal outcome has an invalid contract")
+  }
+  const seen = new Set<string>()
+  for (const outcome of receipt.outcomes) {
+    const key = `${outcome.version}\0${outcome.path}`
+    if (
+      typeof outcome.version !== "string"
+      || typeof outcome.path !== "string"
+      || !(["removed", "preserved", "already-missing"] as unknown[]).includes(outcome.status)
+      || typeof outcome.baseSha256 !== "string"
+      || seen.has(key)
+    ) throw new Error("service-owned removal outcome has an invalid contract")
+    seen.add(key)
+  }
+  return receipt
+}
+
+function writeServiceRemovalReceipt(receiptPath: string, receipt: ServiceRemovalReceipt): void {
+  const temp = `${receiptPath}.tmp-${process.pid}-${crypto.randomUUID()}`
+  try {
+    fs.writeFileSync(temp, `${JSON.stringify(receipt, null, 2)}\n`, { flag: "wx", mode: 0o600 })
+    fs.renameSync(temp, receiptPath)
+  } finally {
+    fs.rmSync(temp, { force: true })
+  }
+}
+
+/**
+ * Own structured removals in trusted synchronous code. There are deliberately
+ * no callbacks or promises in the live compare/unlink sequence: the service
+ * opens and reads the current regular file, re-checks the same directory entry,
+ * and unlinks it only when those live bytes equal the audited materialized base.
+ */
+export function reconcileServiceOwnedRemovals(options: {
+  instanceHome: string
+  pending: PendingInstanceMigration
+}): ServiceRemovalReceipt {
+  const home = fs.realpathSync(options.instanceHome)
+  const migrationKey = options.pending.migrationKey
+  if (!options.pending.required || !migrationKey || !/^[a-f0-9]{64}$/.test(migrationKey)) {
+    throw new Error("service-owned removal requires a pending migration key")
+  }
+  const removals = options.pending.materialization?.files.filter((file) => file.operation === "remove") ?? []
+  const changedRemovalPaths = new Set(options.pending.changedFiles.filter((file) => file.operation === "remove").map((file) => file.path))
+  if (changedRemovalPaths.size > 0 && removals.length === 0) {
+    throw new Error("service-owned removal requires structured materialization")
+  }
+  const snapshotRoot = path.join(home, ".migration-snapshots", migrationKey)
+  const snapshot = JSON.parse(fs.readFileSync(path.join(snapshotRoot, "snapshot.json"), "utf8")) as { files?: SnapshotRemovalEntry[] }
+  const snapshotEntries = new Map((snapshot.files ?? []).map((entry) => [entry.path, entry]))
+  const receiptPath = path.join(snapshotRoot, SERVICE_REMOVAL_RECEIPT)
+  const previous = readPreviousServiceRemovalReceipt(receiptPath, migrationKey)
+  const previousByOperation = new Map((previous?.outcomes ?? []).map((outcome) => [`${outcome.version}\0${outcome.path}`, outcome]))
+  const outcomes: ServiceRemovalOutcome[] = []
+
+  for (const operation of removals) {
+    if (!operation.base) throw new Error(`service-owned removal is missing a materialized base: ${operation.path}`)
+    const targetPath = serviceRemovalTarget(home, operation.path)
+    const basePath = serviceMaterializedBase(snapshotRoot, operation.base.destinationPath)
+    const baseStat = fs.lstatSync(basePath)
+    if (!baseStat.isFile()) throw new Error(`service-owned removal base is not a regular file: ${operation.path}`)
+    const baseBytes = fs.readFileSync(basePath)
+    const baseSha256 = sha256(baseBytes)
+    const operationKey = `${operation.version}\0${operation.path}`
+    const prior = previousByOperation.get(operationKey)
+    if (prior && prior.baseSha256 !== baseSha256) {
+      throw new Error(`service-owned removal base changed after reconciliation: ${operation.path}`)
+    }
+    const current = fs.lstatSync(targetPath, { throwIfNoEntry: false })
+
+    if (!current) {
+      if (prior?.status === "preserved") {
+        throw new Error(`service-preserved removal target disappeared before completion: ${operation.path}`)
+      }
+      if (prior?.status === "removed" || prior?.status === "already-missing") {
+        outcomes.push(prior)
+        continue
+      }
+      if (snapshotEntries.get(operation.path)?.state !== "missing") {
+        throw new Error(`service-owned removal outcome is required before accepting deletion of ${operation.path}`)
+      }
+      outcomes.push({
+        version: operation.version,
+        path: operation.path,
+        status: "already-missing",
+        baseSha256,
+        observedState: "missing",
+        reason: "target was absent in both the audited snapshot and service reconciliation",
+      })
+      continue
+    }
+
+    // Preservation is terminal for this migration. A later retry may verify
+    // that the same conflict is still present, but it must never reinterpret
+    // newly changed bytes as stock and turn an earlier preserve into a delete.
+    if (prior?.status === "preserved") {
+      let unchanged = false
+      if (current.isFile() && prior.observedState === "file" && prior.observedSha256) {
+        const fd = fs.openSync(targetPath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0))
+        try {
+          unchanged = sha256(fs.readFileSync(fd)) === prior.observedSha256
+        } finally {
+          fs.closeSync(fd)
+        }
+      } else if (current.isSymbolicLink() && prior.observedState === "symlink") {
+        unchanged = fs.readlinkSync(targetPath) === prior.linkTarget
+      } else if (!current.isFile() && !current.isSymbolicLink() && prior.observedState === "other") {
+        unchanged = true
+      }
+      if (!unchanged) throw new Error(`service-preserved removal target changed before completion: ${operation.path}`)
+      outcomes.push(prior)
+      continue
+    }
+
+    if (!current.isFile()) {
+      outcomes.push({
+        version: operation.version,
+        path: operation.path,
+        status: "preserved",
+        baseSha256,
+        observedState: current.isSymbolicLink() ? "symlink" : "other",
+        ...(current.isSymbolicLink() ? { linkTarget: fs.readlinkSync(targetPath) } : {}),
+        reason: "live target is not a regular file",
+      })
+      continue
+    }
+
+    const fd = fs.openSync(targetPath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0))
+    let liveBytes: Buffer
+    let opened: fs.Stats
+    try {
+      opened = fs.fstatSync(fd)
+      if (!opened.isFile()) throw new Error(`service-owned removal target changed type during comparison: ${operation.path}`)
+      liveBytes = fs.readFileSync(fd)
+    } finally {
+      fs.closeSync(fd)
+    }
+    const liveSha256 = sha256(liveBytes)
+    if (!liveBytes.equals(baseBytes)) {
+      outcomes.push({
+        version: operation.version,
+        path: operation.path,
+        status: "preserved",
+        baseSha256,
+        observedState: "file",
+        observedSha256: liveSha256,
+        reason: "live bytes differ from the audited materialized base",
+      })
+      continue
+    }
+
+    const immediatelyBeforeUnlink = fs.lstatSync(targetPath, { throwIfNoEntry: false })
+    if (
+      !immediatelyBeforeUnlink?.isFile()
+      || immediatelyBeforeUnlink.dev !== opened.dev
+      || immediatelyBeforeUnlink.ino !== opened.ino
+      || immediatelyBeforeUnlink.size !== opened.size
+      || immediatelyBeforeUnlink.mtimeMs !== opened.mtimeMs
+    ) {
+      throw new Error(`service-owned removal target changed during comparison: ${operation.path}`)
+    }
+    fs.unlinkSync(targetPath)
+    outcomes.push({
+      version: operation.version,
+      path: operation.path,
+      status: "removed",
+      baseSha256,
+      observedState: "file",
+      observedSha256: liveSha256,
+      reason: "live bytes exactly matched the audited materialized base",
+    })
+  }
+
+  const receipt: ServiceRemovalReceipt = {
+    schemaVersion: 1,
+    migrationKey,
+    reconciledAt: new Date().toISOString(),
+    outcomes,
+  }
+  if (removals.length > 0) writeServiceRemovalReceipt(receiptPath, receipt)
+  return receipt
 }

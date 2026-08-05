@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.29.1] - 2026-08-03
+
+### 💥 Removed / Not supported
+- **The hands-free Talk voice orchestrator is retired.** Its HTTP routes and dashboard screens were removed in earlier releases, and new installs no longer receive a `talk/` persona that points agents at those retired endpoints. The graph, attachment wakeups, voice persona, mute state, card protocol, and automatic Talk speech are gone. Historical Talk sessions, transcripts, and child links remain visible through the normal session APIs and resume as ordinary web turns. The migration removes only unchanged stock files from `~/.jinn/talk/`; a customized copy is preserved and marked skipped/conflicted. Read-aloud in chat is unaffected: `/api/tts` and Kokoro ship unchanged, as does push-to-talk dictation. `talk.kokoro` still round-trips, and the ignored `talk.enabled`, `talk.engine`, and `talk.orchestratorModel` fields remain optional and deprecated for patch-release source compatibility.
+
 ## [0.29.0] - 2026-07-28
 
 ### ✨ Features

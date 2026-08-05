@@ -4,6 +4,24 @@ import os from "node:os";
 import path from "node:path";
 import yaml from "js-yaml";
 import { normalizeClaudeEngineConfig, validateConfigShape } from "../config.js";
+import type { JinnConfig } from "../types.js";
+
+describe("deprecated Talk configuration compatibility", () => {
+  it("keeps the retired orchestrator keys source-compatible for patch upgrades", () => {
+    const legacyTalkConfig = {
+      enabled: false,
+      engine: "claude",
+      orchestratorModel: "sonnet",
+      kokoro: { voice: "af_heart" },
+    } satisfies NonNullable<JinnConfig["talk"]>;
+
+    expect(legacyTalkConfig).toMatchObject({
+      enabled: false,
+      engine: "claude",
+      orchestratorModel: "sonnet",
+    });
+  });
+});
 
 describe("normalizeClaudeEngineConfig", () => {
   it("applies the maxLivePtys default", () => {

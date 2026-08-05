@@ -188,6 +188,36 @@ describe("handleRateLimit — wait cancellation", () => {
     expect(retryEngine.run).toHaveBeenCalledWith(expect.objectContaining({ platformContextRefresh: refresh }));
   });
 
+  it("retries a historical Talk session through the generic web runtime", async () => {
+    vi.useFakeTimers();
+    engineAvailableMock.mockReturnValue(false);
+    vi.mocked(computeNextRetryDelayMs).mockReturnValue({ delayMs: 0, resumeAt: undefined });
+    vi.mocked(computeRateLimitDeadlineMs).mockReturnValue(Date.now() + 60_000);
+    const historical = makeSession({
+      source: "talk",
+      sourceRef: "talk:historical-rate-limit",
+      status: "waiting",
+    });
+    getSessionMock.mockImplementation(() => historical);
+    const retryEngine = { run: vi.fn(async () => ({ result: "retry", sessionId: "claude-thread-1" }) as EngineResult) };
+    const opts = {
+      ...makeOpts(vi.fn()),
+      session: historical,
+      config: {
+        sessions: { rateLimitStrategy: "wait" },
+        engines: { claude: { bin: "claude", model: "opus" } },
+      } as unknown as RateLimitHandlerOpts["config"],
+      engine: retryEngine as unknown as RateLimitHandlerOpts["engine"],
+      hooks: {},
+    } satisfies RateLimitHandlerOpts;
+
+    const outcome = await handleRateLimit(opts);
+
+    expect(outcome.kind).toBe("resumed");
+    expect(retryEngine.run).toHaveBeenCalledWith(expect.objectContaining({ source: "web" }));
+    expect(historical.source).toBe("talk");
+  });
+
   it("labels a Codex limit as Codex without contaminating Claude usage awareness", async () => {
     vi.clearAllMocks();
     engineAvailableMock.mockReturnValue(false);

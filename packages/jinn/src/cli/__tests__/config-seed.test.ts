@@ -17,13 +17,11 @@ describe("fresh-install: template seeding + config guidance", () => {
     expect(source).toMatch(/gateway:\n  port: 7777\n  host: "127\.0\.0\.1"\n  authRequired: true\n/);
   });
 
-  it("ships the AURA voice persona + card-reference sidecar in the template", () => {
-    expect(existsSync(join(TEMPLATE, "talk", "orchestrator-persona.md"))).toBe(true);
-    expect(existsSync(join(TEMPLATE, "talk", "card-reference.md"))).toBe(true);
-  });
-
-  it("seeds template/talk/ into the home during setup", () => {
-    expect(readFileSync(SETUP, "utf-8")).toMatch(/copyTemplateDir\(\s*path\.join\(TEMPLATE_DIR, "talk"\)/);
+  it("does not ship or seed the retired Talk orchestrator templates", () => {
+    const setupSource = readFileSync(SETUP, "utf-8");
+    expect(existsSync(join(TEMPLATE, "talk", "orchestrator-persona.md"))).toBe(false);
+    expect(existsSync(join(TEMPLATE, "talk", "card-reference.md"))).toBe(false);
+    expect(setupSource).not.toMatch(/copyTemplateDir\(\s*path\.join\(TEMPLATE_DIR, ["']talk["']\)/);
   });
 
   it("seeds template/scripts/ into the home during setup", () => {
@@ -75,19 +73,5 @@ describe("fresh-install: template seeding + config guidance", () => {
 
   it("guides engine authentication after the version probe", () => {
     expect(readFileSync(SETUP, "utf-8")).toMatch(/does NOT mean the engine is logged in/);
-  });
-
-  it("the generic persona carries no maintainer-personal PII", () => {
-    const persona = readFileSync(join(TEMPLATE, "talk", "orchestrator-persona.md"), "utf-8");
-    const maintainerPattern = new RegExp(
-      [
-        ["hris", "to"].join(""),
-        ["kiwi", "labs"].join(""),
-        ["tucker", "@"].join(""),
-        ["Kiwi", " Labs"].join(""),
-      ].join("|"),
-      "i",
-    );
-    expect(persona).not.toMatch(maintainerPattern);
   });
 });

@@ -275,7 +275,7 @@ export function isDirectSession(
 
 // Sources the sidebar renders (others, e.g. slack/telegram, are shown elsewhere).
 export function isVisibleSource(s: Pick<Session, "source">): boolean {
-  return s.source === "web" || s.source === "cron" || s.source === "workflow" || s.source === "whatsapp" || s.source === "discord" || !s.source
+  return s.source === "web" || s.source === "talk" || s.source === "cron" || s.source === "workflow" || s.source === "whatsapp" || s.source === "discord" || !s.source
 }
 
 export function WorkflowSessionChip({

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { buildContext, buildTalkThreadsSection } from "../context.js";
+import { buildContext } from "../context.js";
 import type { Employee, JinnConfig, OrgHierarchy } from "../../shared/types.js";
 
 // These tests lock the CURRENT output of buildContext after the "context hygiene"
@@ -69,22 +69,6 @@ describe("buildContext — employee mode", () => {
     expect(out).toContain("**Rank**: manager");
     // The COO-only anchor wording must NOT appear for an employee.
     expect(out).not.toContain("COO of the user's AI organization");
-  });
-});
-
-describe("buildContext — voice orchestrator persona (source:talk)", () => {
-  const MARKER = "You are AURA, the hands-free voice layer.";
-
-  it("injects the voice persona when voicePersona is provided", () => {
-    const out = buildContext({ ...baseOpts, voicePersona: MARKER });
-    expect(out).toContain(MARKER);
-    // Still keeps the base COO identity (gateway/delegation know-how) underneath.
-    expect(out).toContain("# You are Jinn");
-  });
-
-  it("omits the voice persona for normal sessions", () => {
-    const out = buildContext({ ...baseOpts });
-    expect(out).not.toContain(MARKER);
   });
 });
 
@@ -742,23 +726,5 @@ describe("buildContext — local discovery diet", () => {
       else process.env.HOME = originalHome;
       fs.rmSync(home, { recursive: true, force: true });
     }
-  });
-});
-
-describe("buildTalkThreadsSection", () => {
-  it("renders a compact roster with delegate usage", () => {
-    const s = buildTalkThreadsSection([
-      { id: "abc123", label: "Content pipeline", status: "running", lastActivity: "2026-06-10T08:00:00Z" },
-      { id: "def456", label: "Support order", status: "idle", lastActivity: "2026-06-10T07:00:00Z" },
-    ]);
-    expect(s).toContain("## Your open COO threads");
-    expect(s).toContain("abc123");
-    expect(s).toContain("Content pipeline");
-    expect(s).toContain("running");
-    expect(s).toContain("/api/talk/delegate");
-  });
-  it("returns null for empty/undefined", () => {
-    expect(buildTalkThreadsSection([])).toBeNull();
-    expect(buildTalkThreadsSection(undefined)).toBeNull();
   });
 });

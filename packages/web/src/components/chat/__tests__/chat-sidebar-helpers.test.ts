@@ -30,6 +30,17 @@ describe('chat sidebar grouping helpers', () => {
   })
 })
 
+describe('historical Talk sessions in generic chat discovery', () => {
+  it('keeps Talk provenance visible through the shared sidebar and search source gate', () => {
+    const historical = { id: 'legacy-talk', source: 'talk' }
+    const sidebarRows = [historical].filter(isVisibleSource)
+    const searchRows = [historical].filter(isVisibleSource)
+
+    expect(sidebarRows.map((session) => session.id)).toEqual(['legacy-talk'])
+    expect(searchRows.map((session) => session.id)).toEqual(['legacy-talk'])
+  })
+})
+
 describe('workflow sessions in the chat sidebar', () => {
   it('keeps workflow sessions visible under their employee group and out of direct/focused lanes', () => {
     const session = {

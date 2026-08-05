@@ -303,6 +303,134 @@ describe("SessionManager platform context dispatch", () => {
 });
 
 describe("web API platform context dispatch", () => {
+  it("keeps a historical Talk transcript and children visible while resuming it as a generic web turn", async () => {
+    const runs: EngineRunOpts[] = [];
+    const engine = capturingEngine("codex", runs, () => ({
+      sessionId: "legacy-talk-native",
+      result: "Generic resumed answer",
+    }));
+    const queue = new (await import("../queue.js")).SessionQueue();
+    const config = makeConfig();
+    const context = {
+      config,
+      gatewayBootId: "boot-a",
+      getConfig: () => config,
+      connectors: new Map(),
+      startTime: Date.now(),
+      gatewayAuthToken: "test-token",
+      emit: () => {},
+      sessionManager: {
+        getEngine: () => engine,
+        getEngines: () => new Map([["codex", engine]]),
+        getQueue: () => queue,
+      },
+    } as unknown as import("../../gateway/api.js").ApiContext;
+
+    const historical = registry.createSession({
+      engine: "codex",
+      source: "talk",
+      sourceRef: "talk:historical",
+      connector: "web",
+      sessionKey: "talk:historical",
+      title: "Historical voice session",
+    });
+    registry.recordEngineSessionId(historical.id, "codex", "legacy-talk-native", {
+      model: "model-alpha",
+      effortLevel: "medium",
+    });
+    registry.insertMessage(historical.id, "user", "Old spoken request");
+    registry.insertMessage(historical.id, "assistant", "Old spoken answer");
+    const child = registry.createSession({
+      engine: "codex",
+      source: "web",
+      sourceRef: "web:historical-child",
+      parentSessionId: historical.id,
+      title: "Historical child",
+    });
+
+    const visible = await request(context, "GET", `/api/sessions/${historical.id}`);
+    expect(visible.status).toBe(200);
+    expect(visible.body.source).toBe("talk");
+    expect(visible.body.messages.map((message: { content: string }) => message.content)).toEqual([
+      "Old spoken request",
+      "Old spoken answer",
+    ]);
+    const all = await request(context, "GET", "/api/sessions?limit=0");
+    expect(all.body).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: historical.id, source: "talk" }),
+      expect.objectContaining({ id: child.id, parentSessionId: historical.id }),
+    ]));
+
+    const resumed = await request(context, "POST", `/api/sessions/${historical.id}/message`, {
+      message: "Continue this as an ordinary chat",
+    });
+    expect(resumed.status).toBe(200);
+    await waitForRuns(runs, 1);
+    await waitForStatus(historical.id, "idle");
+    expect(runs[0]).toMatchObject({
+      prompt: "Continue this as an ordinary chat",
+      resumeSessionId: "legacy-talk-native",
+      source: "web",
+    });
+    expect(runs[0].systemPrompt).not.toContain("# Voice mode");
+    expect(runs[0].systemPrompt).not.toContain("/api/talk/");
+    expect(registry.getMessages(historical.id).map((message) => message.content)).toEqual([
+      "Old spoken request",
+      "Old spoken answer",
+      "Continue this as an ordinary chat",
+      "Generic resumed answer",
+    ]);
+  });
+
+  it("replays a historical Talk pending turn after startup through the generic web runtime", async () => {
+    const runs: EngineRunOpts[] = [];
+    const engine = capturingEngine("codex", runs, () => ({
+      sessionId: "legacy-talk-pending-native",
+      result: "Recovered generic answer",
+    }));
+    const queue = new (await import("../queue.js")).SessionQueue();
+    const config = makeConfig();
+    const context = {
+      config,
+      gatewayBootId: "boot-recovery",
+      getConfig: () => config,
+      connectors: new Map(),
+      startTime: Date.now(),
+      gatewayAuthToken: "test-token",
+      emit: () => {},
+      sessionManager: {
+        getEngine: () => engine,
+        getEngines: () => new Map([["codex", engine]]),
+        getQueue: () => queue,
+      },
+    } as unknown as import("../../gateway/api.js").ApiContext;
+    const historical = registry.createSession({
+      engine: "codex",
+      source: "talk",
+      sourceRef: "talk:historical-pending",
+      connector: "web",
+      sessionKey: "talk:historical-pending",
+      title: "Interrupted historical voice session",
+    });
+    registry.recordEngineSessionId(historical.id, "codex", "legacy-talk-pending-native", {
+      model: "model-alpha",
+      effortLevel: "medium",
+    });
+    registry.enqueueQueueItem(historical.id, historical.sessionKey, "Resume pending ordinary chat");
+
+    api.resumePendingWebQueueItems(context);
+
+    await waitForRuns(runs, 1);
+    await waitForStatus(historical.id, "idle");
+    expect(runs[0]).toMatchObject({
+      prompt: "Resume pending ordinary chat",
+      resumeSessionId: "legacy-talk-pending-native",
+      source: "web",
+    });
+    expect(registry.getSession(historical.id)?.source).toBe("talk");
+    expect(registry.listAllPendingQueueItems()).toEqual([]);
+  });
+
   it("keeps a refresh pending when a rate-limit retry fails", async () => {
     const runs: EngineRunOpts[] = [];
     const results: EngineResult[] = [

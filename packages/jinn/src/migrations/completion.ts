@@ -1,7 +1,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import { parseDocument, Scalar, YAMLMap, isScalar } from "yaml"
-import type { PendingInstanceMigration } from "./service.js"
+import { reconcileServiceOwnedRemovals, type PendingInstanceMigration } from "./service.js"
 import { verifyMigrationSnapshot } from "./snapshot.js"
 
 export type StampResult = { ok: true; text: string } | { ok: false; reason: string }
@@ -65,6 +65,7 @@ export function completeInstanceMigration(options: {
     materialization: options.pending.materialization,
   }
   if (!verifyMigrationSnapshot(snapshotOptions)) throw new Error("verified migration snapshot is required")
+  const serviceRemovalReceipt = reconcileServiceOwnedRemovals({ instanceHome: home, pending: options.pending })
   const snapshotDir = path.join(home, ".migration-snapshots", options.pending.migrationKey)
   const receiptPath = path.join(snapshotDir, "completion-receipt.json")
   let receipt: {
@@ -80,7 +81,16 @@ export function completeInstanceMigration(options: {
   }
   const reviewed = new Set(receipt.reviewedFiles.filter((value): value is string => typeof value === "string"))
   const skipped = new Set(receipt.skippedItems.map((value) => typeof value === "string" ? value : value && typeof value === "object" && "path" in value ? String((value as { path: unknown }).path) : ""))
+  const removalPaths = new Set(options.pending.changedFiles.filter((file) => file.operation === "remove").map((file) => file.path))
+  const serviceRemovalPaths = new Set(serviceRemovalReceipt.outcomes.map((outcome) => outcome.path))
   for (const file of options.pending.changedFiles) {
+    if (removalPaths.has(file.path)) {
+      if (!serviceRemovalPaths.has(file.path)) throw new Error(`service-owned removal outcome is required for ${file.path}`)
+      if (reviewed.has(file.path) || skipped.has(file.path)) {
+        throw new Error(`generic completion receipt cannot cover service-owned removal path ${file.path}`)
+      }
+      continue
+    }
     if (!reviewed.has(file.path) && !skipped.has(file.path)) throw new Error(`completion receipt has not reviewed or skipped ${file.path}`)
   }
   const configPath = path.join(home, "config.yaml")

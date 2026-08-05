@@ -27,6 +27,7 @@ import { effortLevelsForModel, engineAvailable, type EngineName } from "../share
 import { computeNextRetryDelayMs, computeRateLimitDeadlineMs, detectRateLimit, rateLimitEngineLabel } from "../shared/rateLimit.js";
 import { recordClaudeRateLimit } from "../shared/usageAwareness.js";
 import { getSession, getMessages, updateSessionForAttempt } from "./registry.js";
+import { runtimeSessionSource } from "./context.js";
 
 const WAIT_CANCEL_POLL_MS = 5000;
 
@@ -355,7 +356,7 @@ export async function handleRateLimit(opts: RateLimitHandlerOpts): Promise<RateL
         resolvedMcp,
         attachments: attachments?.length ? attachments : undefined,
         sessionId: session.id,
-        source: session.source,
+        source: runtimeSessionSource(session.source),
         ...(hooks.onRetryStream ? { onStream: hooks.onRetryStream } : {}),
       });
 
