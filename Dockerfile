@@ -57,10 +57,12 @@ RUN pnpm deploy --legacy --filter=jinn-cli --prod /deploy
 FROM node:24-bookworm-slim AS runtime
 
 # procps/lsof: the gateway inspects its own processes and port ownership.
+# util-linux: flock holds the cross-container service lock on the shared home volume.
 # git: agents work inside mounted repositories.
 # curl: sessions/context.ts tells every agent to reach the gateway with it.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates curl git lsof procps \
+  && apt-get install -y --no-install-recommends ca-certificates curl git lsof procps util-linux \
+  && command -v flock >/dev/null \
   && rm -rf /var/lib/apt/lists/*
 
 # A bind-mounted repo carries its host uid, so on any host not using uid 1000 git

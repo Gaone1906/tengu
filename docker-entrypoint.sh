@@ -15,13 +15,24 @@ export JINN_HOME
 JINN_CONFIG="$JINN_HOME/config.yaml"
 
 # Prepare this instance, then become the gateway. Inside the function, not at the top of
-# the file: `docker compose run --rm jinn jinn status` shares the live service's volumes,
-# and these steps rewrite state the running gateway owns (gateway.json, gateway.pid,
-# .claude.json).
+# the file: one-off containers share the live service's volumes, and these steps rewrite
+# state the running gateway owns (gateway.json, gateway.pid, .claude.json).
 start_gateway() {
-  # Runtime-only proof that this process descends from the entrypoint's private default
-  # service command. It is not in the image environment, so `docker exec jinn start`
-  # cannot launch a second writer; gateway children retain it for legitimate restart.
+  # Keep one inode for the lifetime of the gateway and let the host kernel arbitrate
+  # every container that mounts this home. This shell retains the open fd while it
+  # supervises the gateway, so the lock is released automatically when either exits.
+  # Acquire before setup/docker-configure: both mutate records owned by a live gateway.
+  JINN_GATEWAY_LOCK="$JINN_HOME/gateway.lock"
+  exec 9>>"$JINN_GATEWAY_LOCK"
+  chmod 0600 "$JINN_GATEWAY_LOCK"
+  if ! flock -n 9; then
+    echo "jinn-entrypoint: another gateway already holds the shared-volume lock at $JINN_GATEWAY_LOCK. Use \`docker compose exec jinn ...\` for live inspection or \`docker compose restart jinn\` to restart it." >&2
+    exit 75
+  fi
+
+  # Runtime-only dispatch proof that this process descends from the entrypoint's private
+  # default service command. The CLI consumes it before the handler runs; authority to
+  # mutate the shared service records comes from the kernel lock above, not this marker.
   _JINN_CONTAINER_SERVICE_START=1
   export _JINN_CONTAINER_SERVICE_START
 
@@ -45,9 +56,26 @@ start_gateway() {
   fi
 
   echo "jinn-entrypoint: starting gateway"
-  # Foreground, not --daemon: the daemon detaches and the container would exit.
-  # exec so the gateway receives SIGTERM directly on `docker stop`.
-  exec jinn start "$@"
+  # Foreground, not --daemon: the daemon detaches and the container would exit. Keep
+  # this shell alive as the sole lock owner, close its lock fd in the gateway process,
+  # forward stop signals, and leave as soon as the gateway does. Closing fd 9 in the
+  # child prevents a surviving session descendant from pinning the lock after a crash.
+  jinn start "$@" 9>&- &
+  gateway_pid=$!
+  trap 'kill -TERM "$gateway_pid" 2>/dev/null || true' TERM
+  trap 'kill -INT "$gateway_pid" 2>/dev/null || true' INT
+  trap 'kill -HUP "$gateway_pid" 2>/dev/null || true' HUP
+
+  set +e
+  wait "$gateway_pid"
+  gateway_status=$?
+  while kill -0 "$gateway_pid" 2>/dev/null; do
+    wait "$gateway_pid"
+    gateway_status=$?
+  done
+  set -e
+  trap - TERM INT HUP
+  exit "$gateway_status"
 }
 
 # A command passed to `docker run` / `docker compose run` must REPLACE the gateway,

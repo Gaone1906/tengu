@@ -19,7 +19,15 @@ program
 // Pre-parse to set JINN_HOME before any module imports resolve paths
 program.hook("preAction", (thisCommand, actionCommand) => {
   const opts = thisCommand.opts();
-  assertContainerPrimaryCommand(actionCommand.name(), opts.instance, process.env);
+  const command = actionCommand.name();
+  assertContainerPrimaryCommand(command, opts.instance, process.env);
+  if (
+    process.env.JINN_CONTAINER === "1"
+    && process.env._JINN_CONTAINER_SERVICE_START === "1"
+    && (command === "setup" || command === "start")
+  ) {
+    delete process.env._JINN_CONTAINER_SERVICE_START;
+  }
   // Verify the native DB addon loads under this Node BEFORE any command pulls in
   // better-sqlite3, so an ABI mismatch prints one clear instruction instead of a
   // cryptic boot crash. Runs for real commands only (not --version/--help).

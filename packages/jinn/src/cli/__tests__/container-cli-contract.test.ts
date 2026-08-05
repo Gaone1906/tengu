@@ -62,21 +62,41 @@ afterAll(() => {
 });
 
 describe("container CLI single-instance contract", () => {
-  it("allows the entrypoint's marked service restart against the primary container home", async () => {
+  it.each(["setup", "start"])("allows the entrypoint's marked service %s against the primary container home", async (command) => {
     process.env.JINN_HOME = primaryHome;
     process.env._JINN_CONTAINER_SERVICE_START = "1";
     delete process.env.JINN_INSTANCE;
 
-    await program.parseAsync(["node", "jinn", "restart"]);
+    await program.parseAsync(["node", "jinn", command]);
 
-    expect(handlers.restart).toHaveBeenCalledOnce();
+    expect(handlers[command as "setup" | "start"]).toHaveBeenCalledOnce();
+  });
+
+  it("consumes the service marker before the gateway handler can pass it to children", async () => {
+    process.env.JINN_HOME = primaryHome;
+    process.env._JINN_CONTAINER_SERVICE_START = "1";
+    delete process.env.JINN_INSTANCE;
+
+    await program.parseAsync(["node", "jinn", "start"]);
+
+    expect(handlers.start).toHaveBeenCalledOnce();
+    expect(process.env._JINN_CONTAINER_SERVICE_START).toBeUndefined();
+  });
+
+  it("rejects restart inside a container even with the service marker", async () => {
+    process.env.JINN_HOME = primaryHome;
+    process.env._JINN_CONTAINER_SERVICE_START = "1";
+    delete process.env.JINN_INSTANCE;
+
+    await expect(program.parseAsync(["node", "jinn", "restart"])).rejects.toThrow(/docker compose restart|container restart/i);
+    expect(handlers.restart).not.toHaveBeenCalled();
   });
 
   it.each(["setup", "start", "restart"])("rejects docker exec jinn %s without the private service marker", async (command) => {
     process.env.JINN_HOME = primaryHome;
     delete process.env.JINN_INSTANCE;
 
-    await expect(program.parseAsync(["node", "jinn", command])).rejects.toThrow(/service start|already-running|container service/i);
+    await expect(program.parseAsync(["node", "jinn", command])).rejects.toThrow(/service start|already-running|container service|docker compose restart/i);
     expect(handlers[command as keyof typeof handlers]).not.toHaveBeenCalled();
   });
 
@@ -110,7 +130,7 @@ describe("container CLI single-instance contract", () => {
     process.env.JINN_HOME = alternateHome;
     delete process.env.JINN_INSTANCE;
 
-    await expect(program.parseAsync(["node", "jinn", "restart"])).rejects.toThrow(/one Jinn instance|primary container home/i);
+    await expect(program.parseAsync(["node", "jinn", "restart"])).rejects.toThrow(/docker compose restart|container restart/i);
     expect(handlers.restart).not.toHaveBeenCalled();
   });
 
@@ -119,7 +139,7 @@ describe("container CLI single-instance contract", () => {
     process.env.JINN_HOME = primaryHome;
     delete process.env.JINN_INSTANCE;
 
-    await expect(program.parseAsync(["node", "jinn", "-i", "alternate", "restart"])).rejects.toThrow(/one Jinn instance|primary container home/i);
+    await expect(program.parseAsync(["node", "jinn", "-i", "alternate", "restart"])).rejects.toThrow(/docker compose restart|container restart/i);
     expect(handlers.restart).not.toHaveBeenCalled();
   });
 });

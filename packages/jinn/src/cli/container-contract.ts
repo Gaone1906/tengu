@@ -19,9 +19,16 @@ export function assertContainerPrimaryCommand(
 ): void {
   if (env.JINN_CONTAINER !== "1" || !["setup", "start", "restart"].includes(command)) return;
 
+  if (command === "restart") {
+    throw new Error(
+      "jinn restart is disabled inside Docker because an internal self-restart would release "
+      + "the service lock before its replacement owns it. Use docker compose restart jinn instead.",
+    );
+  }
+
   if (env._JINN_CONTAINER_SERVICE_START !== "1") {
     throw new Error(
-      "Only the marked container service start may run setup/start/restart at the primary container home. "
+      "Only the marked container service start may run setup/start at the primary container home. "
       + "Use docker compose up/restart for the service; docker compose run and docker exec are one-off command paths.",
     );
   }
@@ -38,7 +45,7 @@ export function assertContainerPrimaryCommand(
 
   throw new Error(
     "The Docker image supports one Jinn instance at its primary container home. "
-    + "Do not retarget setup/start/restart with -i, JINN_INSTANCE, or JINN_HOME; run another instance "
+    + "Do not retarget setup/start with -i, JINN_INSTANCE, or JINN_HOME; run another instance "
     + "in its own container with dedicated Jinn/Claude volumes and a separately published port.",
   );
 }
