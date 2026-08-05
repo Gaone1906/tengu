@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import { MemoryRouter, Route, Routes } from "react-router-dom"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import type {
@@ -129,6 +129,14 @@ function imageAttachment(
     uploadedBy: "operator",
     createdAt: "2026-07-22T08:00:00.000Z",
   }
+}
+
+function videoAttachment(
+  id: string,
+  filename: string,
+  commentId: string | null = null,
+): WorkItemAttachmentWire {
+  return { ...imageAttachment(id, filename, commentId), mime: "video/mp4" }
 }
 
 function renderTask(path = "/todos/PLA-12") {
@@ -321,6 +329,33 @@ describe("relations", () => {
 })
 
 describe("attachments + activity", () => {
+  it("previews and opens an item-level video in the shared player", async () => {
+    const video = videoAttachment("wia_video", "walkthrough.mp4")
+    getWorkItem.mockResolvedValue(detailOf(full("PLA-12")))
+    listWorkItemAttachments.mockResolvedValue({ attachments: [video] })
+    renderTask()
+
+    const tile = await screen.findByTestId("attachment-tile-wia_video")
+    expect(tile.getAttribute("aria-label")).toBe("Play walkthrough.mp4")
+    expect((screen.getByAltText("walkthrough.mp4 preview") as HTMLImageElement).getAttribute("src"))
+      .toBe("/api/work-items/PLA-12/attachments/wia_video?poster=1")
+    fireEvent.click(tile)
+    const dialog = await screen.findByTestId("attachment-video-dialog")
+    expect(within(dialog).getByLabelText("Play walkthrough.mp4")).toBeTruthy()
+  })
+
+  it("previews a comment-level video with the same player", async () => {
+    const note = comment("wic_video", "Video attached", "2026-07-22T08:00:00.000Z")
+    getWorkItem.mockResolvedValue(detailOf(full("PLA-12")))
+    listWorkItemComments.mockResolvedValue({ comments: [note], total: 1 })
+    listWorkItemAttachments.mockResolvedValue({ attachments: [videoAttachment("wia_comment_video", "result.mp4", note.id)] })
+    renderTask()
+
+    fireEvent.click(await screen.findByTestId("comment-attachment-wia_comment_video"))
+    const dialog = await screen.findByTestId("attachment-video-dialog")
+    expect(within(dialog).getByLabelText("Play result.mp4")).toBeTruthy()
+  })
+
   it("lists item-level rows only and uploads through the multipart lane", async () => {
     const rows: WorkItemAttachmentWire[] = [
       { id: "wia_1", workItemId: "PLA-12", commentId: null, filename: "checkout-flow.png", mime: "image/png", bytes: 240 * 1024, sha256: "a", storagePath: "/x", uploadedBy: "mason", createdAt: "2026-07-22T08:00:00.000Z" },

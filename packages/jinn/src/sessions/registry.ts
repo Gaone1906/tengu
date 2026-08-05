@@ -1758,7 +1758,7 @@ export function deleteSessions(ids: string[]): number {
 
 /** Attachment descriptor stored alongside a message and rendered by the web UI. */
 export interface MessageMedia {
-  type: 'image' | 'audio' | 'file';
+  type: 'image' | 'audio' | 'video' | 'file';
   url: string;
   name?: string;
   mimeType?: string;

@@ -57,6 +57,11 @@ interface Config {
     interruptOnNewMessage?: boolean
     rateLimitStrategy?: "wait" | "fallback"
     fallbackEngine?: "codex"
+    staleChat?: {
+      enabled?: boolean
+      tokenThreshold?: number
+      staleAfterMinutes?: number
+    }
   }
   connectors?: {
     slack?: {
@@ -189,11 +194,17 @@ function SettingsInput({
   onChange,
   type = "text",
   placeholder,
+  disabled = false,
+  min,
+  ariaLabel,
 }: {
   value: string
   onChange: (v: string) => void
   type?: string
   placeholder?: string
+  disabled?: boolean
+  min?: number
+  ariaLabel?: string
 }) {
   return (
     <input
@@ -201,7 +212,10 @@ function SettingsInput({
       value={value}
       onChange={(e) => onChange(e.target.value)}
       placeholder={placeholder}
-      className={CONTROL_CLASS}
+      disabled={disabled}
+      min={min}
+      aria-label={ariaLabel}
+      className={`${CONTROL_CLASS} disabled:cursor-not-allowed disabled:opacity-50`}
     />
   )
 }
@@ -233,22 +247,30 @@ function SettingsSelect({
 function ToggleSwitch({
   checked,
   onChange,
+  ariaLabel,
 }: {
   checked: boolean
   onChange: (v: boolean) => void
+  ariaLabel?: string
 }) {
   return (
     <button
       role="switch"
       aria-checked={checked}
+      aria-label={ariaLabel}
       onClick={() => onChange(!checked)}
-      className="w-[44px] h-[24px] rounded-[12px] border-none cursor-pointer relative shrink-0 transition-[background] duration-200 ease-[var(--ease-smooth)]"
-      style={{
-        background: checked ? "var(--system-green)" : "var(--fill-primary)",
-      }}
+      className="relative h-[34px] w-[44px] shrink-0 cursor-pointer rounded-[17px] border-none bg-transparent"
     >
       <span
-        className="absolute top-[2px] w-[20px] h-[20px] rounded-full bg-white shadow-[0_1px_3px_rgba(0,0,0,0.2)] transition-[left] duration-200 ease-[var(--ease-spring)]"
+        aria-hidden="true"
+        className="absolute inset-x-0 top-1/2 h-[24px] -translate-y-1/2 rounded-[12px] transition-[background] duration-200 ease-[var(--ease-smooth)]"
+        style={{
+          background: checked ? "var(--system-green)" : "var(--fill-primary)",
+        }}
+      />
+      <span
+        aria-hidden="true"
+        className="absolute top-1/2 h-[20px] w-[20px] -translate-y-1/2 rounded-full bg-white shadow-[0_1px_3px_rgba(0,0,0,0.2)] transition-[left] duration-200 ease-[var(--ease-spring)]"
         style={{
           left: checked ? 22 : 2,
         }}
@@ -630,6 +652,7 @@ export default function SettingsPage() {
   const claudeEffortDefaults = Array.from(new Set(claudeRegistryModels.flatMap((m) => m.effortLevels)))
   const visibleClaudeModels = claudeRegistryModels.filter((m) => !hiddenClaudeIds.includes(m.id))
   const hiddenClaudeModels = hiddenClaudeIds.map((id) => claudeRegistryModels.find((m) => m.id === id) ?? { id, label: id })
+  const staleChatEnabled = config.sessions?.staleChat?.enabled ?? true
 
   function addClaudeModel() {
     if (!claudeModelId.trim()) return
@@ -1281,6 +1304,47 @@ export default function SettingsPage() {
 
               {/* -- Section 5: Sessions -- */}
               <Section title="Sessions">
+                <FieldRow label="Suggest Fresh Chats">
+                  <ToggleSwitch
+                    checked={staleChatEnabled}
+                    ariaLabel="Suggest fresh chats"
+                    onChange={(v) =>
+                      updateConfig(["sessions", "staleChat", "enabled"], v)
+                    }
+                  />
+                </FieldRow>
+                <FieldRow label="Context Token Threshold">
+                  <SettingsInput
+                    type="number"
+                    min={1000}
+                    ariaLabel="Context token threshold"
+                    disabled={!staleChatEnabled}
+                    value={String(config.sessions?.staleChat?.tokenThreshold ?? 300_000)}
+                    onChange={(v) =>
+                      updateConfig(["sessions", "staleChat", "tokenThreshold"], Number(v))
+                    }
+                  />
+                </FieldRow>
+                <FieldRow label="Idle Minutes">
+                  <SettingsInput
+                    type="number"
+                    min={1}
+                    ariaLabel="Idle minutes"
+                    disabled={!staleChatEnabled}
+                    value={String(config.sessions?.staleChat?.staleAfterMinutes ?? 60)}
+                    onChange={(v) =>
+                      updateConfig(["sessions", "staleChat", "staleAfterMinutes"], Number(v))
+                    }
+                  />
+                </FieldRow>
+                <div className="mt-[4px] text-[length:var(--text-caption1)] text-[var(--text-tertiary)]">
+                  Suggest a clean continuation when a chat is both over the context threshold and idle past the selected window.
+                </div>
+
+                <div
+                  className="mt-[var(--space-3)] border-t border-[var(--separator)] pt-[var(--space-3)]"
+                />
+
                 <FieldRow label="Interrupt on New Message">
                   <ToggleSwitch
                     checked={config.sessions?.interruptOnNewMessage ?? true}

@@ -1200,6 +1200,8 @@ interface ChatMessagesProps {
   blockArrivals?: ReadonlyMap<string, LiveBlockArrival>
   liveTerminalDelegationIds?: ReadonlySet<string>
   blockAnnouncement?: string
+  /** Final in-thread object. It remains inside the transcript scroll owner. */
+  footer?: React.ReactNode
 }
 
 function latestTurnId(messages: Message[]): string | null {
@@ -1336,6 +1338,7 @@ export function ChatMessages({
   blockArrivals = new Map(),
   liveTerminalDelegationIds = new Set(),
   blockAnnouncement = '',
+  footer,
 }: ChatMessagesProps) {
   // Stick-to-bottom: one hook owns follow-intent, growth-follow, resize/keyboard,
   // tab-return, mount-snap, and the jump affordance. See use-stick-to-bottom.ts.
@@ -1492,7 +1495,7 @@ export function ChatMessages({
         {blockAnnouncement}
       </span>
       <div ref={setScrollContainerRef} style={{ overflowAnchor: 'auto' }} className="chat-messages-scroll h-full overflow-y-auto overflow-x-hidden bg-[var(--bg)] min-h-0">
-        <div className="mx-auto w-full max-w-[var(--chat-measure)] pt-[72px] pb-[var(--space-6)] lg:pt-[88px]">
+        <div className={`mx-auto w-full max-w-[var(--chat-measure)] pt-[72px] lg:pt-[88px] ${footer ? 'flex min-h-full flex-col justify-end pb-0' : 'pb-[var(--space-6)]'}`}>
           {loadingOlderMessages && (
             <div role="status" aria-label="Loading older messages" className="flex h-8 items-center justify-center">
               <span className="size-3 rounded-full bg-[var(--fill-tertiary)] animate-[jinn-pulse_1.4s_infinite]" />
@@ -1598,6 +1601,12 @@ export function ChatMessages({
                   Thinking
                 </span>
               </div>
+            </div>
+          )}
+
+          {footer && (
+            <div className="mt-[var(--space-5)] px-[var(--space-3)] lg:px-[var(--space-8)]">
+              {footer}
             </div>
           )}
 

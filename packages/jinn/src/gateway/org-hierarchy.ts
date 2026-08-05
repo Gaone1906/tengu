@@ -23,6 +23,19 @@ export function getAllParents(
   return [...reportsTo];
 }
 
+export function isOrgAncestor(
+  hierarchy: OrgHierarchy,
+  ancestor: string,
+  descendant: string,
+): boolean {
+  let current = hierarchy.nodes[descendant]?.parentName ?? null;
+  while (current) {
+    if (current === ancestor) return true;
+    current = hierarchy.nodes[current]?.parentName ?? null;
+  }
+  return false;
+}
+
 export function resolveOrgHierarchy(
   registry: Map<string, Employee>,
 ): OrgHierarchy {

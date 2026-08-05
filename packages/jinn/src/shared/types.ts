@@ -485,6 +485,47 @@ export interface SessionDeliveryDeadLetter extends Omit<SessionDelivery, "payloa
   payloadError: string | null;
 }
 
+export interface ExperimentMetric {
+  name: string;
+  unit?: string;
+  howToMeasure: string;
+}
+
+export interface ExperimentReading {
+  id: string;
+  experimentId: string;
+  at: string;
+  metric: string;
+  value: number;
+  note?: string;
+}
+
+export interface ExperimentVerdict {
+  outcome: "win" | "loss" | "inconclusive";
+  note: string;
+  concludedAt: string;
+}
+
+export interface Experiment {
+  id: string;
+  name: string;
+  hypothesis: string;
+  status: "running" | "concluded";
+  startedAt: string;
+  horizonDays: number;
+  baseline: Record<string, number>;
+  metrics: ExperimentMetric[];
+  readings: ExperimentReading[];
+  verdict?: ExperimentVerdict;
+  checkInCronJobId?: string;
+}
+
+export type ExperimentStoreFailureReason = "invalid" | "not-found" | "conflict";
+
+export type ExperimentStoreResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; reason: ExperimentStoreFailureReason; detail: string };
+
 export interface CronJob {
   id: string;
   name: string;
@@ -933,6 +974,11 @@ export interface JinnConfig {
   budgets?: { employees?: Record<string, number> };
   sessions?: {
     interruptOnNewMessage?: boolean;
+    staleChat?: {
+      enabled?: boolean;
+      tokenThreshold?: number;
+      staleAfterMinutes?: number;
+    };
     /** Max relay hops a lateral (agent-to-agent) send chain may traverse before
      *  the gateway refuses and tells the sender to escalate. Default 12; clamped
      *  to [1, 64] (still a runaway-loop bound, never unbounded). */

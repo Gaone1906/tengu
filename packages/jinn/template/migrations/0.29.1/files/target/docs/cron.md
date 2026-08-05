@@ -1,137 +1,34 @@
 # Cron
 
-{{portalName}} supports scheduled AI jobs defined in `~/.jinn/cron/jobs.json`.
+Cron jobs are simple scheduled prompts stored in `$JINN_HOME/cron/jobs.json`. The gateway validates and hot-reloads the array. Use `skills/cron-manager/SKILL.md` for creation, mutation, validation, delivery, and run-history procedure.
 
-## Job Schema
+## Job contract
 
 ```typescript
 interface CronJob {
-  id: string;            // Unique identifier
-  name: string;          // Human-readable name
-  enabled: boolean;      // Whether the job is active
-  schedule: string;      // Cron expression (standard 5-field)
-  timezone?: string;     // IANA timezone (default: system timezone)
-  engine: string;        // "claude" or "codex"
-  model?: string;        // Override default model
-  employee?: string;     // Employee persona to use
-  prompt: string;        // The prompt to send to the engine
-  delivery?: {           // Optional output delivery
-    connector: string;   // Connector instance id (e.g., "slack" or "slack-support")
-    channel: string;     // Target channel or user
-  };
+  id: string;
+  name: string;
+  enabled: boolean;
+  schedule: string;
+  timezone?: string;
+  engine: string;
+  model?: string;
+  employee?: string;
+  prompt: string;
+  delivery?: { connector: string; channel: string };
 }
 ```
 
-## Schedule Format
+`delivery.connector` is a connector instance id, for example `slack` or `slack-support`.
 
-Standard 5-field cron expressions:
+`schedule` uses standard five-field cron syntax. `timezone` is an IANA timezone; when omitted, the system timezone applies. Engine values are claude, codex, antigravity, grok, pi, hermes. A model override must be supported by its engine.
 
-```
-┌────────── minute (0-59)
-│ ┌──────── hour (0-23)
-│ │ ┌────── day of month (1-31)
-│ │ │ ┌──── month (1-12)
-│ │ │ │ ┌── day of week (0-7, 0 and 7 = Sunday)
-│ │ │ │ │
-* * * * *
-```
+## Delivery ownership
 
-Examples:
-- `0 9 * * 1-5` - 9:00 AM, Monday through Friday
-- `*/30 * * * *` - Every 30 minutes
-- `0 0 1 * *` - Midnight on the 1st of each month
+Analytical, reporting, or decision-informing output should target the COO. The COO delegates specialist work, reviews it, and produces the final deliverable. Direct employee delivery is reserved for simple output that does not need review.
 
-## Hot Reload
+## Workflows versus cron
 
-The gateway watches `cron/jobs.json` with chokidar. When the file changes:
-1. All existing scheduled jobs are cancelled
-2. The new file is parsed and validated
-3. Enabled jobs are rescheduled with the updated definitions
+Use cron for one scheduled prompt. Use a Workflow when the procedure needs multiple phases, conditions, approvals, reusable evidence, or non-schedule triggers. A schedule Trigger belongs to the Workflow definition; do not create a second cron job for the same wake-up.
 
-No restart required. Engines can edit `jobs.json` directly to create or modify scheduled jobs.
-
-## Run Logs
-
-Each job execution is logged to `~/.jinn/cron/runs/<jobId>.jsonl`. Each line is a JSON object:
-
-```json
-{
-  "runId": "run_abc123",
-  "jobId": "daily-standup",
-  "startedAt": "2026-01-15T09:00:00.000Z",
-  "completedAt": "2026-01-15T09:00:45.000Z",
-  "status": "success",
-  "output": "..."
-}
-```
-
-## Delegation Pattern
-
-When a cron job produces analytical, reporting, or decision-informing output, it should **always target {{portalSlug}}** (the COO), not the employee directly. {{portalName}} then delegates to the employee via a child session, reviews the output, filters noise, and delivers the final result.
-
-**Correct** - cron → {{portalSlug}} → employee (via child session) → {{portalSlug}} reviews → delivery:
-```json
-{
-  "id": "daily-pulse",
-  "name": "Daily Pulse Analytics",
-  "enabled": true,
-  "schedule": "0 8 * * *",
-  "engine": "claude",
-  "employee": "{{portalSlug}}",
-  "prompt": "Delegate to @pulse: pull analytics for all products. Review the output, filter noise, and deliver a concise summary of what matters.",
-  "delivery": {
-    "connector": "slack",
-    "channel": "#analytics"
-  }
-}
-```
-
-**Incorrect** - cron → employee → delivery (bypasses COO review):
-```json
-{
-  "id": "daily-pulse",
-  "name": "Daily Pulse Analytics",
-  "enabled": true,
-  "schedule": "0 8 * * *",
-  "engine": "claude",
-  "employee": "pulse",
-  "prompt": "Pull analytics for all products and summarize.",
-  "delivery": {
-    "connector": "slack",
-    "channel": "#analytics"
-  }
-}
-```
-
-Direct employee-to-user delivery is only acceptable for simple, no-review-needed tasks (e.g. a health check ping). The gateway will log a warning if it detects a non-{{portalSlug}} employee with delivery configured.
-
-## Example Configuration
-
-```json
-[
-  {
-    "id": "daily-standup",
-    "name": "Daily Standup Summary",
-    "enabled": true,
-    "schedule": "0 9 * * 1-5",
-    "timezone": "America/New_York",
-    "engine": "claude",
-    "employee": "{{portalSlug}}",
-    "prompt": "Delegate to @project-manager: review yesterday's Todo activity across all departments. Review the output and write a concise standup summary.",
-    "delivery": {
-      "connector": "slack",
-      "channel": "#engineering"
-    }
-  },
-  {
-    "id": "weekly-cleanup",
-    "name": "Weekly Skill Review",
-    "enabled": true,
-    "schedule": "0 18 * * 5",
-    "timezone": "America/New_York",
-    "engine": "claude",
-    "employee": "{{portalSlug}}",
-    "prompt": "Review all skills in ~/.jinn/skills/ and suggest improvements or removals for unused skills."
-  }
-]
-```
+Use the cron read tools for current definitions and run evidence. Local run logs are implementation detail, not the normal operating surface.

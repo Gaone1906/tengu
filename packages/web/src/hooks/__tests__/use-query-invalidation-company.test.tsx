@@ -54,6 +54,13 @@ describe('company + session:created invalidation', () => {
     expect(calledWithKey(invalidate, queryKeys.pins)).toBe(true)
   })
 
+  it('refreshes the experiment list and changed experiment immediately', () => {
+    const { invalidate } = setup()
+    act(() => listener?.('experiments:changed', { id: 'experiment-7', action: 'reading-recorded' }))
+    expect(calledWithKey(invalidate, ['experiments'])).toBe(true)
+    expect(calledWithKey(invalidate, ['experiments', 'experiment-7'])).toBe(true)
+  })
+
   it('refreshes parent summaries when a delegated child changes runtime activity', async () => {
     const { client, invalidate } = setup()
     client.setQueryData(queryKeys.sessions.all, {

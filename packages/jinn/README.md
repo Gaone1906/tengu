@@ -10,11 +10,11 @@
   <img src="https://raw.githubusercontent.com/hristo2612/jinn/main/assets/jinn-showcase.gif" alt="Jinn web dashboard" width="800" />
 </p>
 
-Jinn turns the agent CLIs already on your machine into a persistent AI company: named employees, a durable Todo ledger, reusable Workflows, and one chat and dashboard for operating them. It delegates to the official CLIs instead of replacing their model and tool loops.
+Jinn turns installed agent CLIs into a persistent AI company: named employees, a Todo ledger, reusable Workflows, and one chat and dashboard. It delegates to the official CLIs instead of replacing them.
 
 ## Engines
 
-Use any mix of the six shipped engines. Jinn hides engines whose binaries are not installed and lets each employee or session choose the right one:
+Mix the six shipped engines. Jinn hides unavailable binaries and lets each employee or session choose one:
 
 - **claude** - Anthropic Claude Code
 - **codex** - OpenAI Codex CLI
@@ -54,16 +54,16 @@ Then open [http://localhost:7777](http://localhost:7777).
 
 ## Company building blocks
 
-- **Employees** are named roles with personas, departments, ranks, reporting lines, and engine defaults, all in editable YAML.
-- **Todos** are the durable work ledger. Assignment, priority, status, sub-tasks, labels, comments, links, attachments, approvals, and reviewer-owned completion survive individual sessions.
-- **Workflows** are reusable graph procedures with sequential, conditional, parallel, and switch paths, per-node engine and model choices, native approvals, schema-validated completion, evidence, and durable run history.
-- **Jinn MCP** is the typed company surface. Capable engines get tools for org, sessions, delegation, Todos, Workflows, Triggers, approvals, Notes, cron, connectors, attachments, and managed files.
+- **Employees** are YAML roles with personas, departments, ranks, reporting lines, and engine defaults.
+- **Todos** preserve assignment, priority, status, sub-tasks, labels, comments, links, attachments, approvals, and reviewer-owned completion across sessions.
+- **Workflows** combine sequential, conditional, parallel, and switch paths, per-node engines and models, native approvals, schema-validated completion, evidence, and durable run history.
+- **Jinn MCP** gives capable engines typed tools for org, sessions, delegation, Todos, Workflows, Triggers, approvals, Notes, cron, connectors, attachments, and managed files.
 - **Chat** keeps the receipts. Delegations, callbacks, Todo changes, and Workflow operations render as structured activity beside the conversation.
 - **Skills, Notes, Cron, and connectors** provide reusable playbooks, durable knowledge, scheduled work, and external communication.
 
 ## How it runs
 
-One local gateway dispatches work to the engine CLIs, tracks sessions and company state in SQLite and human-readable workspace files, and serves the web dashboard. Claude runs through its official interactive CLI inside a PTY, so eligible turns use your Claude subscription. Hermes is provider-metered; see the [Hermes engine guide](https://github.com/hristo2612/jinn/blob/main/docs/engines-hermes.md).
+One local gateway dispatches work, persists company state, and serves the dashboard. Claude runs through its interactive CLI inside a PTY, so eligible turns use your subscription. Hermes is provider-metered; see the [Hermes engine guide](https://github.com/hristo2612/jinn/blob/main/docs/engines-hermes.md).
 
 ## Documentation
 

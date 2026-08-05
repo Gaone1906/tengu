@@ -141,6 +141,13 @@ describe.skipIf(process.platform === "win32")("Docker entrypoint runtime cleanup
     }
   });
 
+  it("keeps shared STT state inside the persisted Jinn home volume", () => {
+    const source = fs.readFileSync(dockerfile, "utf-8");
+
+    expect(source).toContain("ENV JINN_STT_SETTINGS=/home/node/.jinn/stt.json");
+    expect(source).toContain("ENV JINN_STT_MODELS_DIR=/home/node/.jinn/models/whisper");
+  });
+
   it("holds an exclusive shared-volume lock before cleanup and releases it on process death", async () => {
     const { home, ready, env } = fixture();
     seedRuntimeRecords(home);

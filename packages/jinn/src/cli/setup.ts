@@ -307,6 +307,12 @@ portal:
 # budgets:
 #   employees:
 #     a-lead: 25.00
+# Fresh-chat suggestions for stale, context-heavy web threads.
+# sessions:
+#   staleChat:
+#     enabled: true
+#     tokenThreshold: 300000
+#     staleAfterMinutes: 60
 # Cron alerting — route failed scheduled jobs to a connector channel.
 # cron:
 #   alertConnector: slack

@@ -9,6 +9,7 @@ import { getPackageVersion } from './version.js';
 import { logger } from './logger.js';
 import { migrateWorkItemsSchema, preflightWorkItemsDatabase, UNSUPPORTED_PRERELEASE_TODO_DATA, WORK_ITEMS_BACKUP_SUFFIX } from '../work-items/migrate.js';
 import type { WorkItemSchemaPreflight } from '../work-items/migrate.js';
+import { migrateExperimentsSchema } from '../experiments/migrate.js';
 import { CREATE_TABLE, CREATE_MESSAGES_TABLE, CREATE_MESSAGES_INDEX, CREATE_META_TABLE, CREATE_MESSAGES_ORDER_INDEX, CREATE_MESSAGES_PARTIAL_INDEX, CREATE_SESSION_KEY_INDEX, CREATE_DELEGATION_IDEMPOTENCY_INDEX, CREATE_LAST_ACTIVITY_INDEX, CREATE_PARENT_INDEX, CREATE_WORKFLOW_RUN_INDEX, CREATE_STATUS_INDEX, CREATE_WORK_ITEM_SESSION_INDEX, CREATE_QUEUE_ITEMS_TABLE, CREATE_FILES_TABLE, CREATE_CHAT_PINS_TABLE, migrateMessagesSchema, migrateFtsSchema, migrateSessionsSchema, migrateQueueItemsSchema, migrateCallbackDeliveriesSchema, runImmediateMigrationWithRetry, runSqliteBusyRetry } from '../sessions/migrate.js';
 
 let db: Database.Database | undefined;
@@ -223,6 +224,7 @@ export function initDb(): Database.Database {
     // The next public release is the first Todo release: create the clean model
     // directly, or replace only a read-only-preflighted empty prerelease shape.
     migrateWorkItemsSchema(database, todoPreflight);
+    migrateExperimentsSchema(database);
     database.exec(CREATE_WORK_ITEM_SESSION_INDEX);
     dropActivityLedgerSchema(database);
     database.exec(CREATE_QUEUE_ITEMS_TABLE);

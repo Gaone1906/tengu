@@ -9,14 +9,17 @@ process.env.JINN_HOME = tmp;
 
 type Store = typeof import("../store.js");
 type Transitions = typeof import("../transitions.js");
+type Registry = typeof import("../../sessions/registry.js");
 
 let store: Store;
 let tr: Transitions;
+let registry: Registry;
 let db: import("better-sqlite3").Database;
 
 beforeAll(async () => {
   store = await import("../store.js");
   tr = await import("../transitions.js");
+  registry = await import("../../sessions/registry.js");
   db = (await import("../../shared/db.js")).initDb();
 });
 
@@ -121,18 +124,33 @@ describe("transition — the guarded edge map", () => {
     expect(item.closedAt).not.toBeNull();
   });
 
-  it("SELF-REVIEW BAN: the executing session cannot mark its own item done; a stranger can", () => {
+  it("SELF-REVIEW BAN: a linked execution attempt cannot mark its own item done; a linked workflow phase can", () => {
     const wi = mk("in_review");
-    db.prepare(
-      `INSERT INTO sessions (id, engine, source, source_ref, status, work_item_id, created_at, last_activity)
-       VALUES ('sess-self', 'claude', 'web', 'x', 'idle', ?, 'a', 'a')`,
-    ).run(wi.id);
-    expect(() => tr.transition(wi.id, "done", "employee", { callerSessionId: "sess-self" })).toThrowError(
+    const executor = registry.createSession({ engine: "claude", source: "web", sourceRef: "execution-attempt" });
+    store.linkSession(wi.id, executor.id);
+
+    expect(() => tr.transition(wi.id, "done", "employee", { callerSessionId: executor.id })).toThrowError(
       /self-review ban/,
     );
     expect(store.getWorkItem(wi.id)?.status).toBe("in_review");
-    // A caller that is NOT a linked execution attempt may close it.
-    const { item } = tr.transition(wi.id, "done", "reviewer", { callerSessionId: "sess-other" });
+
+    const phaseItem = mk("in_review");
+    const phase = registry.createSession({
+      engine: "codex",
+      source: "workflow",
+      sourceRef: "workflow:review-flow:run-1:verify:1",
+      workflowProvenance: {
+        kind: "phase",
+        workflowId: "review-flow",
+        workflowName: "Review flow",
+        runId: "run-1",
+        triggerSource: "todo-status",
+        phase: { nodeId: "verify", name: "Verify", index: 2, round: 1, attempt: 1 },
+      },
+    });
+    store.linkSession(phaseItem.id, phase.id);
+
+    const { item } = tr.transition(phaseItem.id, "done", "reviewer", { callerSessionId: phase.id });
     expect(item.status).toBe("done");
   });
 

@@ -2,6 +2,8 @@ import { describe, it, expect, beforeAll } from "vitest";
 import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
+import { Writable } from "node:stream";
+import { createHash } from "node:crypto";
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-cache-"));
 process.env.JINN_HOME = tmp;
@@ -48,19 +50,68 @@ function fakeReq(headers: Record<string, string>) {
   return { headers } as unknown as import("node:http").IncomingMessage;
 }
 function fakeRes() {
-  const out: { status?: number; headers?: Record<string, unknown>; ended?: boolean; body?: unknown } = {};
-  const res = {
-    writeHead(status: number, headers?: Record<string, unknown>) { out.status = status; out.headers = headers; return res; },
-    end(body?: unknown) { out.ended = true; out.body = body; return res; },
-    // download path pipes a read stream into res; support that minimally.
-    on() { return res; },
-    once() { return res; },
-    emit() { return false; },
-    write() { return true; },
-  } as unknown as import("node:http").ServerResponse;
+  const out: { status?: number; headers?: Record<string, unknown>; body?: unknown } = {};
+  const res = new class extends Writable {
+    _write(chunk: Buffer | string, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
+      out.body = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      callback();
+    }
+
+    writeHead(status: number, headers?: Record<string, unknown>): this {
+      out.status = status;
+      out.headers = headers;
+      return this;
+    }
+
+  }() as unknown as import("node:http").ServerResponse;
   return { res, out };
 }
 const ctx = { emit: () => {} } as unknown as import("../api.js").ApiContext;
+
+class StreamResponse extends Writable {
+  statusCode = 200;
+  headers: Record<string, string | number> = {};
+  readonly chunks: Buffer[] = [];
+
+  _write(chunk: Buffer | string, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
+    this.chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    callback();
+  }
+
+  writeHead(statusCode: number, headers?: Record<string, string | number>): this {
+    this.statusCode = statusCode;
+    this.headers = headers ?? {};
+    return this;
+  }
+
+  bytes(): Buffer {
+    return Buffer.concat(this.chunks);
+  }
+}
+
+async function streamRequest(id: string, range: string): Promise<StreamResponse> {
+  const res = new StreamResponse();
+  await files.handleFilesRequest(
+    { method: "GET", url: `/api/files/${id}`, headers: { range } } as unknown as import("node:http").IncomingMessage,
+    res as unknown as import("node:http").ServerResponse,
+    `/api/files/${id}`,
+    "GET",
+    ctx,
+  );
+  return res;
+}
+
+async function videoRequest(id: string, query = ""): Promise<StreamResponse> {
+  const res = new StreamResponse();
+  await files.handleFilesRequest(
+    { method: "GET", url: `/api/files/${id}${query}`, headers: {} } as unknown as import("node:http").IncomingMessage,
+    res as unknown as import("node:http").ServerResponse,
+    `/api/files/${id}`,
+    "GET",
+    ctx,
+  );
+  return res;
+}
 
 describe("GET /api/files/:id caching", () => {
   let id: string;
@@ -94,5 +145,47 @@ describe("GET /api/files/:id caching", () => {
     expect(out.headers!["ETag"]).toBe(etag);
     expect(out.headers!["Cache-Control"]).toBe("public, max-age=31536000, immutable");
     expect(out.body).toBeUndefined(); // res.end() called with no payload
+  });
+
+  it("serves the exact requested byte range and rejects an unsatisfiable one", async () => {
+    const partial = await streamRequest(id, "bytes=2-6");
+    expect(partial.statusCode).toBe(206);
+    expect(partial.headers["Content-Range"]).toBe("bytes 2-6/15");
+    expect(partial.headers["Accept-Ranges"]).toBe("bytes");
+    expect(partial.bytes()).toEqual(Buffer.from("cheab"));
+
+    const impossible = await streamRequest(id, "bytes=99-");
+    expect(impossible.statusCode).toBe(416);
+    expect(impossible.headers["Content-Range"]).toBe("bytes */15");
+    expect(impossible.bytes()).toHaveLength(0);
+  });
+
+  it("serves video inline, forces original downloads, and adopts a cached low variant", async () => {
+    const videoId = "cachevideo";
+    const original = Buffer.alloc(1024, 7);
+    const dir = path.join(paths.FILES_DIR, videoId);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "clip.mp4"), original);
+    reg.insertFile({ id: videoId, filename: "clip.mp4", size: original.length, mimetype: "video/mp4", path: null });
+
+    const inline = await videoRequest(videoId);
+    expect(inline.headers["Content-Disposition"]).toBe('inline; filename="clip.mp4"');
+    expect(inline.headers["Accept-Ranges"]).toBe("bytes");
+
+    const download = await videoRequest(videoId, "?download=1&quality=low");
+    expect(download.headers["Content-Disposition"]).toBe('attachment; filename="clip.mp4"');
+    expect(download.bytes()).toEqual(original);
+
+    const fallback = await videoRequest(videoId, "?quality=low");
+    expect(fallback.bytes()).toEqual(original);
+    expect(fallback.headers["Cache-Control"]).toBe("no-store");
+
+    const key = `file:${videoId}:${original.length}`;
+    const cacheDir = path.join(paths.VIDEO_CACHE_DIR, createHash("sha256").update(key).digest("hex"));
+    fs.mkdirSync(cacheDir, { recursive: true });
+    fs.writeFileSync(path.join(cacheDir, "low.mp4"), Buffer.from("low"));
+    const low = await videoRequest(videoId, "?quality=low");
+    expect(low.bytes()).toEqual(Buffer.from("low"));
+    expect(Number(low.headers["Content-Length"])).toBeLessThan(original.length);
   });
 });

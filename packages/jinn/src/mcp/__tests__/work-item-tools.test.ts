@@ -88,7 +88,7 @@ describe("work-item tools — registry + schemas", () => {
     expect(names).toContain("fire_workflow_event");
     expect(names).toContain("cancel_workflow_run");
     expect(names.some((n) => /cancel/i.test(n) && /work_item/.test(n))).toBe(false);
-    expect(names).toHaveLength(63);
+    expect(names).toHaveLength(69);
   });
 
   it("positions list as recent/filter summaries and search as text/filter hits", () => {
@@ -122,12 +122,17 @@ describe("work-item tools — registry + schemas", () => {
 
   it("ships the generic Todo doctrine in the repo template CLAUDE.md", () => {
     const template = fs.readFileSync(path.join(process.cwd(), "template", "CLAUDE.md"), "utf-8");
-    expect(template).toContain("Todos are the company's task ledger");
-    expect(template).toContain("create_work_item");
-    expect(template).toContain("One operator outcome should normally map to one root Todo.");
-    expect(template).toContain("A checklist does not imply one Todo per item.");
-    expect(template).toContain("Only independently assignable or independently reviewable deliverables become child Todos.");
-    expect(template).toContain("Never mark your own item `done`");
+    const todoSkill = fs.readFileSync(
+      path.join(process.cwd(), "template", "skills", "todo-handling", "SKILL.md"),
+      "utf-8",
+    );
+    expect(template).toContain("| Todos | `skills/todo-handling/SKILL.md` |");
+    expect(template).toContain("Keep the Todo ledger current.");
+    expect(todoSkill).toContain("create_work_item");
+    expect(todoSkill).toContain("One operator outcome should normally map to one root Todo.");
+    expect(todoSkill).toContain("A checklist does not imply one Todo per item.");
+    expect(todoSkill).toContain("Only independently assignable or independently reviewable deliverables become child Todos.");
+    expect(todoSkill).toContain("Never mark your own produced work `done`");
     expect(template).not.toContain(["", "Users", ""].join("/"));
   });
 });
@@ -623,7 +628,7 @@ describe("work-item tools — integration against the real API + store", () => {
     );
   });
 
-  it("binds reviewer-close authority to the server-minted session capability", async () => {
+  it("requires a server-minted session capability, then lets any non-executor review-close", async () => {
     const reviewer = registry.createSession({ engine: "codex", source: "web", sourceRef: "qa-reviewer", title: "qa reviewer" });
     const operatorSource = registry.createSession({ engine: "codex", source: "web", sourceRef: "operator-source", title: "operator source" });
     const executor = registry.createSession({
@@ -656,7 +661,9 @@ describe("work-item tools — integration against the real API + store", () => {
     );
     expect(store.getWorkItem(item.id)?.status).toBe("in_review");
 
-    const closed = (await tool("update_work_item").handler({ id: item.id, status: "done" }, ctxFor(reviewer.id))) as {
+    // A valid caller needs no durable relationship to the Todo; only the linked
+    // execution attempt is withheld by the self-review ban.
+    const closed = (await tool("update_work_item").handler({ id: item.id, status: "done" }, ctxFor(operatorSource.id))) as {
       workItem: { status: string };
     };
     expect(closed.workItem.status).toBe("done");
