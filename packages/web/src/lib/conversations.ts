@@ -5,7 +5,7 @@
 
 import type { ChatBlock } from './blocks'
 
-export type MediaType = 'image' | 'audio' | 'file'
+export type MediaType = 'image' | 'audio' | 'video' | 'file'
 
 export interface MediaAttachment {
   type: MediaType
@@ -19,6 +19,11 @@ export interface MediaAttachment {
   fileId?: string
   /** Original File object for upload (not serialized) */
   file?: File
+}
+
+/** MIME is authoritative for rows persisted before video became a media type. */
+export function isVideoMedia(media: MediaAttachment): boolean {
+  return media.type === 'video' || media.mimeType?.startsWith('video/') === true
 }
 
 export interface Message {

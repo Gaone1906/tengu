@@ -38,7 +38,11 @@ fs.writeFileSync(
 );
 fs.writeFileSync(
   path.join(orgDir, "platform-manager.yaml"),
-  "name: platform-manager\ndisplayName: Platform Manager\ndepartment: platform\nrank: manager\nreportsTo: coo\nengine: codex\nmodel: gpt-5.5\npersona: Manages platform work.\n",
+  "name: platform-manager\ndisplayName: Platform Manager\ndepartment: platform\nrank: manager\nreportsTo: platform-director\nengine: codex\nmodel: gpt-5.5\npersona: Manages platform work.\n",
+);
+fs.writeFileSync(
+  path.join(orgDir, "platform-director.yaml"),
+  "name: platform-director\ndisplayName: Platform Director\ndepartment: platform\nrank: manager\nreportsTo: coo\nengine: codex\nmodel: gpt-5.5\npersona: Manages the platform manager.\n",
 );
 fs.writeFileSync(
   path.join(orgDir, "platform-worker.yaml"),
@@ -47,6 +51,14 @@ fs.writeFileSync(
 fs.writeFileSync(
   path.join(orgDir, "platform-peer.yaml"),
   "name: platform-peer\ndisplayName: Platform Peer\ndepartment: platform\nrank: employee\nreportsTo: platform-manager\nengine: codex\nmodel: gpt-5.5\npersona: Another platform worker.\n",
+);
+fs.writeFileSync(
+  path.join(orgDir, "review-manager.yaml"),
+  "name: review-manager\ndisplayName: Review Manager\ndepartment: platform\nrank: manager\nreportsTo: coo\nengine: codex\nmodel: gpt-5.5\npersona: Manages the review team.\n",
+);
+fs.writeFileSync(
+  path.join(orgDir, "reviewer.yaml"),
+  "name: reviewer\ndisplayName: Reviewer\ndepartment: platform\nrank: employee\nreportsTo: review-manager\nengine: codex\nmodel: gpt-5.5\npersona: Reviews platform work.\n",
 );
 type Api = typeof import("../api.js");
 type Store = typeof import("../../work-items/store.js");
@@ -58,9 +70,11 @@ let approvals: Approvals;
 let registry: Registry;
 let callbacks: typeof import("../../sessions/callbacks.js");
 let cooSession: import("../../shared/types.js").Session;
+let directorSession: import("../../shared/types.js").Session;
 let managerSession: import("../../shared/types.js").Session;
 let workerSession: import("../../shared/types.js").Session;
 let peerSession: import("../../shared/types.js").Session;
+let reviewManagerSession: import("../../shared/types.js").Session;
 const processFetch = globalThis.fetch;
 
 const apiConfig = {
@@ -202,9 +216,11 @@ function unmarkedCallerHeaders(session: import("../../shared/types.js").Session,
 }
 
 const cooHeaders = () => toolHeaders(cooSession);
+const directorHeaders = () => toolHeaders(directorSession);
 const managerHeaders = () => toolHeaders(managerSession);
 const workerHeaders = () => toolHeaders(workerSession);
 const peerHeaders = () => toolHeaders(peerSession);
+const reviewManagerHeaders = () => toolHeaders(reviewManagerSession);
 const toolNoCapabilityHeaders = () => ({ [TOOL_CALL_HEADER]: TOOL_CALL_HEADER_VALUE });
 
 async function decide(
@@ -244,9 +260,11 @@ beforeAll(async () => {
     throw new Error("work-item approval route test callback transport is offline");
   };
   cooSession = registry.createSession({ engine: "codex", source: "web", sourceRef: "coo", title: "coo", employee: "coo" });
+  directorSession = registry.createSession({ engine: "codex", source: "web", sourceRef: "director", title: "director", employee: "platform-director" });
   managerSession = registry.createSession({ engine: "codex", source: "web", sourceRef: "manager", title: "manager", employee: "platform-manager" });
   workerSession = registry.createSession({ engine: "codex", source: "web", sourceRef: "worker", title: "worker", employee: "platform-worker" });
   peerSession = registry.createSession({ engine: "codex", source: "web", sourceRef: "peer", title: "peer", employee: "platform-peer" });
+  reviewManagerSession = registry.createSession({ engine: "codex", source: "web", sourceRef: "review-manager", title: "review manager", employee: "review-manager" });
 });
 
 afterEach(async () => {
@@ -261,6 +279,28 @@ afterAll(async () => {
 });
 
 describe("POST /api/work-items/:id/approval — COO-default authority + validation", () => {
+  it("allows a non-root manager grandparent of the Todo owner to decide its approval", async () => {
+    const item = pendingItem("in_review");
+
+    const director = await call("POST", `/api/work-items/${item.id}/approvals/decide`, { decision: "approve", note: "ship" }, directorHeaders());
+
+    expect(director.status).toBe(200);
+    expect(director.body.workItem).toMatchObject({
+      approvalState: "approved",
+      approvalDecidedBy: "platform-director",
+      status: "done",
+    });
+  });
+
+  it("refuses a manager who is only an ancestor of the explicit routed target", async () => {
+    const item = pendingItem("in_review", {}, "reviewer");
+
+    const targetManager = await decide(item.id, { decision: "approve" }, reviewManagerHeaders());
+
+    expect(targetManager.status).toBe(403);
+    expect(store.getWorkItem(item.id)!.approvalState).toBe("pending");
+  });
+
   it("rejects the worker and unrelated peers, but allows the worker's manager and the COO", async () => {
     const item = pendingItem("in_review");
     expect((await decide(item.id, { decision: "approve" }, workerHeaders())).status).toBe(403);

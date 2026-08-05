@@ -113,6 +113,8 @@ USER node
 ENV HOME=/home/node
 ENV JINN_CONTAINER=1
 ENV JINN_CONTAINER_PRIMARY_HOME=/home/node/.jinn
+ENV JINN_STT_SETTINGS=/home/node/.jinn/stt.json
+ENV JINN_STT_MODELS_DIR=/home/node/.jinn/models/whisper
 WORKDIR /home/node
 
 # Keep Claude Code's config inside the volume. It otherwise writes ~/.claude.json,

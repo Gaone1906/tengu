@@ -4,7 +4,7 @@ export type JsonValue = JsonPrimitive | JsonObject | JsonValue[]
 export interface JsonObject { [key: string]: JsonValue }
 
 export interface MessageMediaWire {
-  type: "image" | "audio" | "file"
+  type: "image" | "audio" | "video" | "file"
   url: string
   name?: string
   mimeType?: string
@@ -59,6 +59,10 @@ export interface GatewayEventMap {
   "company:changed": CompanyChangedEvent
   "pins:changed": Record<string, never>
   "notes:changed": { path: string; revision: string; action: "created" | "updated" }
+  "experiments:changed": {
+    id: string
+    action: "created" | "updated" | "reading-recorded" | "concluded"
+  }
   "org:changed": Record<string, never>
   "config:reloaded": Record<string, never>
   "skills:changed": Record<string, never>
@@ -98,6 +102,7 @@ export const GATEWAY_EVENTS = {
   companyChanged: "company:changed",
   pinsChanged: "pins:changed",
   notesChanged: "notes:changed",
+  experimentsChanged: "experiments:changed",
   orgChanged: "org:changed",
   configReloaded: "config:reloaded",
   skillsChanged: "skills:changed",
@@ -173,7 +178,7 @@ function isSessionIdPayload(value: unknown): value is { sessionId: string } {
 
 function isMessageMedia(value: unknown): value is MessageMediaWire {
   return isRecord(value)
-    && (value.type === "image" || value.type === "audio" || value.type === "file")
+    && (value.type === "image" || value.type === "audio" || value.type === "video" || value.type === "file")
     && isString(value.url)
     && isOptionalString(value.name)
     && isOptionalString(value.mimeType)
@@ -265,6 +270,13 @@ function isGatewayEventPayload(event: GatewayEventName, value: unknown): boolean
         && isString(value.path)
         && isString(value.revision)
         && (value.action === "created" || value.action === "updated")
+    case "experiments:changed":
+      return isRecord(value)
+        && isString(value.id)
+        && (value.action === "created"
+          || value.action === "updated"
+          || value.action === "reading-recorded"
+          || value.action === "concluded")
     case "cron:run-finished":
       return isRecord(value)
         && isString(value.jobId)

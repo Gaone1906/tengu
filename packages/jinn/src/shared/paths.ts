@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { resolveJinnHome, resolveMcpSessionCapabilityKeyFile } from "./home.js";
 import { resolveInstancesRegistryPath, resolveLegacyInstancesRegistryPath } from "../instances/directory.js";
 import { resolveSttModelsDir } from "../stt/model-store.js";
+import { resolveSttSettingsPath } from "../stt/settings-store.js";
 
 export { resolveJinnHome } from "./home.js";
 
@@ -91,6 +92,7 @@ export const ENGINE_LIMITS_DIR = path.join(TMP_DIR, "engine-limits");
 export const CLAUDE_LIMITS_DIR = path.join(ENGINE_LIMITS_DIR, "claude");
 export const MODELS_DIR = path.join(JINN_HOME, "models");
 export const STT_MODELS_DIR = resolveSttModelsDir();
+export const STT_SETTINGS_FILE = resolveSttSettingsPath();
 /** Read fallback for installs that have not yet adopted their per-home model. */
 export const LEGACY_STT_MODELS_DIR = path.join(JINN_HOME, "models", "whisper");
 export const PID_FILE = path.join(JINN_HOME, "gateway.pid");
@@ -114,6 +116,7 @@ export const AGENTS_SKILLS_DIR = path.join(JINN_HOME, ".agents", "skills");
 export const TEMPLATE_DIR = path.join(__dirname, "..", "..", "..", "template");
 export const FILES_DIR = path.join(JINN_HOME, "files");
 export const ATTACHMENTS_DIR = path.join(JINN_HOME, "attachments");
+export const VIDEO_CACHE_DIR = path.join(JINN_HOME, "cache", "video");
 /** Date-bucketed storage for files attached to / emitted by sessions. */
 export const UPLOADS_DIR = path.join(JINN_HOME, "uploads");
 export const TEMPLATE_MIGRATIONS_DIR = path.join(TEMPLATE_DIR, "migrations");

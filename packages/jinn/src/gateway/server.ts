@@ -1232,9 +1232,9 @@ export async function startGateway(
   // Sync skill symlinks to .claude/skills/ and .agents/skills/
   syncSkillSymlinks();
 
-  // Initialize STT model symlinks
+  // Initialize host-shared STT models and settings
   try {
-    initStt();
+    initStt(currentConfig.stt);
   } catch (err) {
     logger.warn(`STT init skipped: ${err instanceof Error ? err.message : err}`);
   }

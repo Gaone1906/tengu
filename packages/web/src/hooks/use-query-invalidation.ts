@@ -156,6 +156,12 @@ export function useQueryInvalidation() {
             qc.invalidateQueries({ queryKey: queryKeys.notes.document(p.path) })
           }
           return
+        case 'experiments:changed':
+          qc.invalidateQueries({ queryKey: ['experiments'] })
+          if (typeof p?.id === 'string' && p.id) {
+            qc.invalidateQueries({ queryKey: ['experiments', p.id] })
+          }
+          return
         case 'session:started':
         case 'session:created':
           // A freshly created session (e.g. a delegated child) joins the same

@@ -17,15 +17,17 @@ const approxTokens = (text: string): number => Math.ceil(text.length / 4);
 
 describe("the GRS-017e template diet tranche (MCP-first realized)", () => {
   const template = fs.readFileSync(templatePath, "utf-8");
+  const delegationSkill = fs.readFileSync(path.join(templateRoot, "skills", "delegation", "SKILL.md"), "utf-8");
 
   it("the Child Session Protocol is now tool-shaped, not raw HTTP-shaped", () => {
     expect(template).not.toContain("grs-017e-diet:start child-session-protocol");
     expect(template).not.toContain("grs-017e-diet:end child-session-protocol");
-    expect(template).toContain("### Child Session Protocol");
-    expect(template).toContain("spawn_session");
-    expect(template).toContain("delegate_task");
-    expect(template).toContain("read_session");
-    expect(template).toContain("send_to_session");
+    expect(template).toContain("| Delegation | `skills/delegation/SKILL.md` |");
+    expect(delegationSkill).toContain("## The child-session protocol");
+    expect(delegationSkill).toContain("spawn_session");
+    expect(delegationSkill).toContain("delegate_task");
+    expect(delegationSkill).toContain("read_session");
+    expect(delegationSkill).toContain("send_to_session");
     expect(template).not.toContain("POST /api/sessions");
     expect(template).not.toContain("GET /api/sessions/{id}");
     expect(template).not.toContain("POST /api/sessions/{id}/message");
@@ -34,8 +36,8 @@ describe("the GRS-017e template diet tranche (MCP-first realized)", () => {
   it("the endpoint-table tranche has been replaced by the MCP-first company operations surface", () => {
     expect(template).not.toContain("grs-017e-diet: at jinn-MCP default-attach");
     expect(deletableTableRows(template)).toEqual([]);
-    expect(template).toContain("## Company Operations Surface");
     expect(template).toContain("Use the attached Jinn MCP tools for company operations");
+    expect(template).toContain("Gateway HTTP is for the web UI and platform maintenance, not routine company work.");
   });
 
   it("keeps the realized static-template recovery measurable", () => {
@@ -47,14 +49,16 @@ describe("the GRS-017e template diet tranche (MCP-first realized)", () => {
       "You can edit any file in `~/.jinn/`",
     ];
     const remainingSideDoors = rawHttpStrings.filter((s) => template.includes(s));
-    const toolProtocolTokens = approxTokens(section(template, "### Child Session Protocol", "### Persistent Delegation"));
+    const toolProtocolTokens = approxTokens(
+      section(delegationSkill, "## The child-session protocol", "## Brief quality and review"),
+    );
 
     const ledger = {
       method: "approxTokens = ceil(chars/4), same as GRS-017b",
       toolShapedChildSessionProtocol: toolProtocolTokens,
       rawCompanySideDoorStringsRemaining: remainingSideDoors,
       honestReading:
-        "the static child-session protocol remains present, but it is now the compact MCP tool protocol, not a raw HTTP fallback block.",
+        "the child-session protocol lives in its owning skill as a compact MCP tool protocol, not a raw HTTP fallback block.",
     };
     // eslint-disable-next-line no-console
     console.log(`GRS-017e-DIET-TRANCHE ${JSON.stringify(ledger, null, 2)}`);

@@ -85,7 +85,7 @@ describe("gatewayGet", () => {
 });
 
 describe("buildTools", () => {
-  it("exposes exactly the admitted org/session/reference/knowledge/delegation/Todo/workflow groups (scope discipline; NO gate-resolve, NO session-delete, NO cancel Todo tool)", () => {
+  it("exposes exactly the admitted company tool groups (scope discipline; NO gate-resolve, NO session-delete, NO cancel Todo tool)", () => {
     const names = buildTools().map((t) => t.name).sort();
     expect(names).toEqual([
       "archive_work_item",
@@ -93,7 +93,9 @@ describe("buildTools", () => {
       "attach_to_work_item",
       "cancel_workflow_run",
       "comment_work_item",
+      "conclude_experiment",
       "cost_report",
+      "create_experiment",
       "create_label",
       "create_note",
       "create_work_item",
@@ -110,6 +112,7 @@ describe("buildTools", () => {
       "fire_workflow_event",
       "get_cron_run_history",
       "get_employee",
+      "get_experiment",
       "get_message_context",
       "get_work_item",
       "get_work_item_tree",
@@ -120,6 +123,7 @@ describe("buildTools", () => {
       "list_cron_jobs",
       "list_departments",
       "list_employees",
+      "list_experiments",
       "list_files",
       "list_labels",
       "list_notes",
@@ -134,6 +138,7 @@ describe("buildTools", () => {
       "read_knowledge",
       "read_note",
       "read_session",
+      "record_reading",
       "request_work_item_approval",
       "rerun_workflow_run",
       "retire_workflow",
@@ -148,6 +153,7 @@ describe("buildTools", () => {
       "start_workflow_run",
       "stop_session",
       "unlink_work_items",
+      "update_experiment",
       "update_note",
       "update_work_item",
       "update_workflow",
@@ -249,7 +255,7 @@ describe("handleMcpRequest — tools/call", () => {
 
   it("compiles every advertised registry schema or supplies its shared runtime schema", () => {
     const tools = buildTools();
-    expect(tools).toHaveLength(63);
+    expect(tools).toHaveLength(69);
     for (const tool of tools) {
       expect(() => tool.runtimeSchema ?? z.fromJSONSchema({ ...tool.inputSchema, additionalProperties: false } as Parameters<typeof z.fromJSONSchema>[0]), tool.name).not.toThrow();
     }

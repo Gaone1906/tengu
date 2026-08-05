@@ -6,7 +6,7 @@ import { loadConfig } from "../shared/config.js";
 import { logger } from "../shared/logger.js";
 import type { Employee, Session } from "../shared/types.js";
 import type { WorkItem } from "../work-items/store.js";
-import { resolveOrgHierarchy } from "./org-hierarchy.js";
+import { isOrgAncestor, resolveOrgHierarchy } from "./org-hierarchy.js";
 import { scanOrg } from "./org.js";
 import { resolveCallerIdentity } from "./session-comm-guards.js";
 
@@ -246,6 +246,12 @@ export function resolveApprovalDecisionAuthority(
   }
   if (route.target && employee === route.target && !route.targetIsVirtualRoot) {
     return { ok: true, authority: { ...route, kind: "employee", employee, actor: employee } };
+  }
+  if (emp.rank === "manager" || emp.rank === "executive") {
+    const hierarchy = resolveOrgHierarchy(registry);
+    if (route.owner && isOrgAncestor(hierarchy, employee, route.owner)) {
+      return { ok: true, authority: { ...route, kind: "employee", employee, actor: employee } };
+    }
   }
   if (route.root && route.rootKind === "employee" && employee === route.root) {
     return { ok: true, authority: { ...route, kind: "employee", employee, actor: employee } };
