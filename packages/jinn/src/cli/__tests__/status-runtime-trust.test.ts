@@ -23,6 +23,10 @@ beforeAll(async () => {
     });
   });
   fs.writeFileSync(path.join(home, "config.yaml"), `gateway:\n  host: 127.0.0.1\n  port: ${durablePort}\n`);
+  // Status intentionally does not trust gateway.json's pid. Seed the
+  // authoritative process record so this routing test does not depend on an
+  // unrelated listener already occupying its overridden port.
+  fs.writeFileSync(path.join(home, "gateway.pid"), `${process.pid}\n`);
   fs.writeFileSync(path.join(home, "gateway.json"), JSON.stringify({
     port: 65527,
     host: "127.0.0.1",
