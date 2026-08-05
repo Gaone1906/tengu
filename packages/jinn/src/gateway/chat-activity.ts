@@ -3,8 +3,8 @@ import type {
   ActivityReceipt,
   ChatBlockEnvelope,
   CompanyChangedEvent,
-  GatewayEmit,
 } from "../shared/types.js";
+import type { GatewayEmit } from "../shared/gateway-events.js";
 import { blockFallbackText } from "../shared/blocks.js";
 
 export interface ActivityOperation {

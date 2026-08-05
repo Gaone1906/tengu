@@ -1,41 +1,6 @@
-import type { TalkEventMap } from "../talk/protocol.js";
-import type { MessageMedia } from "../sessions/registry.js";
-import type { TodoLiveEvent } from "../work-items/live-events.js";
-
 export type StreamDeltaType = "text" | "text_snapshot" | "tool_use" | "tool_result" | "status" | "error" | "context" | "block";
 
-type CompanyChangedBase = { action: string; id: string; sessionId?: string };
-export type CompanyChangedEvent =
-  | (CompanyChangedBase & { entity: "todo"; version: number; value?: JsonObject })
-  | { entity: "workflow-definition"; id: string; revision: number }
-  | { entity: "workflow-run"; workflowId: string; runId: string };
-
-/**
- * The gateway → dashboard WebSocket vocabulary, authored from the real call sites.
- * Every non-test `emit` is typed against it, so an event name nothing listens for
- * or an unreadable payload fails typecheck instead of shipping as a dead frame.
- */
-export type GatewayEventMap = TalkEventMap
-  & Record<"session:started" | "session:created" | "session:updated" | "session:deleted" | "session:stopped" | "session:external-turn", { sessionId: string }>
-  & Record<"pins:changed" | "org:changed" | "config:reloaded" | "skills:changed" | "cron:reloaded" | "engines:updated", Record<string, never>>
-  & {
-    /** Route writes carry `CompanyChangedEvent`; the in-process Todo lane carries `TodoLiveEvent`. */
-    "company:changed": CompanyChangedEvent | TodoLiveEvent;
-    "session:interrupted": { sessionId: string; reason: string };
-    "session:completed": { sessionId: string; result: string | null; error: string | null; employee?: string; title?: string | null; cost?: number; durationMs?: number };
-    "session:delta": { sessionId: string } & StreamDelta;
-    "session:notification": { sessionId: string; message: string; meta?: JsonObject };
-    "session:attachment": { sessionId: string; id: string; content: string; media: MessageMedia[]; timestamp: number };
-    "session:background": { sessionId: string; transportState: string; backgroundActivity: { activeStreams: number; activeAgents?: number; activeMonitors?: number; lastActivityAt: string } | null };
-    "queue:updated": { sessionId: string; sessionKey: string; depth?: number; paused?: boolean };
-    "notes:changed": { path: string; revision: string; action: "created" | "updated" };
-    "board:updated": { department: string };
-    "stt:download:progress": { progress: number };
-    "stt:download:complete": { model: string };
-    "stt:download:error": { error: string };
-  };
-
-export type GatewayEmit = <K extends keyof GatewayEventMap>(event: K, payload: GatewayEventMap[K]) => void;
+export type { CompanyChangedEvent } from "./gateway-events.js";
 
 export interface NoteSummary {
   /** Public path below JINN_HOME, for example knowledge/product/brief.md. */
@@ -129,7 +94,7 @@ export type WorkflowRunActivityPayload = JsonObject & {
   activityReceipt?: ActivityReceipt;
 };
 
-export interface ChatBlock {
+export type ChatBlock = JsonObject & {
   id: string;
   type: ChatBlockType;
   version: number;
@@ -141,12 +106,12 @@ export interface ChatBlock {
   title?: string;
   summary?: string;
   payload: JsonObject;
-}
+};
 
-export interface ChatBlockEnvelope {
+export type ChatBlockEnvelope = JsonObject & {
   op: ChatBlockOp;
   block: ChatBlock;
-}
+};
 
 export interface StreamDelta {
   type: StreamDeltaType;

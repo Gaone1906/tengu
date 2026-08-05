@@ -2,13 +2,11 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { Copy, Minimize2, X } from "lucide-react"
 import { api } from "@/lib/api"
-import { useGateway } from "@/hooks/use-gateway"
 import { parseLogLine } from "@/components/activity/log-browser"
 import type { ParsedLogEntry } from "@/components/activity/log-browser"
 
 /* ── Constants ────────────────────────────────────────────────── */
 
-const MAX_LINES = 500
 const WIDGET_EVENT = "open-live-stream"
 
 const LEVEL_STYLE: Record<string, { bg: string; color: string; label: string }> = {
@@ -112,11 +110,6 @@ export function LiveStreamWidget() {
   const [error, setError] = useState<string | null>(null)
 
   const scrollRef = useRef<HTMLDivElement>(null)
-  const logIndexRef = useRef(0)
-
-  const { subscribe } = useGateway()
-  const stateRef = useRef<WidgetState>(state)
-  stateRef.current = state
 
   /* ── Auto-scroll ──────────────────────────────────────────── */
 
@@ -149,23 +142,6 @@ export function LiveStreamWidget() {
         setError(err instanceof Error ? err.message : "Failed to load logs")
       })
   }, [state])
-
-  /* ── Listen for WebSocket events ──────────────────────────── */
-  // Subscribe to gateway events directly (avoids re-rendering on every event by
-  // not destructuring the `events` array from context). We still gate on the
-  // current widget state via a ref so the subscriber stays mounted but cheap.
-
-  useEffect(() => {
-    return subscribe((event, payload) => {
-      if (stateRef.current === "hidden") return
-      if (event !== "log") return
-      if (typeof payload !== "object" || payload === null) return
-      const p = payload as Record<string, unknown>
-      const line = (p.line as string) || (p.message as string) || JSON.stringify(payload)
-      const newEntry = parseLogLine(line, logIndexRef.current++)
-      setEntries((prev) => [...prev, newEntry].slice(-MAX_LINES))
-    })
-  }, [subscribe])
 
   /* ── Actions ──────────────────────────────────────────────── */
 

@@ -4,7 +4,7 @@ import { getSession, getMessages, insertMessage, updateMessageContent, updateSes
 import { initDb } from "../shared/db.js";
 import { findTranscriptForSession } from "../engines/claude-interactive.js";
 import type { HookPayload } from "./hook-registry.js";
-import type { GatewayEmit } from "../shared/types.js";
+import type { GatewayEmit } from "../shared/gateway-events.js";
 
 /**
  * External-turn sync: persist turns that happened OUTSIDE a gateway run() —

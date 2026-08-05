@@ -4,7 +4,8 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import yaml from "js-yaml";
-import type { ChatBlock, ChatBlockEnvelope, CronJob, DelegatedActivity, Employee, Engine, GatewayEmit, IncomingMessage, JinnConfig, JsonObject, Session, StreamDelta, Target } from "../shared/types.js";
+import type { GatewayEmit } from "../shared/gateway-events.js";
+import type { ChatBlock, ChatBlockEnvelope, CronJob, DelegatedActivity, Employee, Engine, IncomingMessage, JinnConfig, JsonObject, Session, StreamDelta, Target } from "../shared/types.js";
 import { isInterruptibleEngine, reportsTurnProgress, STRUCTURED_MESSAGE_BODY_MAX_CHARS } from "../shared/types.js";
 import { compactEmployeeRole } from "../shared/employee-role.js";
 export { compactEmployeeRole } from "../shared/employee-role.js";
@@ -3042,6 +3043,13 @@ export async function handleApiRequest(
       });
     }
 
+    // GET /api/sessions/interrupted — list sessions that can be resumed after a restart
+    if (method === "GET" && pathname === "/api/sessions/interrupted") {
+      const { getInterruptedSessions } = await import("../sessions/registry.js");
+      const interrupted = getInterruptedSessions();
+      return json(res, serializeSessionList(interrupted, context));
+    }
+
     // GET /api/sessions/:id/messages?before=<messageId>&limit=N
     // Bounded older-history page for seamless transcript prepending in the web UI.
     let params = matchRoute("/api/sessions/:id/messages", pathname);
@@ -5791,7 +5799,7 @@ export async function handleApiRequest(
       logger.info(`Manual trigger for cron job "${job.name}" (${job.id})`);
 
       // Fire and forget — respond immediately, run in background.
-      runCronJob(job, context.sessionManager, context.getConfig(), context.connectors).catch(
+      runCronJob(job, context.sessionManager, context.getConfig(), context.connectors, { emit: context.emit }).catch(
         (err) => logger.error(`Manual cron trigger failed for "${job.name}": ${err}`)
       );
 
@@ -5917,7 +5925,6 @@ export async function handleApiRequest(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const body = _parsed.body as any;
       fs.writeFileSync(boardPath, JSON.stringify(body, null, 2));
-      context.emit("board:updated", { department: p.name });
       return json(res, { status: "ok" });
     }
 

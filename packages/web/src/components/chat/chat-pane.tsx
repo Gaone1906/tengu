@@ -17,13 +17,12 @@ import type { CliTerminalHandle } from '@/components/cli-terminal'
 import { buildNewSessionParams, resolveNewSessionSelector, shouldPersistNewSessionSelector } from '@/components/chat/new-chat-helpers'
 import type { Employee, EnginesResponse } from '@/lib/api'
 import type { Message, MediaAttachment } from '@/lib/conversations'
+import type { GatewayEvent, GatewayEventListener } from '@jinn/gateway-events'
 
 // The live read pipeline (load/WS/reconnect/watchdog) now lives in
 // useLiveSession; shouldRecoverStuckTurn moved there too. Re-export it so the
 // existing completion-watchdog test (imports from this module) keeps working.
 export { shouldRecoverStuckTurn } from '@/hooks/use-live-session'
-
-type Listener = (event: string, payload: unknown) => void
 
 const NEW_SESSION_SELECTOR_KEY = 'jinn-chat-new-session-selector'
 
@@ -69,14 +68,14 @@ interface ChatPaneProps {
   /** Portal name from settings */
   portalName?: string
   /** Gateway subscribe function for WS events */
-  subscribe: (fn: Listener) => () => void
+  subscribe: (fn: GatewayEventListener) => () => void
   engineRegistry?: EnginesResponse // supportsPty decides the CLI/xterm affordance
   /** Gateway connection seq number - triggers reload on reconnect */
   connectionSeq?: number
   /** Gateway skills version */
   skillsVersion?: number
   /** Gateway events array */
-  events: Array<{ event: string; payload: unknown }>
+  events: GatewayEvent[]
   /** View mode: chat or cli transcript */
   viewMode?: 'chat' | 'cli'
   /** Incrementing counter that triggers input focus */

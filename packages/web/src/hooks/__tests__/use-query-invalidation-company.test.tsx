@@ -4,13 +4,15 @@ import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useQueryInvalidation } from '../use-query-invalidation'
 import { queryKeys } from '@/lib/query-keys'
+import type { GatewayEvent, GatewayEventListener } from '@jinn/gateway-events'
 
 let listener: ((event: string, payload: unknown) => void) | undefined
 
 vi.mock('@/hooks/use-gateway', () => ({
   useGateway: () => ({
     subscribe: (next: (event: string, payload: unknown) => void) => {
-      listener = next
+      const typedNext = next as unknown as GatewayEventListener
+      listener = (event, payload) => typedNext({ event, payload } as GatewayEvent)
       return () => { listener = undefined }
     },
   }),
@@ -144,5 +146,22 @@ describe('company + session:created invalidation', () => {
     await act(async () => vi.advanceTimersByTimeAsync(1_000))
     expect(calledWithKey(invalidate, queryKeys.sessions.detail('session-a'))).toBe(true)
     expect(calledWithKey(invalidate, queryKeys.sessions.transcript('session-a'))).toBe(true)
+  })
+
+  it.each(['success', 'error'] as const)('invalidates cron run history and job keys on a %s run', async (status) => {
+    const { invalidate } = setup()
+    act(() => listener?.('cron:run-finished', { jobId: 'nightly', status }))
+    await act(async () => vi.advanceTimersByTimeAsync(1_000))
+    expect(calledWithKey(invalidate, ['cron-runs', 'nightly'])).toBe(true)
+    expect(calledWithKey(invalidate, queryKeys.cron.jobs)).toBe(true)
+    expect(calledWithKey(invalidate, queryKeys.cron.all)).toBe(true)
+  })
+
+  it('invalidates session list and detail when the shared stopped lifecycle event arrives', async () => {
+    const { invalidate } = setup()
+    act(() => listener?.('session:stopped', { sessionId: 'workflow-session' }))
+    await act(async () => vi.advanceTimersByTimeAsync(1_000))
+    expect(calledWithKey(invalidate, queryKeys.sessions.all)).toBe(true)
+    expect(calledWithKey(invalidate, queryKeys.sessions.detail('workflow-session'))).toBe(true)
   })
 })

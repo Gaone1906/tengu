@@ -6,7 +6,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
-import type { JinnConfig, Connector, Employee, Engine, GatewayEmit, JsonObject, Session, SlackConnectorConfig, TelegramConnectorConfig, WhatsAppConnectorConfig } from "../shared/types.js";
+import type { GatewayEmit } from "../shared/gateway-events.js";
+import type { JinnConfig, Connector, Employee, Engine, JsonObject, Session, SlackConnectorConfig, TelegramConnectorConfig, WhatsAppConnectorConfig } from "../shared/types.js";
 import { loadConfig, normalizeClaudeEngineConfig } from "../shared/config.js";
 import {
   getModelRegistry,
@@ -851,6 +852,7 @@ export async function startGateway(
       }
     }
   };
+  sessionManager.setGatewayEmitter(emit);
   // ICI-570: in-process Todo writes (cron mints, session-lifecycle reconciles)
   // reach the dashboard through the same company:changed lane the routes use.
   setTodoLiveEmitter((event) => emit("company:changed", event));
@@ -1052,7 +1054,7 @@ export async function startGateway(
   });
 
   const cronJobs = loadJobs();
-  startScheduler(cronJobs, sessionManager, config, connectorMap);
+  startScheduler(cronJobs, sessionManager, config, connectorMap, emit);
   logger.info(`Loaded ${cronJobs.length} cron job(s)`);
 
   // Resolve web UI directory — bundled into dist/web/ by postbuild script

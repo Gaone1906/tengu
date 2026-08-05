@@ -5,7 +5,7 @@
  * kokoro.ts and consumed by tts-stream.ts. Nothing else lives here.
  */
 
-import type { GatewayEmit } from "../shared/types.js"
+import type { GatewayEmit } from "../shared/gateway-events.js"
 
 /** WebSocket event names emitted during synthesis (envelope: { event, payload, ts }). */
 export const TALK_EVENTS = {
@@ -14,14 +14,6 @@ export const TALK_EVENTS = {
   ttsDownloadComplete: "talk:tts:download:complete",
   ttsDownloadError: "talk:tts:download:error",
 } as const
-
-/** The live Kokoro `talk:*` slice of the gateway broadcast vocabulary. */
-export interface TalkEventMap {
-  "talk:audio": { sessionId: string; seq: number; mime: string; dataBase64: string; last?: boolean }
-  "talk:tts:download:progress": { progress: number }
-  "talk:tts:download:complete": Record<string, never>
-  "talk:tts:download:error": { error: string }
-}
 
 /** Broadcast function injected everywhere (matches gateway server's `emit`). */
 export type Emit = GatewayEmit

@@ -30,17 +30,16 @@ import {
   useLiveSession,
 } from "../use-live-session"
 import type { Message } from "@/lib/conversations"
-
-type Listener = (event: string, payload: unknown) => void
+import type { GatewayEvent, GatewayEventListener } from "@jinn/gateway-events"
 
 /** A manual gateway subscribe that lets the test emit WS events. */
 function makeBus() {
-  let listener: Listener | null = null
-  const subscribe = (fn: Listener) => {
+  let listener: GatewayEventListener | null = null
+  const subscribe = (fn: GatewayEventListener) => {
     listener = fn
     return () => { listener = null }
   }
-  const emit = (event: string, payload: unknown) => listener?.(event, payload)
+  const emit = (event: string, payload: unknown) => listener?.({ event, payload } as GatewayEvent)
   return { subscribe, emit }
 }
 

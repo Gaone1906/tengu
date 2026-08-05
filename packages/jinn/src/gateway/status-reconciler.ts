@@ -1,4 +1,5 @@
-import type { Engine, GatewayEmit } from "../shared/types.js";
+import type { GatewayEmit } from "../shared/gateway-events.js";
+import type { Engine } from "../shared/types.js";
 import { listSessions, updateSession } from "../sessions/registry.js";
 import { logger } from "../shared/logger.js";
 

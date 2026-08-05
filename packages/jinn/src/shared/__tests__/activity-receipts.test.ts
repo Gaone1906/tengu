@@ -3,7 +3,7 @@ import {
   extractActivityReceiptId,
   workflowDefinitionActivityBlockId,
 } from "../activity-receipts.js";
-import type { GatewayEmit } from "../types.js";
+import type { GatewayEmit } from "../gateway-events.js";
 
 // PLA-60 compile lock: widening `GatewayEmit` back to (string, unknown) leaves
 // the expect-error directives below unsatisfied, which fails `tsc --noEmit`.

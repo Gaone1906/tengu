@@ -37,7 +37,19 @@ for (const dir of ["bin", "src"]) {
 // 2. Compile.
 runTsc(["-p", "tsconfig.build.json"]);
 
-// 3. Copy the Talk assets tsc does not emit (Markdown + Python live beside the
+// 3. Embed the neutral gateway protocol declaration. Backend source consumes
+//    the workspace package through src/shared/gateway-events.ts, but jinn-cli is
+//    published independently. Copying the canonical declaration into that
+//    relative module keeps every shipped .d.ts reference resolvable without a
+//    runtime/package dependency (all backend imports are type-only).
+const gatewayEventsDeclaration = path.resolve(packageRoot, "../gateway-events/dist/index.d.ts");
+const embeddedGatewayEventsDeclaration = path.join(dist, "src", "shared", "gateway-events.d.ts");
+const declarationText = fs.readFileSync(gatewayEventsDeclaration, "utf8")
+  .replace(/\n?\/\/# sourceMappingURL=index\.d\.ts\.map\s*$/, "\n");
+fs.writeFileSync(embeddedGatewayEventsDeclaration, declarationText);
+fs.rmSync(`${embeddedGatewayEventsDeclaration}.map`, { force: true });
+
+// 4. Copy the Talk assets tsc does not emit (Markdown + Python live beside the
 //    TypeScript). Missing files are not an error: they are optional extras.
 const talkSource = path.join(packageRoot, "src", "talk");
 const talkTarget = path.join(dist, "src", "talk");
@@ -52,4 +64,4 @@ try {
 } catch (error) {
   if (error.code !== "ENOENT") throw error;
 }
-console.log(`build: compiled to dist/, copied ${copied} talk asset(s)`);
+console.log(`build: compiled to dist/, embedded gateway declarations, copied ${copied} talk asset(s)`);

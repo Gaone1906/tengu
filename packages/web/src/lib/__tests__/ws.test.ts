@@ -78,10 +78,24 @@ describe('createGatewaySocket', () => {
     const onEvent = vi.fn()
     const sock = createGatewaySocket(onEvent)
     live()[0]._open()
-    live()[0]._emit({ event: 'session:delta', payload: { a: 1 } })
+    const frame = {
+      event: 'session:delta',
+      payload: { sessionId: 'session-1', type: 'text', content: 'hello' },
+    }
+    live()[0]._emit(frame)
     live()[0]._emit({ event: 'pong', payload: {} })
     expect(onEvent).toHaveBeenCalledTimes(1)
-    expect(onEvent).toHaveBeenCalledWith('session:delta', { a: 1 })
+    expect(onEvent).toHaveBeenCalledWith(frame)
+    sock.close()
+  })
+
+  it('drops known event names whose payload does not match the wire contract', () => {
+    const onEvent = vi.fn()
+    const sock = createGatewaySocket(onEvent)
+    live()[0]._open()
+    live()[0]._emit({ event: 'session:delta', payload: { a: 1 } })
+    live()[0]._emit({ event: 'cron:run-finished', payload: { jobId: 'job-1', status: 'pending' } })
+    expect(onEvent).not.toHaveBeenCalled()
     sock.close()
   })
 

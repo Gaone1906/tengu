@@ -13,6 +13,7 @@
     "clean": "rm -rf out dist"
   },
   "dependencies": {
+    "@jinn/gateway-events": "workspace:*",
     "@dagrejs/dagre": "^2.0.4",
     "@tanstack/react-query": "^5",
     "@tanstack/react-virtual": "^3.13.24",

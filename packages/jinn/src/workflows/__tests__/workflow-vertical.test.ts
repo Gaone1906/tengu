@@ -651,6 +651,19 @@ describe("first Workflow vertical", () => {
     expect(engine.kills).toEqual([{ sessionId, reason: "Attempt stopped explicitly." }]);
   });
 
+  it("publishes the shared stopped-session lifecycle event for Workflow-internal cancellation", async () => {
+    const authored = definition({ id: "internal-cancel-event" });
+    const started = await service.startManual({ workflowId: authored.id, input: { topic: "stop" } });
+    await vi.waitFor(() => expect(engine.calls).toHaveLength(1));
+    const sessionId = service.getRun(authored.id, started.id)!.attempts[0]!.sessionId!;
+    const emit = vi.fn();
+    ;(manager as unknown as { setGatewayEmitter: (next: typeof emit) => void }).setGatewayEmitter?.(emit)
+
+    await service.cancelRun({ workflowId: authored.id, runId: started.id, reason: "Cancelled inside Workflow." });
+
+    expect(emit).toHaveBeenCalledWith("session:stopped", { sessionId });
+  });
+
   it("defers the reminder rung for a running child, then accepts the parent's route submission", async () => {
     const authored = definition({ id: "delegated-route-submit-flow" });
     const started = await service.startManual({ workflowId: authored.id, input: { topic: "delegated" } });

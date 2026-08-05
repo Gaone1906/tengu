@@ -42,6 +42,7 @@ import { queryKeys } from '@/lib/query-keys'
 import { cn } from '@/lib/utils'
 import { Archive, ArchiveRestore, Check, Copy, MoreHorizontal, Search, Share2, Trash2 } from 'lucide-react'
 import { writeViewMode, type ViewMode } from '@/lib/view-mode'
+import type { GatewayEvent } from '@jinn/gateway-events'
 import { shareDebugLog, clearDebugLog } from '@/lib/debug-log'
 
 class ChatErrorBoundary extends React.Component<{ children: React.ReactNode }, { error: Error | null }> {
@@ -287,7 +288,8 @@ function ChatPage() {
   // bulk-delete or another client). Without this, `status: 'running'` set by
   // handleSessionCreated never flips back, leaving a stale blue dot.
   useEffect(() => {
-    const unsub = subscribe((event: string, payload: unknown) => {
+    const unsub = subscribe((frame: GatewayEvent) => {
+      const { event, payload } = frame
       const p = (payload || {}) as { sessionId?: string; title?: string }
       const sid = p.sessionId
       if (!sid) return

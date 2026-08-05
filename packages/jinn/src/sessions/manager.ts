@@ -58,6 +58,7 @@ import {
   isDurableWorkflowUserMessageInterruption,
   workflowAttemptInterruptionCause,
 } from "./workflow-interruptions.js";
+import type { GatewayEmit } from "../shared/gateway-events.js";
 
 export interface RouteOptions {
   employee?: Employee;
@@ -150,6 +151,7 @@ export class SessionManager {
   private connectorProvider: () => Map<string, Connector> = () => new Map();
   private workflowAttemptCompletionListeners = new Set<WorkflowAttemptCompletionListener>();
   private emittedWorkflowAttemptCompletions = new Set<string>();
+  private gatewayEmit: GatewayEmit | undefined;
 
   constructor(
     config: JinnConfig,
@@ -169,6 +171,10 @@ export class SessionManager {
   }
   setConnectorProvider(provider: () => Map<string, Connector>): void {
     this.connectorProvider = provider;
+  }
+
+  setGatewayEmitter(next: GatewayEmit | undefined): void {
+    this.gatewayEmit = next;
   }
 
   /** Live connector ids — reflects reloads, with no cached copy to refresh. */
@@ -234,7 +240,9 @@ export class SessionManager {
     const session = getSession(input.sessionId); if (!session || session.workflowProvenance?.kind !== "phase") return;
     const stopped = interruptSessionAttempt(session.id, input.reason, new Date().toISOString()); if (!stopped) return; cancelWorkflowAttemptDispatch(stopped.id);
     this.queue.clearQueue(stopped.sessionKey); const engine = this.engines.get(stopped.engine);
-    if (engine && isInterruptibleEngine(engine)) engine.kill(stopped.id, input.reason); this.emitWorkflowAttemptCompletion(stopped, "attempt-stop");
+    if (engine && isInterruptibleEngine(engine)) engine.kill(stopped.id, input.reason);
+    this.gatewayEmit?.("session:stopped", { sessionId: stopped.id });
+    this.emitWorkflowAttemptCompletion(stopped, "attempt-stop");
   }
   emitWorkflowAttemptTurnCompletion(sessionId: string): void {
     this.emitWorkflowAttemptCompletion(getSession(sessionId));
