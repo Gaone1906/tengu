@@ -63,6 +63,14 @@ describe("fileIdsToMedia", () => {
     expect(media[1]).toMatchObject({ type: "file", url: "/api/files/zip", name: "bundle.zip", mimeType: "application/zip" });
   });
 
+  it("maps video MIME types to video media descriptors", () => {
+    reg.insertFile({ id: "vid", filename: "clip.mp4", size: 4, mimetype: "video/mp4", path: null });
+
+    expect(files.fileIdsToMedia(["vid"])).toEqual([
+      expect.objectContaining({ type: "video", url: "/api/files/vid", name: "clip.mp4", mimeType: "video/mp4" }),
+    ]);
+  });
+
   it("returns [] for non-array input", () => {
     expect(files.fileIdsToMedia(undefined)).toEqual([]);
     expect(files.fileIdsToMedia("nope")).toEqual([]);

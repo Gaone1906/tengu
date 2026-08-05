@@ -202,6 +202,7 @@ function resizeImage(file: File, maxPx: number): Promise<string> {
 async function fileToAttachment(file: File): Promise<MediaAttachment> {
   const isImage = file.type.startsWith('image/')
   const isAudio = file.type.startsWith('audio/')
+  const isVideo = file.type.startsWith('video/')
 
   let dataUrl: string
   if (isImage) {
@@ -216,7 +217,7 @@ async function fileToAttachment(file: File): Promise<MediaAttachment> {
   }
 
   return {
-    type: isImage ? 'image' : isAudio ? 'audio' : 'file',
+    type: isImage ? 'image' : isAudio ? 'audio' : isVideo ? 'video' : 'file',
     url: dataUrl,
     name: file.name,
     mimeType: file.type,
@@ -847,7 +848,7 @@ export function ChatInput({
         <input
           ref={fileInputRef}
           type="file"
-          accept="image/*,audio/*,.pdf,.doc,.docx,.txt,.csv,.json,.zip"
+          accept="image/*,audio/*,video/*,.pdf,.doc,.docx,.txt,.csv,.json,.zip"
           multiple
           className="hidden"
           onChange={handleFileAttach}

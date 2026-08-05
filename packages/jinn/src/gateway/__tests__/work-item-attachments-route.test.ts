@@ -3,14 +3,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { Readable } from "node:stream";
+import { Readable, Writable } from "node:stream";
 import type { ServerResponse } from "node:http";
 import { ensureSessionCapability } from "../../mcp/identity.js";
 import { CALLER_SESSION_CAPABILITY_HEADER, CALLER_SESSION_HEADER, TOOL_CALL_HEADER, TOOL_CALL_HEADER_VALUE } from "../../mcp/identity.js";
 
 /**
  * Route-level tests for Todos v2 slice 5: attachment upload (multipart + JSON
- * path), list, download with integrity re-verification, removal authority, the
+ * path), list, ranged download with a size guard, removal authority, the
  * departments surface, and the label-PUT array cap. Drives handleApiRequest
  * directly against a throwaway JINN_HOME.
  */
@@ -42,20 +42,23 @@ function makeRes() {
   let status = 200;
   let headers: Record<string, unknown> = {};
   const chunks: Buffer[] = [];
-  const res = {
+  const res = new class extends Writable {
+    _write(chunk: Buffer | string, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      callback();
+    }
+
     writeHead(s: number, h?: Record<string, unknown>) {
       status = s;
       if (h) headers = { ...headers, ...h };
       return this;
-    },
+    }
+
     setHeader(name: string, value: unknown) {
       headers[name] = value;
       return this;
-    },
-    end(buf?: Buffer | string) {
-      if (buf) chunks.push(Buffer.isBuffer(buf) ? buf : Buffer.from(buf));
-    },
-  } as unknown as ServerResponse;
+    }
+  }() as unknown as ServerResponse;
   return {
     res,
     get status() {
@@ -395,19 +398,62 @@ describe("GET /api/work-items/:id/attachments/:aid (download)", () => {
     const id = posted.body.attachment.id;
     const got = await call("GET", `/api/work-items/${item.id}/attachments/${id}`, undefined, operatorHeaders);
     expect(got.status).toBe(200);
+    expect(got.headers["Accept-Ranges"]).toBe("bytes");
     expect(got.headers["Content-Type"]).toBe("application/pdf");
     expect(String(got.headers["Content-Disposition"])).toBe('attachment; filename="report.pdf"');
     expect(got.raw).toEqual(content);
   });
 
-  it("re-verifies the sha256 on download — a corrupted stored file is a loud 500", async () => {
+  it("streams an exact byte range and returns 416 when the range cannot be satisfied", async () => {
+    const item = store.createWorkItem({ title: "ranged download" });
+    const content = Buffer.from("0123456789");
+    const posted = await upload(`/api/work-items/${item.id}/attachments`, { file: { name: "clip.mp4", content } }, operatorHeaders);
+    const url = `/api/work-items/${item.id}/attachments/${posted.body.attachment.id}`;
+
+    const partial = await call("GET", url, undefined, { ...operatorHeaders, range: "bytes=3-6" });
+    expect(partial.status).toBe(206);
+    expect(partial.headers["Content-Range"]).toBe("bytes 3-6/10");
+    expect(partial.headers["Accept-Ranges"]).toBe("bytes");
+    expect(partial.raw).toEqual(Buffer.from("3456"));
+
+    const impossible = await call("GET", url, undefined, { ...operatorHeaders, range: "bytes=10-" });
+    expect(impossible.status).toBe(416);
+    expect(impossible.headers["Content-Range"]).toBe("bytes */10");
+  });
+
+  it("serves a cached low video variant while download always returns the original", async () => {
+    const item = store.createWorkItem({ title: "quality download" });
+    const original = Buffer.alloc(1024, 5);
+    const posted = await upload(`/api/work-items/${item.id}/attachments`, { file: { name: "quality.mp4", content: original } }, operatorHeaders);
+    const attachment = posted.body.attachment;
+    const url = `/api/work-items/${item.id}/attachments/${attachment.id}`;
+
+    const fallback = await call("GET", `${url}?quality=low`, undefined, operatorHeaders);
+    expect(fallback.raw).toEqual(original);
+    expect(fallback.headers["Cache-Control"]).toBe("no-store");
+
+    const cacheDir = path.join(tmp, "cache", "video", createHash("sha256").update(`todo:${attachment.sha256}`).digest("hex"));
+    fs.mkdirSync(cacheDir, { recursive: true });
+    fs.writeFileSync(path.join(cacheDir, "low.mp4"), Buffer.from("low"));
+
+    const low = await call("GET", `${url}?quality=low`, undefined, operatorHeaders);
+    expect(low.status).toBe(200);
+    expect(low.raw).toEqual(Buffer.from("low"));
+    expect(Number(low.headers["Content-Length"])).toBeLessThan(original.length);
+
+    const download = await call("GET", `${url}?quality=low&download=1`, undefined, operatorHeaders);
+    expect(download.headers["Content-Disposition"]).toBe('attachment; filename="quality.mp4"');
+    expect(download.raw).toEqual(original);
+  });
+
+  it("rejects a stored size mismatch loudly", async () => {
     const item = store.createWorkItem({ title: "integrity" });
     const posted = await upload(`/api/work-items/${item.id}/attachments`, { file: { name: "gold.txt", content: Buffer.from("golden bytes") } }, operatorHeaders);
     const attachment = posted.body.attachment;
     fs.writeFileSync(attachment.storagePath, "tampered");
     const got = await call("GET", `/api/work-items/${item.id}/attachments/${attachment.id}`, undefined, operatorHeaders);
     expect(got.status).toBe(500);
-    expect(got.body.error).toMatch(/integrity/);
+    expect(got.body.error).toMatch(/size/);
   });
 
   it("a same-content re-upload restores availability after blob corruption — download succeeds again (review F4)", async () => {

@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { Readable } from "node:stream";
+import { Readable, Writable } from "node:stream";
 import type { ServerResponse } from "node:http";
 
 process.env.JINN_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-read-guard-home-"));
@@ -80,31 +80,21 @@ function stragglerReadRoutes(): RouteSpec[] {
 function makeRes() {
   let status = 200;
   const chunks: Buffer[] = [];
-  const res = {
+  const res = new class extends Writable {
+    _write(buf: Buffer | string, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
+      chunks.push(Buffer.isBuffer(buf) ? buf : Buffer.from(buf));
+      callback();
+    }
+
     writeHead(s: number) {
       status = s;
       return this;
-    },
+    }
+
     setHeader() {
       return this;
-    },
-    write(buf?: Buffer | string) {
-      if (buf) chunks.push(Buffer.isBuffer(buf) ? buf : Buffer.from(buf));
-      return true;
-    },
-    end(buf?: Buffer | string) {
-      if (buf) chunks.push(Buffer.isBuffer(buf) ? buf : Buffer.from(buf));
-    },
-    on() {
-      return this;
-    },
-    once() {
-      return this;
-    },
-    emit() {
-      return false;
-    },
-  } as unknown as ServerResponse;
+    }
+  }() as unknown as ServerResponse;
   return {
     res,
     get status() {

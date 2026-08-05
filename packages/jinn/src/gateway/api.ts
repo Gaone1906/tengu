@@ -147,6 +147,8 @@ import { runCronJob } from "../cron/runner.js";
 import QRCode from "qrcode";
 import { WhatsAppConnector } from "../connectors/whatsapp/index.js";
 import { handleFilesRequest, handleSessionAttachment, fileIdsToMedia, rehomeAttachmentsToSession, ensureFilesDir, mimeFromFilename, MultipartUploadError, readLocalFileForIngestion, readMultipartFile, sanitizeUploadFilename } from "./files.js";
+import { streamFile } from "./byte-range.js";
+import { ensureLowVariant, ensurePoster } from "./video-variants.js";
 import { readJsonBody, readBodyRaw } from "./http-helpers.js";
 import { resolveMessageAudiences, speechContextApplies } from "./speech-context.js";
 import { isJsonMediaType } from "./media-type.js";
@@ -4495,35 +4497,67 @@ export async function handleApiRequest(
       return json(res, { attachments: listAttachments(params.id) });
     }
 
-    // GET /api/work-items/:id/attachments/:aid — download. The stored bytes are
-    // re-hashed before the response: a sha256 mismatch is data corruption and
-    // fails loudly instead of serving tampered content (the integrity belt).
+    // GET /api/work-items/:id/attachments/:aid — stream or download. Uploads are
+    // hash-verified into content-addressed storage; reads keep the cheap size
+    // guard so byte ranges never require loading and hashing the whole blob.
     params = matchRoute("/api/work-items/:id/attachments/:aid", pathname);
     if (method === "GET" && params) {
       if (!requireTodoRouteId(res, params.id)) return;
       const attachment = getAttachment(params.aid);
       if (!attachment || attachment.workItemId !== params.id) return notFound(res);
-      let content: Buffer;
+      let stat: fs.Stats;
       try {
-        content = fs.readFileSync(attachment.storagePath);
+        stat = fs.statSync(attachment.storagePath);
       } catch {
         logger.error(`Attachment ${attachment.id} content missing on disk: ${attachment.storagePath}`);
         return serverError(res, "attachment content is missing from storage");
       }
-      const digest = crypto.createHash("sha256").update(content).digest("hex");
-      if (digest !== attachment.sha256) {
+      if (!stat.isFile() || stat.size !== attachment.bytes) {
         logger.error(
-          `Attachment ${attachment.id} failed integrity verification: stored ${attachment.storagePath} hashes to ${digest}, row says ${attachment.sha256}`,
+          `Attachment ${attachment.id} failed size verification: stored ${attachment.storagePath} is ${stat.size} bytes, row says ${attachment.bytes}`,
         );
-        return serverError(res, "attachment content failed integrity verification — the stored file does not match its recorded hash");
+        return serverError(res, "attachment content failed size verification — the stored file does not match its recorded size");
       }
-      res.writeHead(200, {
-        "Content-Type": attachment.mime,
-        "Content-Length": String(content.length),
-        // The filename was sanitized at upload; strip quotes/control bytes anyway.
-        "Content-Disposition": `attachment; filename="${attachment.filename.replace(/["\\\r\n]/g, "")}"`,
+      const reqUrl = new URL(req.url || pathname, `http://${req.headers.host || "localhost"}`);
+      const download = reqUrl.searchParams.get("download") === "1";
+      let selectedPath = attachment.storagePath;
+      let selectedMime = attachment.mime;
+      let selectedFilename = attachment.filename;
+      let variant = "original";
+      if (!download && attachment.mime.startsWith("video/")) {
+        const key = `todo:${attachment.sha256}`;
+        if (reqUrl.searchParams.get("poster") === "1") {
+          const poster = await ensurePoster(attachment.storagePath, key);
+          if (!poster) return notFound(res);
+          selectedPath = poster;
+          selectedMime = "image/jpeg";
+          selectedFilename = `${path.parse(attachment.filename).name}-poster.jpg`;
+          variant = "poster";
+        } else if (reqUrl.searchParams.get("quality") === "low") {
+          const low = ensureLowVariant(attachment.storagePath, key);
+          if (low) {
+            selectedPath = low;
+            selectedMime = "video/mp4";
+            variant = "low";
+          }
+        }
+      }
+      const selectedStat = fs.statSync(selectedPath);
+      const lowFallback = !download
+        && attachment.mime.startsWith("video/")
+        && reqUrl.searchParams.get("quality") === "low"
+        && variant === "original";
+      await streamFile(req, res, selectedPath, {
+        mime: selectedMime,
+        filename: selectedFilename,
+        disposition: download || !attachment.mime.startsWith("video/") ? "attachment" : "inline",
+        cacheHeaders: lowFallback
+          ? { "Cache-Control": "no-store" }
+          : {
+              "Cache-Control": "public, max-age=31536000, immutable",
+              ETag: `"${attachment.sha256}-${variant}-${selectedStat.size}"`,
+            },
       });
-      res.end(content);
       return;
     }
 
