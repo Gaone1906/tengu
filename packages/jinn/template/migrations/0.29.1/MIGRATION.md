@@ -28,6 +28,13 @@ Perform the three-way merge only from those materialized snapshot payloads and t
 - Target payload: `files/target/docs/connectors.md`
 - Merge instruction: compare the audited materialized base with the current instance path `docs/connectors.md` and the audited materialized target; preserve customized content, record unresolved placeholders as conflicts, and verify the result before completion.
 
+## `docs/cron.md`
+
+- Operation: `modify`
+- Base payload: `files/base/docs/cron.md`
+- Target payload: `files/target/docs/cron.md`
+- Merge instruction: compare the audited materialized base with the current instance path `docs/cron.md` and the audited materialized target; preserve customized content, record unresolved placeholders as conflicts, and verify the result before completion.
+
 ## `scripts/workflow-triggers/README.md`
 
 - Operation: `add`

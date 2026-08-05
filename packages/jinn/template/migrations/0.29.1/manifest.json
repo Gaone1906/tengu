@@ -19,9 +19,17 @@
       "path": "docs/connectors.md",
       "operation": "modify",
       "baseSha256": "3144938d35fb70aac23efa2e5cab64264e3961821b16691c3cfbb5cdc6fd42eb",
-      "targetSha256": "6df1a66d8fa020088b7e702f7371c6142d5c6c96e12feb118ee6c88bd90748d7",
+      "targetSha256": "b439377e3feda09132cd4b92a3044ab6d61d4d578734ae551d0601f68943dcb2",
       "basePayload": "files/base/docs/connectors.md",
       "targetPayload": "files/target/docs/connectors.md"
+    },
+    {
+      "path": "docs/cron.md",
+      "operation": "modify",
+      "baseSha256": "cc678e3fe74792caa2d3b983fb779a85e5844a51c04eecbe2ac66ebfff88eba8",
+      "targetSha256": "866dc7ab8c78ee4e416d84709e800dd44d3257b76da17c34fdab197658a52446",
+      "basePayload": "files/base/docs/cron.md",
+      "targetPayload": "files/target/docs/cron.md"
     },
     {
       "path": "scripts/workflow-triggers/README.md",
