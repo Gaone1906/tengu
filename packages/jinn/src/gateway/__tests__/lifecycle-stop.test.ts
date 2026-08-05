@@ -20,7 +20,6 @@ engines:
 
 const { assertPortTakeoverAllowed, buildGatewayChildEnv, lookupPidOnPort, selectPortOwnerPid, shouldSignalPidFileProcess, stop, stopAndWait } = await import("../lifecycle.js");
 const { CONFIG_PATH, PID_FILE, GATEWAY_INFO_FILE } = await import("../../shared/paths.js");
-const { currentNamespace, processIncarnation } = await import("../gateway-info.js");
 const tmpHomeIdentity = fs.realpathSync.native(tmpHome);
 
 /** Pick a free ephemeral port (nothing will be listening on it afterwards). */
@@ -110,19 +109,6 @@ async function waitForListening(port: number, host = "127.0.0.1"): Promise<void>
   throw new Error(`port ${port} did not start listening`);
 }
 
-function writeOwnedGatewayInfo(port: number, pid: number): void {
-  const incarnation = processIncarnation(pid);
-  if (!incarnation) throw new Error(`test could not inspect process incarnation for pid ${pid}`);
-  fs.writeFileSync(GATEWAY_INFO_FILE, JSON.stringify({
-    port,
-    host: "127.0.0.1",
-    pid,
-    secret: "s",
-    namespace: currentNamespace(),
-    processIncarnations: { [String(pid)]: incarnation },
-  }), { mode: 0o600 });
-}
-
 /** These cases attribute a bare spawned listener to an instance by reading
  *  JINN_HOME_IDENTITY back out of its environment (/proc/<pid>/environ, or
  *  `ps eww`). Windows exposes no way for one process to read another's
@@ -150,6 +136,7 @@ describe("stop / stopAndWait PID-file race", () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
     fs.rmSync(PID_FILE, { force: true });
+    fs.rmSync(GATEWAY_INFO_FILE, { force: true });
   });
 
   itNeedsProcessEnvReads("stop() leaves the PID file in place while the process is still shutting down", async () => {
@@ -160,8 +147,6 @@ describe("stop / stopAndWait PID-file race", () => {
     await waitForListening(port);
     fs.mkdirSync(path.dirname(PID_FILE), { recursive: true });
     fs.writeFileSync(PID_FILE, String(child.pid));
-    writeOwnedGatewayInfo(port, child.pid!);
-
     const stopped = stop(port);
     expect(stopped).toBe(true);
     // The fix: no early unlink — a concurrent start/status must keep seeing
@@ -180,8 +165,6 @@ describe("stop / stopAndWait PID-file race", () => {
     await waitForListening(port);
     fs.mkdirSync(path.dirname(PID_FILE), { recursive: true });
     fs.writeFileSync(PID_FILE, String(child.pid));
-    writeOwnedGatewayInfo(port, child.pid!);
-
     const stopped = await stopAndWait(port, 5_000);
     expect(stopped).toBe(true);
     // Process must be gone by the time stopAndWait resolves…
@@ -198,8 +181,6 @@ describe("stop / stopAndWait PID-file race", () => {
     await waitForListening(port);
     fs.mkdirSync(path.dirname(PID_FILE), { recursive: true });
     fs.writeFileSync(PID_FILE, String(child.pid));
-    writeOwnedGatewayInfo(port, child.pid!);
-
     const stopped = await stopAndWait(port, 200);
     expect(stopped).toBe(true);
     await waitForExit(child);
@@ -207,18 +188,35 @@ describe("stop / stopAndWait PID-file race", () => {
     expect(fs.existsSync(PID_FILE)).toBe(false);
   });
 
-  itNeedsProcessEnvReads("stop() allows a same-home owner with exact runtime proof even without a PID file", async () => {
+  itNeedsProcessEnvReads("stop() allows a same-home owner discovered by port even without a PID file", async () => {
     const port = await freePort();
     const child = spawnListeningGatewayChild(port, { sigtermDelayMs: 0 });
     children.push(child);
     await waitForSpawn(child);
     await waitForListening(port);
-    writeOwnedGatewayInfo(port, child.pid!);
-
     const stopped = stop(port);
     expect(stopped).toBe(true);
     await waitForExit(child);
     expect(() => process.kill(child.pid!, 0)).toThrow();
+  });
+
+  itNeedsProcessEnvReads("stop() allows a verified live gateway inside the primary container without incarnation metadata", async () => {
+    const port = await freePort();
+    const child = spawnListeningGatewayChild(port, { sigtermDelayMs: 0, jinnHome: tmpHome });
+    children.push(child);
+    await waitForSpawn(child);
+    await waitForListening(port);
+    fs.rmSync(GATEWAY_INFO_FILE, { force: true });
+
+    const previous = process.env.JINN_CONTAINER;
+    process.env.JINN_CONTAINER = "1";
+    try {
+      expect(stop(port)).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env.JINN_CONTAINER;
+      else process.env.JINN_CONTAINER = previous;
+    }
+    await waitForExit(child);
   });
 
   itNeedsProcessEnvReads("stop() refuses a foreign Jinn owner with a clear remediation error", async () => {
@@ -363,7 +361,7 @@ describe("foreground gateway ownership (no JINN_HOME in env)", () => {
   }
 
   function writeGatewayJson(port: number, pid: number): void {
-    writeOwnedGatewayInfo(port, pid);
+    fs.writeFileSync(GATEWAY_INFO_FILE, JSON.stringify({ port, host: "127.0.0.1", pid, secret: "s" }), { mode: 0o600 });
   }
 
   it("stops a foreground gateway whose pid is recorded in gateway.json", async () => {
@@ -416,75 +414,7 @@ describe("foreground gateway ownership (no JINN_HOME in env)", () => {
     expect(() => stop(port)).toThrow(/owned by another jinn instance/i);
   });
 
-  it("refuses a port-owning pid when the runtime record has no namespace proof", async () => {
-    const port = await freePort();
-    const child = spawnForegroundGatewayChild(port);
-    children.push(child);
-    await waitForSpawn(child);
-    await waitForListening(port);
-    fs.writeFileSync(GATEWAY_INFO_FILE, JSON.stringify({
-      port,
-      host: "127.0.0.1",
-      pid: child.pid,
-      secret: "s",
-    }), { mode: 0o600 });
-
-    expect(() => stop(port)).toThrow(/owned by another jinn instance/i);
-    expect(pidIsAliveForTest(child.pid!)).toBe(true);
-  });
-
-  it("refuses a same-boot recycled pid even when it now owns the recorded port", async () => {
-    const port = await freePort();
-    const child = spawnForegroundGatewayChild(port);
-    children.push(child);
-    await waitForSpawn(child);
-    await waitForListening(port);
-    fs.writeFileSync(GATEWAY_INFO_FILE, JSON.stringify({
-      port,
-      host: "127.0.0.1",
-      pid: child.pid,
-      secret: "s",
-      namespace: currentNamespace(),
-      processIncarnations: { [String(child.pid)]: "prior-process-on-this-pid" },
-    }), { mode: 0o600 });
-
-    expect(() => stop(port)).toThrow(/owned by another jinn instance/i);
-    expect(pidIsAliveForTest(child.pid!)).toBe(true);
-  });
-
-  // The pid file path where the recorded pid does NOT hold the port: with that evidence
-  // gone the recorded namespace has to carry the claim, or a SIGTERM goes to whatever
-  // unrelated process inherited the number after a restart.
-  it("refuses a pid recorded under a different namespace when it does not own the port", async () => {
-    const port = await freePort();
-    // Alive, not listening, and not a gateway: stands in for the process that
-    // inherited the recorded number after a restart renumbered the namespace.
-    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
-    children.push(child);
-    await waitForSpawn(child);
-
-    fs.writeFileSync(PID_FILE, String(child.pid), { mode: 0o600 });
-    fs.writeFileSync(
-      GATEWAY_INFO_FILE,
-      JSON.stringify({ port, host: "127.0.0.1", pid: child.pid, secret: "s", namespace: "some-other-host:boot-1" }),
-      { mode: 0o600 },
-    );
-
-    // Nothing is listening on `port`, so signalGateway falls through to the port
-    // path and finds no owner — the process must survive either way.
-    expect(() => stop(port)).not.toThrow();
-    expect(pidIsAliveForTest(child.pid!)).toBe(true);
-  });
 });
-
-function pidIsAliveForTest(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 describe("shouldSignalPidFileProcess", () => {
   it("rejects --take-port inside a container sharing the primary home", () => {

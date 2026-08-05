@@ -1,5 +1,5 @@
 import { loadInstances, ensureDefaultInstance } from "./instances.js";
-import { getInstanceStatus, resolveInstanceEndpoint } from "../gateway/lifecycle.js";
+import fs from "node:fs";
 import path from "node:path";
 
 const GREEN = "\x1b[32m";
@@ -21,23 +21,23 @@ export async function runList(): Promise<void> {
   console.log(`  ${"─".repeat(16)} ${"─".repeat(8)} ${"─".repeat(12)} ${"─".repeat(30)}`);
 
   for (const inst of instances) {
-    // Not a bare kill(pid, 0): a recycled number answers for an unrelated process and
-    // prints a dead instance green. Against THIS instance's endpoint, since the defaults
-    // inside getInstanceStatus describe the ambient one.
-    const endpoint = resolveInstanceEndpoint(inst.home, inst.port);
-    const status = getInstanceStatus(
-      path.join(inst.home, "gateway.pid"),
-      endpoint.port,
-      endpoint.host,
-    ).running
-      ? "running"
-      : "stopped";
+    // Check if PID file exists and process is alive.
+    const pidFile = path.join(inst.home, "gateway.pid");
+    let status = "stopped";
+    if (fs.existsSync(pidFile)) {
+      try {
+        const pid = parseInt(fs.readFileSync(pidFile, "utf-8").trim(), 10);
+        process.kill(pid, 0);
+        status = "running";
+      } catch {
+        status = "stopped";
+      }
+    }
 
     const statusColor = status === "running" ? GREEN : RED;
     const homeDisplay = inst.home.replace(process.env.HOME || process.env.USERPROFILE || "", "~");
-    // The resolved port, so the column cannot disagree with the status beside it.
     console.log(
-      `  ${inst.name.padEnd(16)} ${String(endpoint.port).padEnd(8)} ${statusColor}${status.padEnd(12)}${RESET} ${DIM}${homeDisplay}${RESET}`
+      `  ${inst.name.padEnd(16)} ${String(inst.port).padEnd(8)} ${statusColor}${status.padEnd(12)}${RESET} ${DIM}${homeDisplay}${RESET}`
     );
   }
   console.log("");

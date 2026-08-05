@@ -3,7 +3,6 @@ import net from "node:net";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import * as workflow from "../workflow.js";
-import { currentNamespace, processIncarnation } from "../../gateway/gateway-info.js";
 
 const originalFetch = globalThis.fetch;
 
@@ -31,8 +30,6 @@ beforeAll(async () => {
 
 beforeEach(() => {
   const home = process.env.JINN_HOME!;
-  const incarnation = processIncarnation(process.pid);
-  if (!incarnation) throw new Error("test could not inspect its own process incarnation");
   fs.writeFileSync(
     path.join(home, "config.yaml"),
     `engines:\n  default: claude\n  claude: {}\ngateway:\n  host: 127.0.0.1\n  port: ${runtimePort}\n`,
@@ -43,8 +40,6 @@ beforeEach(() => {
     pid: process.pid,
     secret: "test",
     token: "test-token",
-    namespace: currentNamespace(),
-    processIncarnations: { [String(process.pid)]: incarnation },
   }));
 });
 
@@ -62,7 +57,7 @@ afterAll(async () => {
 afterEach(() => { globalThis.fetch = originalFetch; process.exitCode = undefined; vi.restoreAllMocks(); });
 
 describe("Workflow v2 CLI handlers", () => {
-  it("does not send a stale gateway bearer to an unowned runtime endpoint", async () => {
+  it("ignores stale runtime routing fields and sends the home bearer only to the configured endpoint", async () => {
     const home = process.env.JINN_HOME!;
     fs.writeFileSync(
       path.join(home, "config.yaml"),
@@ -75,13 +70,15 @@ describe("Workflow v2 CLI handlers", () => {
       secret: "stale",
       token: "stale-workflow-bearer",
     }));
-    globalThis.fetch = vi.fn() as unknown as typeof fetch;
-    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify([]), { status: 200 })) as unknown as typeof fetch;
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
 
     await workflow.listWorkflows();
 
-    expect(globalThis.fetch).not.toHaveBeenCalled();
-    expect(console.error).toHaveBeenCalledWith(expect.stringMatching(/auth token was not found/i));
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      "http://127.0.0.1:7777/api/workflows",
+      expect.objectContaining({ headers: expect.objectContaining({ authorization: "Bearer stale-workflow-bearer" }) }),
+    );
   });
 
   it("exports one lazy handler for every Task13 command", () => {

@@ -250,9 +250,8 @@ function acceptBypassPermissions() {
  * live process — one that answers kill(pid, 0), making `jinn start` hand the restart to a
  * detached helper and return, which exits PID 1 into a restart loop that never serves.
  *
- * gateway.json is zeroed rather than deleted: writeGatewayInfo only carries `secret`
- * forward. Redundant with staleGatewayPids' namespace check, kept so the container stands
- * alone if that changes.
+ * gateway.json is zeroed rather than deleted so its secret and bearer credential survive;
+ * only process identifiers are invalid across the container boundary.
  */
 function clearStalePidState() {
   const pidFile = path.join(jinnHome, "gateway.pid");

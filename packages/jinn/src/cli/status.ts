@@ -13,15 +13,7 @@ export async function runStatus(): Promise<void> {
 
   if (!status.running) {
     console.log("Gateway: stopped");
-    if (status.pid && status.reason === "not-ours") {
-      // PID 1234 IS alive here — it is simply not the gateway, because the number was
-      // recycled by a reboot or a container restart. Saying "not alive" would send an
-      // operator off to kill a stranger's process.
-      console.log(
-        `  Stale PID file found (PID ${status.pid}). That process is running but is not this gateway ` +
-        `— the PID was reused. It is safe to remove ${PID_FILE}.`,
-      );
-    } else if (status.pid) {
+    if (status.pid) {
       console.log(`  Stale PID file found (PID ${status.pid}). Process is not alive.`);
     }
     return;

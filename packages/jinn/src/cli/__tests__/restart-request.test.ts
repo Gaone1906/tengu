@@ -4,7 +4,6 @@ import { spawn, type ChildProcess } from "node:child_process";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { currentNamespace, processIncarnation } from "../../gateway/gateway-info.js";
 
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-restart-request-test-"));
 const previousJinnHome = process.env.JINN_HOME;
@@ -48,16 +47,12 @@ beforeEach(() => {
   delete process.env.JINN_SESSION_ID;
   fs.mkdirSync(tmpHome, { recursive: true });
   fs.writeFileSync(path.join(tmpHome, "config.yaml"), `gateway:\n  host: ::1\n  port: ${runtimePort}\n`);
-  const incarnation = processIncarnation(gatewayChild.pid!);
-  if (!incarnation) throw new Error("test could not inspect its own process incarnation");
   fs.writeFileSync(path.join(tmpHome, "gateway.json"), JSON.stringify({
     port: runtimePort,
     host: "::1",
     pid: gatewayChild.pid,
     secret: "hook-secret",
     token: "gateway-token",
-    namespace: currentNamespace(),
-    processIncarnations: { [String(gatewayChild.pid)]: incarnation },
   }));
 });
 
@@ -123,7 +118,7 @@ describe("requestRestartFromGateway", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("does not send the bearer from an unowned runtime record", async () => {
+  it("ignores an unowned runtime endpoint and sends the home bearer only to durable config", async () => {
     fs.writeFileSync(path.join(tmpHome, "config.yaml"), "gateway:\n  host: 127.0.0.1\n  port: 7777\n");
     fs.writeFileSync(path.join(tmpHome, "gateway.json"), JSON.stringify({
       port: 65530,
@@ -132,9 +127,14 @@ describe("requestRestartFromGateway", () => {
       secret: "stale",
       token: "stale-bearer-must-not-leave-disk",
     }));
-    const fetchMock = vi.fn();
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ status: "restarting" }), { status: 200 }));
 
-    await expect(requestRestartFromGateway(fetchMock as unknown as typeof fetch)).resolves.toBe(false);
-    expect(fetchMock).not.toHaveBeenCalled();
+    await expect(requestRestartFromGateway(fetchMock as unknown as typeof fetch)).resolves.toBe(true);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:7777/api/system/restart",
+      expect.objectContaining({
+        headers: expect.objectContaining({ authorization: "Bearer stale-bearer-must-not-leave-disk" }),
+      }),
+    );
   });
 });

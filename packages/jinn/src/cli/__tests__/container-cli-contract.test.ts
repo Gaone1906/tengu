@@ -53,6 +53,16 @@ afterAll(() => {
 });
 
 describe("container CLI single-instance contract", () => {
+  it("allows restart against the primary container home", async () => {
+    handlers.restart.mockClear();
+    process.env.JINN_HOME = primaryHome;
+    delete process.env.JINN_INSTANCE;
+
+    await program.parseAsync(["node", "jinn", "restart"]);
+
+    expect(handlers.restart).toHaveBeenCalledOnce();
+  });
+
   it("rejects setup against an alternate JINN_HOME before the handler runs", async () => {
     process.env.JINN_HOME = alternateHome;
     delete process.env.JINN_INSTANCE;
