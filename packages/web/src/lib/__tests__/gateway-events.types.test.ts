@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest"
-import type { GatewayEventListener } from "@jinn/gateway-events"
+import type { GatewayContextValue } from "@/hooks/use-gateway"
 
 // Compile lock for the browser-consumer side of the gateway protocol. If the
 // subscription API is widened back to string/unknown, these directives become
 // unused and `pnpm --filter @jinn/web typecheck` fails.
-const consumer: GatewayEventListener = (frame) => {
+type SubscribeListener = Parameters<GatewayContextValue["subscribe"]>[0]
+
+const consumer: SubscribeListener = (frame) => {
   // @ts-expect-error -- misspelled event names are not comparable to the wire union
   if (frame.event === "session:stoppped") return
   if (frame.event === "session:stopped") {

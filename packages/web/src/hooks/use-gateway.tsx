@@ -10,7 +10,7 @@ import {
 import { createGatewaySocket } from "@/lib/ws";
 import type { GatewayEvent, GatewayEventListener, GatewayEventName } from "@jinn/gateway-events";
 
-interface GatewayContextValue {
+export interface GatewayContextValue {
   events: GatewayEvent[];
   connected: boolean;
   connectionSeq: number;
