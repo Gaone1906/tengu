@@ -5,6 +5,9 @@ services:
     build:
       context: .
     image: jinn:local
+    # Private image/entrypoint handshake. `docker compose run ... <command>` replaces
+    # this value, so one-off commands cannot accidentally enter the service boot path.
+    command: ["__jinn_service_start__"]
 
     # Each session spawns a PTY that spawns its own children; without an init
     # process those accumulate as zombies.

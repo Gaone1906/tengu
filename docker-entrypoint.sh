@@ -19,6 +19,12 @@ JINN_CONFIG="$JINN_HOME/config.yaml"
 # and these steps rewrite state the running gateway owns (gateway.json, gateway.pid,
 # .claude.json).
 start_gateway() {
+  # Runtime-only proof that this process descends from the entrypoint's private default
+  # service command. It is not in the image environment, so `docker exec jinn start`
+  # cannot launch a second writer; gateway children retain it for legitimate restart.
+  _JINN_CONTAINER_SERVICE_START=1
+  export _JINN_CONTAINER_SERVICE_START
+
   if [ ! -f "$JINN_CONFIG" ]; then
     # `jinn setup` prompts only on a TTY, so under Docker it writes defaults.
     # Re-running is safe, but gating on config.yaml keeps boot logs quiet.
@@ -49,7 +55,18 @@ start_gateway() {
 # the same volume, rewriting gateway.json under the live one. A leading flag is
 # still meant for the gateway, but none is safe against the shared container home.
 case "${1:-}" in
-  "") start_gateway ;;
+  __jinn_service_start__)
+    if [ "$#" -ne 1 ]; then
+      echo "jinn-entrypoint: the private service-start marker does not accept arguments." >&2
+      exit 64
+    fi
+    shift
+    start_gateway
+    ;;
+  "")
+    echo "jinn-entrypoint: missing the private service-start marker; use the image or Compose default command." >&2
+    exit 64
+    ;;
   -*)
     # A blacklist with explicit remediation for today's options; the fallback refuses
     # future options too. Patterns cover commander's attached-value form (`-p8080`),
@@ -84,7 +101,16 @@ case "${1:-}" in
           ;;
       esac
     done
-    start_gateway "$@"
+    exit 64
+    ;;
+  jinn)
+    case "${2:-}" in
+      setup|start|restart)
+        echo "jinn-entrypoint: refusing one-off \`jinn ${2}\` against the shared service volumes. Use \`docker compose up -d\` for service startup and \`docker compose restart jinn\` for restart." >&2
+        exit 64
+        ;;
+    esac
+    exec "$@"
     ;;
   *) exec "$@" ;;
 esac

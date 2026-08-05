@@ -90,7 +90,7 @@ describe("pair CLI helpers", () => {
     ]);
   });
 
-  it("uses durable config instead of an unowned runtime endpoint", async () => {
+  it("applies JINN_HOST/JINN_PORT over durable config without trusting runtime routing", async () => {
     const home = process.env.JINN_HOME!;
     fs.mkdirSync(home, { recursive: true });
     const configPath = path.join(home, "config.yaml");
@@ -123,15 +123,23 @@ describe("pair CLI helpers", () => {
       }), { status: 200, headers: { "content-type": "application/json" } }));
     vi.stubGlobal("fetch", fetchMock);
     vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const previousHost = process.env.JINN_HOST;
+    const previousPort = process.env.JINN_PORT;
+    process.env.JINN_HOST = "::1";
+    process.env.JINN_PORT = "8891";
 
     try {
       await runPair({ json: true });
 
       expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
-        "http://127.0.0.1:7791/api/auth/pairing-challenges",
-        "http://127.0.0.1:7791/api/auth/pairing-codes",
+        "http://[::1]:8891/api/auth/pairing-challenges",
+        "http://[::1]:8891/api/auth/pairing-codes",
       ]);
     } finally {
+      if (previousHost === undefined) delete process.env.JINN_HOST;
+      else process.env.JINN_HOST = previousHost;
+      if (previousPort === undefined) delete process.env.JINN_PORT;
+      else process.env.JINN_PORT = previousPort;
       if (priorConfig === null) fs.rmSync(configPath, { force: true });
       else fs.writeFileSync(configPath, priorConfig);
       if (priorGatewayInfo === null) fs.rmSync(gatewayInfoPath, { force: true });

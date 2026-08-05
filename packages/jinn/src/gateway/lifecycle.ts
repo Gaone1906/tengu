@@ -7,7 +7,7 @@ import { CONFIG_PATH, PID_FILE, GATEWAY_INFO_FILE, JINN_HOME, JINN_HOME_IDENTITY
 import { logger } from "../shared/logger.js";
 import type { JinnConfig } from "../shared/types.js";
 import { startGateway } from "./server.js";
-import { loadConfig, gatewayFileBinding } from "../shared/config.js";
+import { loadConfig, gatewayEnvOverrides, gatewayFileBinding } from "../shared/config.js";
 import { gatewayBaseUrl, readGatewayInfo } from "./gateway-info.js";
 import { ensureGatewayAuthToken } from "./auth.js";
 import { buildRestartEntryArgv } from "./restart-entry-options.js";
@@ -482,16 +482,22 @@ export interface LocalGatewayConnection {
 }
 
 /**
- * Local CLI commands use the durable instance config for routing. gateway.json
- * contributes only the bearer credential: its host, port, pid, and URL are
- * ephemeral runtime metadata and never override the configured endpoint.
+ * Local CLI commands use the durable instance config plus the supported process
+ * environment overrides for routing. gateway.json contributes only the bearer
+ * credential: its host, port, pid, and URL are ephemeral runtime metadata and
+ * never override the configured endpoint.
  */
-export function resolveLocalGatewayConnection(home: string, registryPort = 7777): LocalGatewayConnection {
+export function resolveLocalGatewayConnection(
+  home: string,
+  registryPort = 7777,
+  env: NodeJS.ProcessEnv = process.env,
+): LocalGatewayConnection {
   const recorded = readGatewayInfo(path.join(home, "gateway.json"));
   const onFile = gatewayFileBinding(path.join(home, "config.yaml"));
+  const overrides = gatewayEnvOverrides(env);
   return {
-    port: onFile.port ?? registryPort,
-    host: onFile.host,
+    port: overrides.port ?? onFile.port ?? registryPort,
+    host: overrides.host ?? onFile.host,
     token: recorded?.token,
   };
 }

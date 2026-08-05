@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -28,6 +28,7 @@ const previous = {
   primaryHome: process.env.JINN_CONTAINER_PRIMARY_HOME,
   home: process.env.JINN_HOME,
   instance: process.env.JINN_INSTANCE,
+  serviceStart: process.env._JINN_CONTAINER_SERVICE_START,
 };
 
 process.env.JINN_CONTAINER = "1";
@@ -41,11 +42,19 @@ beforeAll(() => {
   program.configureOutput({ writeOut: () => undefined, writeErr: () => undefined });
 });
 
+beforeEach(() => {
+  delete process.env._JINN_CONTAINER_SERVICE_START;
+  handlers.start.mockClear();
+  handlers.setup.mockClear();
+  handlers.restart.mockClear();
+});
+
 afterAll(() => {
   for (const [key, value] of Object.entries(previous)) {
     const envKey = key === "container" ? "JINN_CONTAINER"
       : key === "primaryHome" ? "JINN_CONTAINER_PRIMARY_HOME"
-        : key === "home" ? "JINN_HOME" : "JINN_INSTANCE";
+        : key === "home" ? "JINN_HOME"
+          : key === "instance" ? "JINN_INSTANCE" : "_JINN_CONTAINER_SERVICE_START";
     if (value === undefined) delete process.env[envKey];
     else process.env[envKey] = value;
   }
@@ -53,14 +62,22 @@ afterAll(() => {
 });
 
 describe("container CLI single-instance contract", () => {
-  it("allows restart against the primary container home", async () => {
-    handlers.restart.mockClear();
+  it("allows the entrypoint's marked service restart against the primary container home", async () => {
     process.env.JINN_HOME = primaryHome;
+    process.env._JINN_CONTAINER_SERVICE_START = "1";
     delete process.env.JINN_INSTANCE;
 
     await program.parseAsync(["node", "jinn", "restart"]);
 
     expect(handlers.restart).toHaveBeenCalledOnce();
+  });
+
+  it.each(["setup", "start", "restart"])("rejects docker exec jinn %s without the private service marker", async (command) => {
+    process.env.JINN_HOME = primaryHome;
+    delete process.env.JINN_INSTANCE;
+
+    await expect(program.parseAsync(["node", "jinn", command])).rejects.toThrow(/service start|already-running|container service/i);
+    expect(handlers[command as keyof typeof handlers]).not.toHaveBeenCalled();
   });
 
   it("rejects setup against an alternate JINN_HOME before the handler runs", async () => {

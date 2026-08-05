@@ -129,3 +129,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
   CMD ["/usr/local/bin/jinn-healthcheck"]
 
 ENTRYPOINT ["/usr/local/bin/jinn-entrypoint"]
+CMD ["__jinn_service_start__"]

@@ -19,6 +19,13 @@ export function assertContainerPrimaryCommand(
 ): void {
   if (env.JINN_CONTAINER !== "1" || !["setup", "start", "restart"].includes(command)) return;
 
+  if (env._JINN_CONTAINER_SERVICE_START !== "1") {
+    throw new Error(
+      "Only the marked container service start may run setup/start/restart at the primary container home. "
+      + "Use docker compose up/restart for the service; docker compose run and docker exec are one-off command paths.",
+    );
+  }
+
   const primaryHome = env.JINN_CONTAINER_PRIMARY_HOME?.trim();
   const selectedHome = env.JINN_HOME?.trim();
   const instance = selectedInstance?.trim() || env.JINN_INSTANCE?.trim();

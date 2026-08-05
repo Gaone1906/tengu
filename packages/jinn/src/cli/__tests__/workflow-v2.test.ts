@@ -57,7 +57,7 @@ afterAll(async () => {
 afterEach(() => { globalThis.fetch = originalFetch; process.exitCode = undefined; vi.restoreAllMocks(); });
 
 describe("Workflow v2 CLI handlers", () => {
-  it("ignores stale runtime routing fields and sends the home bearer only to the configured endpoint", async () => {
+  it("applies JINN_HOST/JINN_PORT over config while ignoring stale runtime routing", async () => {
     const home = process.env.JINN_HOME!;
     fs.writeFileSync(
       path.join(home, "config.yaml"),
@@ -72,13 +72,24 @@ describe("Workflow v2 CLI handlers", () => {
     }));
     globalThis.fetch = vi.fn(async () => new Response(JSON.stringify([]), { status: 200 })) as unknown as typeof fetch;
     vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const previousHost = process.env.JINN_HOST;
+    const previousPort = process.env.JINN_PORT;
+    process.env.JINN_HOST = "::1";
+    process.env.JINN_PORT = "8893";
 
-    await workflow.listWorkflows();
+    try {
+      await workflow.listWorkflows();
 
-    expect(globalThis.fetch).toHaveBeenCalledWith(
-      "http://127.0.0.1:7777/api/workflows",
-      expect.objectContaining({ headers: expect.objectContaining({ authorization: "Bearer stale-workflow-bearer" }) }),
-    );
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        "http://[::1]:8893/api/workflows",
+        expect.objectContaining({ headers: expect.objectContaining({ authorization: "Bearer stale-workflow-bearer" }) }),
+      );
+    } finally {
+      if (previousHost === undefined) delete process.env.JINN_HOST;
+      else process.env.JINN_HOST = previousHost;
+      if (previousPort === undefined) delete process.env.JINN_PORT;
+      else process.env.JINN_PORT = previousPort;
+    }
   });
 
   it("exports one lazy handler for every Task13 command", () => {

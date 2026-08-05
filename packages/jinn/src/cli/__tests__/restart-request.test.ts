@@ -118,7 +118,7 @@ describe("requestRestartFromGateway", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("ignores an unowned runtime endpoint and sends the home bearer only to durable config", async () => {
+  it("applies JINN_HOST/JINN_PORT over config while ignoring an unowned runtime endpoint", async () => {
     fs.writeFileSync(path.join(tmpHome, "config.yaml"), "gateway:\n  host: 127.0.0.1\n  port: 7777\n");
     fs.writeFileSync(path.join(tmpHome, "gateway.json"), JSON.stringify({
       port: 65530,
@@ -128,13 +128,24 @@ describe("requestRestartFromGateway", () => {
       token: "stale-bearer-must-not-leave-disk",
     }));
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ status: "restarting" }), { status: 200 }));
+    const previousHost = process.env.JINN_HOST;
+    const previousPort = process.env.JINN_PORT;
+    process.env.JINN_HOST = "::1";
+    process.env.JINN_PORT = "8894";
 
-    await expect(requestRestartFromGateway(fetchMock as unknown as typeof fetch)).resolves.toBe(true);
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:7777/api/system/restart",
-      expect.objectContaining({
-        headers: expect.objectContaining({ authorization: "Bearer stale-bearer-must-not-leave-disk" }),
-      }),
-    );
+    try {
+      await expect(requestRestartFromGateway(fetchMock as unknown as typeof fetch)).resolves.toBe(true);
+      expect(fetchMock).toHaveBeenCalledWith(
+        "http://[::1]:8894/api/system/restart",
+        expect.objectContaining({
+          headers: expect.objectContaining({ authorization: "Bearer stale-bearer-must-not-leave-disk" }),
+        }),
+      );
+    } finally {
+      if (previousHost === undefined) delete process.env.JINN_HOST;
+      else process.env.JINN_HOST = previousHost;
+      if (previousPort === undefined) delete process.env.JINN_PORT;
+      else process.env.JINN_PORT = previousPort;
+    }
   });
 });

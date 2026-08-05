@@ -41,19 +41,30 @@ afterAll(async () => {
 });
 
 describe("status runtime endpoint trust", () => {
-  it("queries durable config instead of an unowned runtime endpoint", async () => {
+  it("applies JINN_HOST/JINN_PORT over durable config without trusting runtime routing", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ sessions: 0 }), {
       status: 200,
       headers: { "content-type": "application/json" },
     }));
     vi.stubGlobal("fetch", fetchMock);
     vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const previousHost = process.env.JINN_HOST;
+    const previousPort = process.env.JINN_PORT;
+    process.env.JINN_HOST = "::1";
+    process.env.JINN_PORT = "8892";
 
-    await runStatus();
+    try {
+      await runStatus();
 
-    expect(fetchMock).toHaveBeenCalledWith(
-      `http://127.0.0.1:${durablePort}/api/status`,
-      expect.any(Object),
-    );
+      expect(fetchMock).toHaveBeenCalledWith(
+        "http://[::1]:8892/api/status",
+        expect.any(Object),
+      );
+    } finally {
+      if (previousHost === undefined) delete process.env.JINN_HOST;
+      else process.env.JINN_HOST = previousHost;
+      if (previousPort === undefined) delete process.env.JINN_PORT;
+      else process.env.JINN_PORT = previousPort;
+    }
   });
 });
