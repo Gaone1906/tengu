@@ -1,8 +1,7 @@
-import crypto from "node:crypto"
 import fs from "node:fs"
 import path from "node:path"
 import { parseDocument, Scalar, YAMLMap, isScalar } from "yaml"
-import type { PendingInstanceMigration } from "./service.js"
+import { reconcileServiceOwnedRemovals, type PendingInstanceMigration } from "./service.js"
 import { verifyMigrationSnapshot } from "./snapshot.js"
 
 export type StampResult = { ok: true; text: string } | { ok: false; reason: string }
@@ -44,66 +43,6 @@ function validateInstancePath(home: string, relative: string): void {
   if (!resolved.startsWith(`${home}${path.sep}`)) throw new Error(`reviewed path is outside the instance: ${relative}`)
 }
 
-interface SnapshotFileEntry {
-  path: string
-  state: "missing" | "file" | "symlink"
-  sha256?: string
-  linkTarget?: string
-}
-
-function sha256(value: Buffer | string): string {
-  return crypto.createHash("sha256").update(value).digest("hex")
-}
-
-function assertModifiedRemoveTargetsPreserved(options: {
-  home: string
-  snapshotDir: string
-  pending: PendingInstanceMigration
-  reviewed: Set<string>
-  skipped: Set<string>
-}): void {
-  if (!options.pending.materialization) return
-  const snapshot = JSON.parse(fs.readFileSync(path.join(options.snapshotDir, "snapshot.json"), "utf8")) as {
-    files?: SnapshotFileEntry[]
-  }
-  const entries = new Map((snapshot.files ?? []).map((entry) => [entry.path, entry]))
-  for (const operation of options.pending.materialization.files) {
-    if (operation.operation !== "remove" || !operation.base) continue
-    const entry = entries.get(operation.path)
-    if (!entry || entry.state === "missing") continue
-    const baseBytes = fs.readFileSync(path.join(options.snapshotDir, operation.base.destinationPath))
-    const baseSha256 = sha256(baseBytes)
-    const stockAtSnapshot = entry.state === "file" && entry.sha256 === baseSha256
-    const currentPath = path.join(options.home, operation.path)
-    const current = fs.lstatSync(currentPath, { throwIfNoEntry: false })
-    const currentSha256 = current?.isFile() ? sha256(fs.readFileSync(currentPath)) : null
-    if (currentSha256 === baseSha256) continue
-
-    // A missing target is a valid reviewed removal only when the immutable
-    // pre-migration snapshot proved that the deleted bytes were stock. Never
-    // read through a missing path, and never accept disappearance of custom
-    // snapshot bytes.
-    if (!current) {
-      if (stockAtSnapshot) continue
-      throw new Error(`modified remove target ${operation.path} must be preserved and marked skipped/conflicted`)
-    }
-
-    // A target can be customized after a stock snapshot was taken. Its current
-    // bytes therefore remain authoritative at completion: it is safe only when
-    // left present and explicitly recorded as skipped/conflicted. When the
-    // snapshot was already custom, additionally require exact preservation of
-    // those audited bytes (or symlink target).
-    const preserved = stockAtSnapshot
-      ? true
-      : entry.state === "file"
-        ? Boolean(current.isFile() && entry.sha256 === currentSha256)
-        : Boolean(current.isSymbolicLink() && entry.linkTarget === fs.readlinkSync(currentPath))
-    if (!preserved || !options.skipped.has(operation.path) || options.reviewed.has(operation.path)) {
-      throw new Error(`modified remove target ${operation.path} must be preserved and marked skipped/conflicted`)
-    }
-  }
-}
-
 export function completeInstanceMigration(options: {
   instanceHome: string
   installedPackageVersion: string
@@ -126,6 +65,7 @@ export function completeInstanceMigration(options: {
     materialization: options.pending.materialization,
   }
   if (!verifyMigrationSnapshot(snapshotOptions)) throw new Error("verified migration snapshot is required")
+  const serviceRemovalReceipt = reconcileServiceOwnedRemovals({ instanceHome: home, pending: options.pending })
   const snapshotDir = path.join(home, ".migration-snapshots", options.pending.migrationKey)
   const receiptPath = path.join(snapshotDir, "completion-receipt.json")
   let receipt: {
@@ -141,10 +81,18 @@ export function completeInstanceMigration(options: {
   }
   const reviewed = new Set(receipt.reviewedFiles.filter((value): value is string => typeof value === "string"))
   const skipped = new Set(receipt.skippedItems.map((value) => typeof value === "string" ? value : value && typeof value === "object" && "path" in value ? String((value as { path: unknown }).path) : ""))
+  const removalPaths = new Set(options.pending.changedFiles.filter((file) => file.operation === "remove").map((file) => file.path))
+  const serviceRemovalPaths = new Set(serviceRemovalReceipt.outcomes.map((outcome) => outcome.path))
   for (const file of options.pending.changedFiles) {
+    if (removalPaths.has(file.path)) {
+      if (!serviceRemovalPaths.has(file.path)) throw new Error(`service-owned removal outcome is required for ${file.path}`)
+      if (reviewed.has(file.path) || skipped.has(file.path)) {
+        throw new Error(`generic completion receipt cannot cover service-owned removal path ${file.path}`)
+      }
+      continue
+    }
     if (!reviewed.has(file.path) && !skipped.has(file.path)) throw new Error(`completion receipt has not reviewed or skipped ${file.path}`)
   }
-  assertModifiedRemoveTargetsPreserved({ home, snapshotDir, pending: options.pending, reviewed, skipped })
   const configPath = path.join(home, "config.yaml")
   const result = stampVersionInYaml(fs.readFileSync(configPath, "utf8"), options.targetVersion)
   if (!result.ok) throw new Error(result.reason)

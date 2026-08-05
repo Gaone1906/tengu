@@ -64,6 +64,33 @@ function seedEmptyBundle() {
   }, null, 2) + "\n")
 }
 
+function seedRemovalBundle() {
+  seedBundle()
+  const target = path.join(home, "retired.md")
+  fs.writeFileSync(target, "stock retirement file\n")
+  const dir = path.join(migrationsDir, "0.26.0")
+  fs.rmSync(path.join(dir, "files"), { recursive: true, force: true })
+  fs.mkdirSync(path.join(dir, "files/base"), { recursive: true })
+  const base = path.join(dir, "files/base/retired.md")
+  fs.writeFileSync(base, "stock retirement file\n")
+  const sha = crypto.createHash("sha256").update(fs.readFileSync(base)).digest("hex")
+  fs.writeFileSync(path.join(dir, "manifest.json"), JSON.stringify({
+    schemaVersion: 1,
+    version: "0.26.0",
+    baseVersion: "0.25.0",
+    generatedFrom: { baseRef: "v0.25.0", headRef: "WORKTREE" },
+    files: [{
+      path: "retired.md",
+      operation: "remove",
+      baseSha256: sha,
+      targetSha256: null,
+      basePayload: "files/base/retired.md",
+      targetPayload: null,
+    }],
+  }, null, 2) + "\n")
+  return target
+}
+
 function responseCapture() {
   let status = 200
   const chunks: Buffer[] = []
@@ -227,6 +254,26 @@ describe("instance migration API", () => {
     expect(queue[0]).toMatchObject({ sessionId: first.body.sessionId, status: "pending" })
     expect(fs.existsSync(path.join(home, ".migration-snapshots", pending.body.migrationKey, "snapshot.json"))).toBe(true)
     expect(registry.getSessionBySessionKey(`instance-migration:${pending.body.migrationKey}`)?.id).toBe(first.body.sessionId)
+  })
+
+  it("runs service-owned exact-byte removals before dispatching the migration session", async () => {
+    const target = seedRemovalBundle()
+    const pending = await request("GET", "/api/instance-migration")
+
+    const opened = await request("POST", "/api/instance-migration/open", { migrationKey: pending.body.migrationKey })
+
+    expect(opened.status).toBe(201)
+    expect(fs.existsSync(target)).toBe(false)
+    const serviceReceipt = JSON.parse(fs.readFileSync(path.join(
+      home,
+      ".migration-snapshots",
+      pending.body.migrationKey,
+      "service-removal-receipt.json",
+    ), "utf8"))
+    expect(serviceReceipt.outcomes).toEqual([
+      expect.objectContaining({ path: "retired.md", status: "removed" }),
+    ])
+    expect(dispatched).toHaveLength(1)
   })
 
   it("persists nothing when the selected engine is unavailable, then accepts one retry durably across restart", async () => {

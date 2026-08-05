@@ -136,7 +136,7 @@ import { collectEngineLimits } from "../shared/engine-limits.js";
 import { handleRateLimit } from "../sessions/rate-limit-handler.js";
 import { resolveEngineRunMcp } from "../sessions/engine-run-mcp.js";
 import { decideJinnAttachment } from "../mcp/attachment.js";
-import { getPendingInstanceMigration, type PendingInstanceMigration } from "../migrations/service.js";
+import { getPendingInstanceMigration, reconcileServiceOwnedRemovals, type PendingInstanceMigration } from "../migrations/service.js";
 import { createMigrationSnapshot } from "../migrations/snapshot.js";
 import { getPackageVersion } from "../shared/version.js";
 import { pickEncoding, compressBuffer, MIN_COMPRESS_BYTES } from "./compress.js";
@@ -472,6 +472,10 @@ async function openInstanceMigration(
       toVersion: pending.toVersion,
       changedFiles: pending.changedFiles,
       materialization: pending.materialization,
+    });
+    reconcileServiceOwnedRemovals({
+      instanceHome: context.jinnHome ?? JINN_HOME,
+      pending,
     });
     const afterSnapshot = acceptedInstanceMigrationSession(sessionKey, prompt);
     if (afterSnapshot) return { sessionId: afterSnapshot.id, migrationKey, reused: true };

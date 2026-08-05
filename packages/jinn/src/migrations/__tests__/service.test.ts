@@ -3,7 +3,8 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
-import { getPendingInstanceMigration } from "../service.js"
+import { getPendingInstanceMigration, reconcileServiceOwnedRemovals } from "../service.js"
+import { createMigrationSnapshot } from "../snapshot.js"
 
 const roots: string[] = []
 const hash = (value: Buffer | string) => crypto.createHash("sha256").update(value).digest("hex")
@@ -283,5 +284,90 @@ describe("getPendingInstanceMigration", () => {
     ])
     fs.writeFileSync(path.join(dir, "files/target/CLAUDE.md"), "tampered")
     expect(() => getPendingInstanceMigration({ instanceHome: drift.home, packageVersion: "0.26.0", migrationsDir: drift.migrationsDir })).toThrow(/hash/i)
+  })
+})
+
+describe("service-owned structured removals", () => {
+  it("unlinks only current bytes that exactly match the materialized base", () => {
+    const { home, migrationsDir } = fixture("0.25.0")
+    const stockPath = path.join(home, "stock.md")
+    const customPath = path.join(home, "custom.md")
+    fs.writeFileSync(stockPath, "stock\n")
+    fs.writeFileSync(customPath, "user customization\n")
+    bundle(migrationsDir, "0.26.0", "0.25.0", [
+      { path: "stock.md", operation: "remove", base: "stock\n" },
+      { path: "custom.md", operation: "remove", base: "stock\n" },
+    ])
+    const pending = getPendingInstanceMigration({ instanceHome: home, packageVersion: "0.26.0", migrationsDir })
+    expect(pending.prompt).toMatch(/removal is owned by the Jinn migration service.*do not delete/is)
+    expect(pending.prompt).toMatch(/remove paths must not appear in reviewedFiles or skippedItems/i)
+    createMigrationSnapshot({
+      instanceHome: home,
+      migrationKey: pending.migrationKey!,
+      fromVersion: pending.fromVersion,
+      toVersion: pending.toVersion,
+      changedFiles: pending.changedFiles,
+      materialization: pending.materialization,
+    })
+
+    const receipt = reconcileServiceOwnedRemovals({ instanceHome: home, pending })
+
+    expect(fs.existsSync(stockPath)).toBe(false)
+    expect(fs.readFileSync(customPath, "utf8")).toBe("user customization\n")
+    expect(receipt.outcomes).toEqual([
+      expect.objectContaining({ path: "stock.md", status: "removed" }),
+      expect.objectContaining({ path: "custom.md", status: "preserved" }),
+    ])
+  })
+
+  it("preserves and records a custom file that appears after a missing snapshot", () => {
+    const { home, migrationsDir } = fixture("0.25.0")
+    const targetPath = path.join(home, "new-custom.md")
+    bundle(migrationsDir, "0.26.0", "0.25.0", [
+      { path: "new-custom.md", operation: "remove", base: "stock\n" },
+    ])
+    const pending = getPendingInstanceMigration({ instanceHome: home, packageVersion: "0.26.0", migrationsDir })
+    createMigrationSnapshot({
+      instanceHome: home,
+      migrationKey: pending.migrationKey!,
+      fromVersion: pending.fromVersion,
+      toVersion: pending.toVersion,
+      changedFiles: pending.changedFiles,
+      materialization: pending.materialization,
+    })
+    fs.writeFileSync(targetPath, "new user content\n")
+
+    const receipt = reconcileServiceOwnedRemovals({ instanceHome: home, pending })
+
+    expect(fs.readFileSync(targetPath, "utf8")).toBe("new user content\n")
+    expect(receipt.outcomes).toEqual([
+      expect.objectContaining({ path: "new-custom.md", status: "preserved" }),
+    ])
+  })
+
+  it("never converts an already-preserved conflict into a later removal", () => {
+    const { home, migrationsDir } = fixture("0.25.0")
+    const targetPath = path.join(home, "custom.md")
+    fs.writeFileSync(targetPath, "user customization\n")
+    bundle(migrationsDir, "0.26.0", "0.25.0", [
+      { path: "custom.md", operation: "remove", base: "stock\n" },
+    ])
+    const pending = getPendingInstanceMigration({ instanceHome: home, packageVersion: "0.26.0", migrationsDir })
+    createMigrationSnapshot({
+      instanceHome: home,
+      migrationKey: pending.migrationKey!,
+      fromVersion: pending.fromVersion,
+      toVersion: pending.toVersion,
+      changedFiles: pending.changedFiles,
+      materialization: pending.materialization,
+    })
+    reconcileServiceOwnedRemovals({ instanceHome: home, pending })
+
+    fs.writeFileSync(targetPath, "stock\n")
+
+    expect(() => reconcileServiceOwnedRemovals({ instanceHome: home, pending })).toThrow(
+      /service-preserved removal target changed before completion/i,
+    )
+    expect(fs.readFileSync(targetPath, "utf8")).toBe("stock\n")
   })
 })

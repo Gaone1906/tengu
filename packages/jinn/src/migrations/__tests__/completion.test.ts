@@ -13,7 +13,7 @@ afterEach(() => {
 })
 
 describe("completeInstanceMigration", () => {
-  it("refuses a reviewed removal when stock snapshot bytes were customized before completion", () => {
+  it("does not let a generic reviewed receipt authorize deletion after stock snapshot bytes were customized", () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-complete-live-modified-remove-"))
     roots.push(home)
     fs.mkdirSync(path.join(home, "talk"), { recursive: true })
@@ -71,6 +71,9 @@ describe("completeInstanceMigration", () => {
     })
 
     fs.writeFileSync(targetPath, "customized after snapshot\n")
+    // Reproduce the unsafe freeform sequence: snapshot stock bytes, customize
+    // them, delete the customized path, then claim the path was reviewed.
+    fs.rmSync(targetPath)
     fs.writeFileSync(path.join(snapshot.path, "completion-receipt.json"), JSON.stringify({
       schemaVersion: 1,
       migrationKey: pending.migrationKey,
@@ -85,12 +88,90 @@ describe("completeInstanceMigration", () => {
       targetVersion: "0.29.1",
       expectedMigrationKey: pending.migrationKey,
       pending,
-    })).toThrow(/remove target.*current.*materialized base|modified remove target/i)
-    expect(fs.readFileSync(targetPath, "utf8")).toBe("customized after snapshot\n")
+    })).toThrow(/service-owned removal (?:outcome|path)/i)
+    expect(fs.existsSync(targetPath)).toBe(false)
     expect(fs.readFileSync(configPath, "utf8")).toContain('version: "0.29.0"')
   })
 
-  it("preserves a user-modified remove target and requires it to be marked skipped", () => {
+  it("preserves a custom removal target that appears after a missing snapshot and rejects generic review", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-complete-live-added-remove-"))
+    roots.push(home)
+    fs.mkdirSync(path.join(home, "talk"), { recursive: true })
+    const configPath = path.join(home, "config.yaml")
+    const targetPath = path.join(home, "talk/orchestrator-persona.md")
+    fs.writeFileSync(configPath, 'jinn:\n  version: "0.29.0"\n')
+    fs.writeFileSync(path.join(home, "CLAUDE.md"), "company doctrine\n")
+
+    const sourceRoot = path.join(home, "migration-sources")
+    const baseSource = path.join(sourceRoot, "files/base/talk/orchestrator-persona.md")
+    fs.mkdirSync(path.dirname(baseSource), { recursive: true })
+    const stockBytes = "stock voice persona\n"
+    fs.writeFileSync(baseSource, stockBytes)
+    const sha256 = (value: string) => crypto.createHash("sha256").update(value).digest("hex")
+    const manifests = [{ version: "0.29.1", sha256: "c".repeat(64) }]
+    const materialization: MigrationMaterializationPlan = {
+      schemaVersion: 1,
+      inputs: { portalName: "Jinn", portalSlug: "jinn" },
+      inputsSha256: migrationMaterializationInputsSha256(
+        { portalName: "Jinn", portalSlug: "jinn" },
+        manifests,
+      ),
+      manifests,
+      legacy: [],
+      files: [{
+        version: "0.29.1",
+        path: "talk/orchestrator-persona.md",
+        operation: "remove",
+        base: {
+          sourcePath: baseSource,
+          destinationPath: "materialized/0.29.1/files/base/talk/orchestrator-persona.md",
+          sourceSha256: sha256(stockBytes),
+        },
+        target: null,
+      }],
+    }
+    const pending = {
+      required: true as const,
+      fromVersion: "0.29.0",
+      toVersion: "0.29.1",
+      versions: ["0.29.1"],
+      changedFiles: [{ path: "talk/orchestrator-persona.md", operation: "remove" as const }],
+      prompt: "prompt",
+      migrationKey: "c".repeat(64),
+      materialization,
+    }
+    const snapshot = createMigrationSnapshot({
+      instanceHome: home,
+      migrationKey: pending.migrationKey,
+      fromVersion: pending.fromVersion,
+      toVersion: pending.toVersion,
+      changedFiles: pending.changedFiles,
+      materialization,
+    })
+
+    // A new user file appears after the audited snapshot. A generic reviewed
+    // claim must neither remove it nor authorize completion.
+    fs.writeFileSync(targetPath, "new custom voice persona\n")
+    fs.writeFileSync(path.join(snapshot.path, "completion-receipt.json"), JSON.stringify({
+      schemaVersion: 1,
+      migrationKey: pending.migrationKey,
+      reviewedFiles: ["talk/orchestrator-persona.md"],
+      skippedItems: [],
+      verifiedAt: "2026-08-05T00:00:00.000Z",
+    }))
+
+    expect(() => completeInstanceMigration({
+      instanceHome: home,
+      installedPackageVersion: "0.29.1",
+      targetVersion: "0.29.1",
+      expectedMigrationKey: pending.migrationKey,
+      pending,
+    })).toThrow(/service-owned removal (?:outcome|path)/i)
+    expect(fs.readFileSync(targetPath, "utf8")).toBe("new custom voice persona\n")
+    expect(fs.readFileSync(configPath, "utf8")).toContain('version: "0.29.0"')
+  })
+
+  it("preserves a user-modified remove target through a service-owned outcome", () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-complete-modified-remove-"))
     roots.push(home)
     fs.mkdirSync(path.join(home, "talk"), { recursive: true })
@@ -161,15 +242,16 @@ describe("completeInstanceMigration", () => {
       targetVersion: "0.29.1",
       expectedMigrationKey: pending.migrationKey,
       pending,
-    })).toThrow(/modified remove target.*preserved.*skipped/i)
+    })).toThrow(/service-owned removal outcome/i)
 
-    // Restoring the user bytes and recording the conflict is the only valid completion.
+    // Restoring the user bytes lets the migration service record the preserved
+    // conflict. The generic agent receipt must not claim the remove path at all.
     fs.writeFileSync(path.join(home, "talk/orchestrator-persona.md"), "customized voice persona\n")
     fs.writeFileSync(path.join(snapshot.path, "completion-receipt.json"), JSON.stringify({
       schemaVersion: 1,
       migrationKey: pending.migrationKey,
       reviewedFiles: [],
-      skippedItems: [{ path: "talk/orchestrator-persona.md", reason: "user-modified" }],
+      skippedItems: [],
       verifiedAt: "2026-08-05T00:00:00.000Z",
     }))
 
