@@ -8,7 +8,7 @@ import { logger } from "../shared/logger.js";
 import type { JinnConfig } from "../shared/types.js";
 import { startGateway } from "./server.js";
 import { loadConfig, gatewayFileBinding } from "../shared/config.js";
-import { gatewayBaseUrl, readGatewayInfo, recordedInThisNamespace, resolveGatewayEndpoint, type GatewayInfo } from "./gateway-info.js";
+import { gatewayBaseUrl, readGatewayInfo, recordedInThisNamespace, recordedProcessMatches, resolveGatewayEndpoint, type GatewayInfo } from "./gateway-info.js";
 import { ensureGatewayAuthToken } from "./auth.js";
 import { buildRestartEntryArgv } from "./restart-entry-options.js";
 
@@ -281,21 +281,22 @@ function assertPidBelongsToThisInstance(
   if (options.takePort) return;
 
   const owner = readProcessJinnHome(pid);
-  if (owner.status === "found" && owner.identity === JINN_HOME_IDENTITY) return;
+  const info = readGatewayInfo(GATEWAY_INFO_FILE);
+  const hasExactRuntimeProof = info
+    && info.pid === pid
+    && info.port === port
+    && recordedInThisNamespace(info)
+    && recordedProcessMatches(info, pid);
+  if (hasExactRuntimeProof && (owner.status !== "found" || owner.identity === JINN_HOME_IDENTITY)) return;
 
   // A foreground gateway (`jinn start` without --daemon) IS the CLI process, so
   // it inherits the user's shell env and carries no JINN_HOME — only a spawned
   // daemon gets one injected. The env lookup therefore reports "unknown" and we
   // would refuse to stop/restart our own gateway.
   //
-  // gateway.json records the running gateway's own pid, so a match is useful only when
-  // the record was written in this process namespace. Owning the port is not identity
-  // proof: a stale record can name a recycled pid that now belongs to a foreign listener.
-  if (owner.status !== "found") {
-    const info = readGatewayInfo(GATEWAY_INFO_FILE);
-    if (info && info.pid === pid && info.port === port && recordedInThisNamespace(info)) return;
-  }
-
+  // gateway.json records the running gateway's own pid, but pid + port + namespace is
+  // still not identity: the same boot can recycle a pid onto a new listener. The exact
+  // process incarnation above is required before this fallback may signal anything.
   if (!pidIsAlive(pid)) return;
   throw new PortOwnershipError(port, owner.status === "found" ? owner.jinnHome : "unknown");
 }
@@ -481,22 +482,40 @@ function resolveHost(): string {
  * wildcard would match any listener on the port, including an unrelated one.
  */
 export function resolveInstanceEndpoint(home: string, registryPort: number): { host: string; port: number } {
+  const connection = resolveLocalGatewayConnection(home, registryPort);
+  return { host: connection.host?.trim() || "127.0.0.1", port: connection.port };
+}
+
+export interface LocalGatewayConnection {
+  host?: string;
+  port: number;
+  token?: string;
+  runtimeTrusted: boolean;
+}
+
+/** One ownership gate for every local CLI consumer of gateway.json. A stale or
+ * unprovable runtime record contributes neither its endpoint nor its bearer. */
+export function resolveLocalGatewayConnection(home: string, registryPort = 7777): LocalGatewayConnection {
   const recorded = readGatewayInfo(path.join(home, "gateway.json"));
   const onFile = gatewayFileBinding(path.join(home, "config.yaml"));
   const liveRecorded = recorded && runtimeRecordBelongsToHome(home, recorded) ? recorded : null;
   const endpoint = resolveGatewayEndpoint(liveRecorded, { port: onFile.port ?? registryPort, host: onFile.host });
-  return { host: endpoint.host?.trim() || "127.0.0.1", port: endpoint.port };
+  return {
+    ...endpoint,
+    token: liveRecorded?.token,
+    runtimeTrusted: liveRecorded !== null,
+  };
 }
 
 function runtimeRecordBelongsToHome(home: string, recorded: GatewayInfo): boolean {
   if (!Number.isSafeInteger(recorded.pid) || recorded.pid <= 0) return false;
+  if (!recordedInThisNamespace(recorded) || !recordedProcessMatches(recorded, recorded.pid)) return false;
   const host = recorded.host?.trim() || "127.0.0.1";
-  const status = getInstanceStatus(path.join(home, "gateway.pid"), recorded.port, host);
-  if (!status.running || status.pid !== recorded.pid) return false;
+  const portOwner = lookupPidOnPort(recorded.port, host);
+  if (portOwner.status !== "found" || portOwner.pid !== recorded.pid) return false;
 
   const owner = readProcessJinnHome(recorded.pid);
-  if (owner.status === "found") return owner.identity === resolveHomeIdentity(home);
-  return recordedInThisNamespace(recorded) && pidLooksLikeGateway(recorded.pid);
+  return owner.status !== "found" || owner.identity === resolveHomeIdentity(home);
 }
 
 function lsofListenerHost(name: string): string {

@@ -5,6 +5,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { getInstanceStatus, resolveInstanceEndpoint } from "../lifecycle.js";
+import { currentNamespace, processIncarnation } from "../gateway-info.js";
 
 /**
  * getInstanceStatus is the single answer to "is this instance's gateway up". `jinn list`
@@ -150,8 +151,45 @@ describe("resolveInstanceEndpoint", () => {
       if (getInstanceStatus(path.join(home, "gateway.pid"), port, "127.0.0.1").running) break;
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    fs.writeFileSync(path.join(home, "gateway.json"), JSON.stringify({ port, host: "127.0.0.1", pid: child.pid }, null, 2));
+    const incarnation = processIncarnation(child.pid!);
+    expect(incarnation).not.toBeNull();
+    fs.writeFileSync(path.join(home, "gateway.json"), JSON.stringify({
+      port,
+      host: "127.0.0.1",
+      pid: child.pid,
+      namespace: currentNamespace(),
+      processIncarnations: { [String(child.pid)]: incarnation },
+    }, null, 2));
     fs.writeFileSync(path.join(home, "config.yaml"), "gateway:\n  port: 7778\n  host: 100.64.0.3\n");
+    expect(resolveInstanceEndpoint(home, 7778)).toEqual({ host: "127.0.0.1", port });
+  });
+
+  it("keeps a foreground runtime override without daemon command or home env identity", async () => {
+    const home = tempHome();
+    const port = await freePort();
+    const env = { ...process.env };
+    delete env.JINN_HOME;
+    delete env.JINN_HOME_IDENTITY;
+    const child = await spawnChild(
+      `require("node:net").createServer().listen(${port}, "127.0.0.1"); setInterval(() => {}, 1000);`,
+      env,
+    );
+    for (let i = 0; i < 50; i++) {
+      if (getInstanceStatus(path.join(home, "gateway.pid"), port, "127.0.0.1").running) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    const incarnation = processIncarnation(child.pid!);
+    expect(incarnation).not.toBeNull();
+    fs.writeFileSync(path.join(home, "gateway.json"), JSON.stringify({
+      port,
+      host: "127.0.0.1",
+      pid: child.pid,
+      secret: "s",
+      namespace: currentNamespace(),
+      processIncarnations: { [String(child.pid)]: incarnation },
+    }));
+    fs.writeFileSync(path.join(home, "config.yaml"), "gateway:\n  port: 7778\n  host: 100.64.0.3\n");
+
     expect(resolveInstanceEndpoint(home, 7778)).toEqual({ host: "127.0.0.1", port });
   });
 

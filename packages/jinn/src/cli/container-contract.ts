@@ -1,0 +1,37 @@
+import fs from "node:fs";
+import path from "node:path";
+
+function canonicalHome(home: string): string {
+  const resolved = path.resolve(home);
+  try {
+    return fs.realpathSync.native(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+/** Guard the destructive/launching CLI commands themselves, including commands
+ * reached through `docker exec` where the entrypoint's argument checks do not run. */
+export function assertContainerPrimaryCommand(
+  command: string,
+  selectedInstance: string | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  if (env.JINN_CONTAINER !== "1" || (command !== "setup" && command !== "start")) return;
+
+  const primaryHome = env.JINN_CONTAINER_PRIMARY_HOME?.trim();
+  const selectedHome = env.JINN_HOME?.trim();
+  const instance = selectedInstance?.trim() || env.JINN_INSTANCE?.trim();
+  const targetsPrimary = primaryHome
+    && selectedHome
+    && canonicalHome(primaryHome) === canonicalHome(selectedHome)
+    && !selectedInstance
+    && (!instance || instance === "jinn");
+  if (targetsPrimary) return;
+
+  throw new Error(
+    "The Docker image supports one Jinn instance at its primary container home. "
+    + "Do not retarget setup/start with -i, JINN_INSTANCE, or JINN_HOME; run another instance "
+    + "in its own container with dedicated Jinn/Claude volumes and a separately published port.",
+  );
+}

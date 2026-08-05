@@ -1,8 +1,51 @@
 import fs from "node:fs";
 import os from "node:os";
 import crypto from "node:crypto";
+import { execFileSync } from "node:child_process";
 
-export interface GatewayInfo { port: number; host?: string; url?: string; secret: string; pid: number; token?: string; ptyPids?: number[]; namespace?: string; }
+export interface GatewayInfo {
+  port: number;
+  host?: string;
+  url?: string;
+  secret: string;
+  pid: number;
+  token?: string;
+  ptyPids?: number[];
+  namespace?: string;
+  processIncarnations?: Record<string, string>;
+}
+
+/**
+ * A stable identity for one lifetime of a PID. Linux exposes the exact kernel
+ * start tick; POSIX `ps` exposes the process start instant. Platforms where
+ * neither can be read return null so callers fail closed instead of trusting a
+ * PID number that may have been recycled.
+ */
+export function processIncarnation(pid: number): string | null {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+  if (process.platform === "linux") {
+    try {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf-8");
+      const commandEnd = stat.lastIndexOf(")");
+      if (commandEnd < 0) return null;
+      const fieldsFromState = stat.slice(commandEnd + 1).trim().split(/\s+/);
+      const startTicks = fieldsFromState[19]; // proc_pid_stat(5), field 22
+      if (/^\d+$/.test(startTicks ?? "")) return `linux-start-ticks:${startTicks}`;
+    } catch {
+      return null;
+    }
+  }
+  if (process.platform === "win32") return null;
+  try {
+    const started = execFileSync("ps", ["-p", String(pid), "-o", "lstart="], {
+      encoding: "utf-8",
+      timeout: 1_000,
+    }).trim().replace(/\s+/g, " ");
+    return started ? `ps-lstart:${started}` : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * How far two derived boot instants may sit apart and still be one boot: `now - uptime`
@@ -93,13 +136,27 @@ export function staleGatewayPids(
   info: Partial<GatewayInfo> | null | undefined,
   currentPid = process.pid,
   namespace = currentNamespace(),
+  readIncarnation: (pid: number) => string | null = processIncarnation,
 ): number[] {
   if (!info) return [];
   // Pids are only meaningful in the namespace that recorded them. A container
   // restarts pids from 1, so a gateway.json left by an ungraceful stop names
   // numbers now held by unrelated live processes. Absent field: assume foreign.
   if (!recordedInThisNamespace(info, namespace)) return [];
-  return recordedGatewayPids(info, currentPid);
+  return recordedGatewayPids(info, currentPid).filter((pid) =>
+    recordedProcessMatches(info, pid, readIncarnation)
+  );
+}
+
+export function recordedProcessMatches(
+  info: Pick<GatewayInfo, "processIncarnations"> | null | undefined,
+  pid: number,
+  readIncarnation: (pid: number) => string | null = processIncarnation,
+): boolean {
+  const recorded = info?.processIncarnations?.[String(pid)];
+  if (!recorded) return false;
+  const current = readIncarnation(pid);
+  return current !== null && current === recorded;
 }
 
 export function writeGatewayInfo(file: string, opts: { port: number; host?: string; pid: number; secret?: string; token?: string }): GatewayInfo {
@@ -117,6 +174,8 @@ export function writeGatewayInfo(file: string, opts: { port: number; host?: stri
     ptyPids: [],
     namespace: currentNamespace(),
   };
+  const incarnation = processIncarnation(opts.pid);
+  if (incarnation) info.processIncarnations = { [String(opts.pid)]: incarnation };
   const tmp = `${file}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(info, null, 2), { mode: 0o600 });
   fs.renameSync(tmp, file);
@@ -169,6 +228,12 @@ export function updateGatewayPtyPids(file: string, ptyPids: number[]): void {
   const info = readGatewayInfo(file);
   if (!info) return;
   info.ptyPids = ptyPids;
+  const processIncarnations: Record<string, string> = {};
+  for (const pid of [info.pid, ...ptyPids]) {
+    const incarnation = processIncarnation(pid);
+    if (incarnation) processIncarnations[String(pid)] = incarnation;
+  }
+  info.processIncarnations = processIncarnations;
   const tmp = `${file}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(info, null, 2), { mode: 0o600 });
   fs.renameSync(tmp, file);

@@ -23,19 +23,36 @@ describe("gateway-info", () => {
 
   it("ignores token-only gateway info when deriving stale pids to reap", () => {
     expect(staleGatewayPids({ token: "tok", namespace: "h1" } as any, 1234, "h1")).toEqual([]);
-    expect(staleGatewayPids({ pid: undefined, ptyPids: [111, undefined, 1234, 0, -1], namespace: "h1" } as any, 1234, "h1")).toEqual([111]);
+    expect(staleGatewayPids({ pid: undefined, ptyPids: [111, undefined, 1234, 0, -1], namespace: "h1" } as any, 1234, "h1")).toEqual([]);
   });
 
   // A container restarts pids from 1, so pids recorded by a previous container
   // name unrelated live processes — reaping them could signal PID 1.
   it("does not reap pids recorded by a different namespace", () => {
-    const info = { pid: 7, ptyPids: [14, 22], namespace: "old-container" } as any;
-    expect(staleGatewayPids(info, 1234, "old-container")).toEqual([14, 22, 7]);
-    expect(staleGatewayPids(info, 1234, "new-container")).toEqual([]);
+    const info = {
+      pid: 7,
+      ptyPids: [14, 22],
+      namespace: "old-container",
+      processIncarnations: { "7": "i-7", "14": "i-14", "22": "i-22" },
+    } as any;
+    const incarnation = (pid: number) => `i-${pid}`;
+    expect(staleGatewayPids(info, 1234, "old-container", incarnation)).toEqual([14, 22, 7]);
+    expect(staleGatewayPids(info, 1234, "new-container", incarnation)).toEqual([]);
   });
 
   it("does not reap pids from gateway info written before namespaces were recorded", () => {
     expect(staleGatewayPids({ pid: 7, ptyPids: [14] } as any, 1234, "h1")).toEqual([]);
+  });
+
+  it("does not reap startup-recorded pids that were reused within the same boot", () => {
+    const info = {
+      pid: 7,
+      ptyPids: [14],
+      namespace: "same-boot",
+      processIncarnations: { "7": "old-gateway", "14": "old-pty" },
+    } as any;
+
+    expect(staleGatewayPids(info, 1234, "same-boot")).toEqual([]);
   });
 
   // Hostname AND boot identity: a reboot keeps the hostname while recycling every
@@ -65,7 +82,13 @@ describe("gateway-info", () => {
     expect(sameNamespace(stamped, stamped)).toBe(true);
     expect(sameNamespace(os.hostname(), stamped)).toBe(false);
     expect(sameNamespace(stamped, `other-host:${stamped.slice(stamped.indexOf(":") + 1)}`)).toBe(false);
-    expect(staleGatewayPids({ pid: 7, ptyPids: [14], namespace: stamped } as any, 1234)).toEqual([14, 7]);
+    const info = {
+      pid: 7,
+      ptyPids: [14],
+      namespace: stamped,
+      processIncarnations: { "7": "i-7", "14": "i-14" },
+    } as any;
+    expect(staleGatewayPids(info, 1234, stamped, (pid) => `i-${pid}`)).toEqual([14, 7]);
   });
 
   // The /proc-less form (macOS, Windows) derives the boot instant from uptime, whose

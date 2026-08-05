@@ -109,6 +109,7 @@ RUN mkdir -p /home/node/.jinn /home/node/.claude /work \
 USER node
 ENV HOME=/home/node
 ENV JINN_CONTAINER=1
+ENV JINN_CONTAINER_PRIMARY_HOME=/home/node/.jinn
 WORKDIR /home/node
 
 # Keep Claude Code's config inside the volume. It otherwise writes ~/.claude.json,

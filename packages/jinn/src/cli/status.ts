@@ -1,7 +1,6 @@
-import { getStatus } from "../gateway/lifecycle.js";
-import { gatewayBaseUrl, readGatewayInfo, resolveGatewayEndpoint } from "../gateway/gateway-info.js";
-import { loadConfig } from "../shared/config.js";
-import { GATEWAY_INFO_FILE, JINN_HOME, PID_FILE } from "../shared/paths.js";
+import { getStatus, resolveLocalGatewayConnection } from "../gateway/lifecycle.js";
+import { gatewayBaseUrl } from "../gateway/gateway-info.js";
+import { JINN_HOME, PID_FILE } from "../shared/paths.js";
 import fs from "node:fs";
 
 export async function runStatus(): Promise<void> {
@@ -47,9 +46,7 @@ export async function runStatus(): Promise<void> {
   // Try to get live stats from the gateway. gatewayBaseUrl rather than concatenation
   // because gateway.host is a BIND address: 0.0.0.0 is routine there and does not
   // connect on macOS or Windows.
-  let configBinding: { host?: string; port?: number } = {};
-  try { configBinding = loadConfig().gateway; } catch { /* gateway.json may still answer */ }
-  const endpoint = resolveGatewayEndpoint(readGatewayInfo(GATEWAY_INFO_FILE), configBinding);
+  const endpoint = resolveLocalGatewayConnection(JINN_HOME);
   try {
     const res = await fetch(`${gatewayBaseUrl(endpoint)}/api/status`, { signal: AbortSignal.timeout(3000) });
     if (res.ok) {
