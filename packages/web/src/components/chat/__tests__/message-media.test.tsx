@@ -80,6 +80,14 @@ describe('MessageMedia (multi-file)', () => {
     expect(screen.queryByLabelText('Previous image')).toBeNull()
     expect(screen.queryByLabelText('Next image')).toBeNull()
   })
+
+  it('renders a legacy file-typed video as a player instead of a file chip', () => {
+    render(<MessageMedia media={[{ type: 'file', url: '/api/files/legacy', name: 'legacy.mp4', mimeType: 'video/mp4' }]} isUser={false} />)
+
+    expect(screen.getByTestId('video-player')).toBeTruthy()
+    expect(screen.getByLabelText('Play legacy.mp4')).toBeTruthy()
+    expect(screen.queryByText('legacy.mp4')).toBeNull()
+  })
 })
 
 describe('MessageMedia image loading states', () => {

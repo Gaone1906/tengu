@@ -16,6 +16,8 @@ import type { ApiContext } from "./api.js";
 import { CALLER_SESSION_HEADER, TOOL_CALL_HEADER, UNIDENTIFIED_TOOL_CALL_ERROR, verifySessionCapability } from "../mcp/identity.js";
 import { resolveCallerIdentity } from "./session-comm-guards.js";
 import { verifyGatewayAuth } from "./auth.js";
+import { streamFile } from "./byte-range.js";
+import { ensureLowVariant, ensurePoster } from "./video-variants.js";
 
 // Ensure managed files directory exists
 export function ensureFilesDir(): void {
@@ -1164,6 +1166,7 @@ async function handleTransfer(req: HttpRequest, res: ServerResponse, context: Ap
 function mediaTypeFromMime(mime: string | null): MessageMedia["type"] {
   if (mime?.startsWith("image/")) return "image";
   if (mime?.startsWith("audio/")) return "audio";
+  if (mime?.startsWith("video/")) return "video";
   return "file";
 }
 
@@ -1485,9 +1488,9 @@ export async function handleFilesRequest(
     return true;
   }
 
-  // GET /api/files/:id — download file
+  // GET /api/files/:id — stream or download file
   const dlMatch = pathname.match(/^\/api\/files\/([^/]+)$/);
-  if (method === "GET" && dlMatch) {
+  if ((method === "GET" || method === "HEAD") && dlMatch) {
     if (rejectUnidentifiedToolCaller(req, res)) return true;
     const meta = getFile(dlMatch[1]);
     if (!meta) { notFound(res); return true; }
@@ -1501,31 +1504,59 @@ export async function handleFilesRequest(
       notFound(res);
       return true;
     }
-    const stat = fs.statSync(filePath);
-    // Content-immutable: cache forever + revalidate cheaply with ETag/Last-Modified.
-    const etag = fileEtag(meta.id, stat.size);
-    const cacheHeaders = {
-      "Cache-Control": "public, max-age=31536000, immutable",
-      ETag: etag,
-      "Last-Modified": stat.mtime.toUTCString(),
-    };
+    const originalStat = fs.statSync(filePath);
+    const reqUrl = new URL(req.url || pathname, `http://${req.headers.host || "localhost"}`);
+    const originalMime = meta.mimetype || "application/octet-stream";
+    const download = reqUrl.searchParams.get("download") === "1";
+    let selectedPath = filePath;
+    let selectedMime = originalMime;
+    let selectedFilename = meta.filename;
+    let variant = "original";
+    if (!download && originalMime.startsWith("video/")) {
+      const key = `file:${meta.id}:${originalStat.size}`;
+      if (reqUrl.searchParams.get("poster") === "1") {
+        const poster = await ensurePoster(filePath, key);
+        if (!poster) { notFound(res); return true; }
+        selectedPath = poster;
+        selectedMime = "image/jpeg";
+        selectedFilename = `${path.parse(meta.filename).name}-poster.jpg`;
+        variant = "poster";
+      } else if (reqUrl.searchParams.get("quality") === "low") {
+        const low = ensureLowVariant(filePath, key);
+        if (low) {
+          selectedPath = low;
+          selectedMime = "video/mp4";
+          variant = "low";
+        }
+      }
+    }
+    const stat = fs.statSync(selectedPath);
+    const lowFallback = !download
+      && originalMime.startsWith("video/")
+      && reqUrl.searchParams.get("quality") === "low"
+      && variant === "original";
+    // Content-immutable variants cache forever. A low-quality miss must retry so
+    // the browser can adopt the background transcode once it lands.
+    const etag = fileEtag(variant === "original" ? meta.id : `${meta.id}-${variant}`, stat.size);
+    const cacheHeaders: Record<string, string> = lowFallback
+      ? { "Cache-Control": "no-store" }
+      : {
+          "Cache-Control": "public, max-age=31536000, immutable",
+          ETag: etag,
+          "Last-Modified": stat.mtime.toUTCString(),
+        };
     // Conditional GET → 304 with no body (validators only). Cheaper than re-streaming.
-    if (isFileNotModified(req.headers, etag, stat.mtimeMs)) {
+    if (!lowFallback && isFileNotModified(req.headers, etag, stat.mtimeMs)) {
       res.writeHead(304, cacheHeaders);
       res.end();
       return true;
     }
-    // Sanitize filename to prevent Content-Disposition header injection.
-    // Strip anything that isn't alphanumeric, dash, underscore, period, or space,
-    // then use the RFC 5987 filename* parameter with percent-encoding.
-    const sanitizedFilename = meta.filename.replace(/[^\w.\- ]/g, "_");
-    res.writeHead(200, {
-      "Content-Type": meta.mimetype || "application/octet-stream",
-      "Content-Disposition": `attachment; filename="${sanitizedFilename}"; filename*=UTF-8''${encodeURIComponent(meta.filename)}`,
-      "Content-Length": stat.size,
-      ...cacheHeaders,
+    await streamFile(req, res, selectedPath, {
+      mime: selectedMime,
+      filename: selectedFilename,
+      disposition: download || !originalMime.startsWith("video/") ? "attachment" : "inline",
+      cacheHeaders,
     });
-    fs.createReadStream(filePath).pipe(res);
     return true;
   }
 

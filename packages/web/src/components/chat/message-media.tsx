@@ -1,10 +1,11 @@
 import React, { useState, useCallback } from 'react'
-import type { MediaAttachment } from '@/lib/conversations'
+import { isVideoMedia, type MediaAttachment } from '@/lib/conversations'
 import { FileAttachment } from './file-attachment'
 import { VoiceMessage } from './voice-message'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ImageLightbox } from '@/components/ui/image-lightbox'
 import { cn } from '@/lib/utils'
+import { VideoPlayer } from '@/components/ui/video-player'
 
 /**
  * Thumbnail image with a shimmer skeleton while it loads/decodes, a cross-fade in
@@ -85,7 +86,8 @@ export function MessageMedia({ media, isUser }: { media: MediaAttachment[]; isUs
 
   const images = media.filter((m) => m.type === 'image')
   const audio = media.filter((m) => m.type === 'audio')
-  const files = media.filter((m) => m.type === 'file')
+  const videos = media.filter(isVideoMedia)
+  const files = media.filter((m) => m.type !== 'image' && m.type !== 'audio' && !isVideoMedia(m))
   const gallery = images.map((image, index) => ({
     id: String(index),
     url: image.url,
@@ -123,6 +125,12 @@ export function MessageMedia({ media, isUser }: { media: MediaAttachment[]; isUs
       {audio.map((m, mi) => (
         <div key={`audio-${mi}`} className="mt-[var(--space-2)]">
           <VoiceMessage src={m.url} duration={m.duration || 0} waveform={m.waveform || []} isUser={isUser} />
+        </div>
+      ))}
+
+      {videos.map((m, mi) => (
+        <div key={`video-${mi}`} className="mt-[var(--space-2)]">
+          <VideoPlayer src={m.url} name={m.name || 'Video'} />
         </div>
       ))}
 
