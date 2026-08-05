@@ -2,8 +2,9 @@ import type { ReactNode } from "react"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { act, renderHook } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { TODO_WRITE_KEY } from "@/lib/query-keys"
+import { queryKeys, TODO_WRITE_KEY } from "@/lib/query-keys"
 import { useQueryInvalidation } from "../use-query-invalidation"
+import type { GatewayEvent, GatewayEventListener } from "@jinn/gateway-events"
 
 let listener: ((event: string, payload: unknown) => void) | undefined
 let connectionSeq = 1
@@ -12,7 +13,8 @@ vi.mock("@/hooks/use-gateway", () => ({
   useGateway: () => ({
     connectionSeq,
     subscribe: (next: (event: string, payload: unknown) => void) => {
-      listener = next
+      const typedNext = next as unknown as GatewayEventListener
+      listener = (event, payload) => typedNext({ event, payload } as GatewayEvent)
       return () => { listener = undefined }
     },
   }),
@@ -39,7 +41,7 @@ describe("Todo linked-session invalidation", () => {
   beforeEach(() => vi.useFakeTimers())
   afterEach(() => vi.useRealTimers())
 
-  it.each(["session:started", "session:updated", "session:completed", "session:error", "session:deleted"])(
+  it.each(["session:started", "session:updated", "session:completed", "session:deleted"])(
     "invalidates item-specific session queries on %s",
     async (event) => {
       const { invalidate } = setup()
@@ -178,5 +180,28 @@ describe("Todo live reconciliation (ICI-570)", () => {
     rerender()
     await act(async () => vi.advanceTimersByTimeAsync(1_000))
     expect(calledWithKey(invalidate, ["work-items"])).toBe(true)
+  })
+
+  it("invalidates Workflow list/detail/run and session detail caches after reconnect", async () => {
+    const { client, rerender } = setup()
+    const workflowId = "release-review"
+    const runId = "run-7"
+    const sessionId = "session-workflow-7"
+    const keys = [
+      queryKeys.workflows.all,
+      queryKeys.workflows.definition(workflowId),
+      queryKeys.workflows.runs(workflowId),
+      queryKeys.workflows.run(workflowId, runId),
+      queryKeys.sessions.detail(sessionId),
+    ] as const
+    for (const key of keys) client.setQueryData(key, { cached: true })
+
+    connectionSeq = 2
+    rerender()
+    await act(async () => vi.advanceTimersByTimeAsync(1_000))
+
+    for (const key of keys) {
+      expect(client.getQueryState(key)?.isInvalidated, JSON.stringify(key)).toBe(true)
+    }
   })
 })

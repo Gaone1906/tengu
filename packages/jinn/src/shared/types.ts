@@ -1,11 +1,6 @@
 export type StreamDeltaType = "text" | "text_snapshot" | "tool_use" | "tool_result" | "status" | "error" | "context" | "block";
 
-type CompanyChangedBase = { action: string; id: string; sessionId?: string };
-export type CompanyChangedEvent =
-  | (CompanyChangedBase & { entity: "todo"; version: number; value?: JsonObject })
-  | (CompanyChangedBase & { entity: "workflow-definition"; version: number })
-  | (CompanyChangedBase & { entity: "workflow-run"; workflowId: string; runId: string; version: number })
-  | (CompanyChangedBase & { entity: "workflow-trigger"; workflowId: string; revision: string });
+export type { CompanyChangedEvent } from "./gateway-events.js";
 
 export interface NoteSummary {
   /** Public path below JINN_HOME, for example knowledge/product/brief.md. */
@@ -99,7 +94,7 @@ export type WorkflowRunActivityPayload = JsonObject & {
   activityReceipt?: ActivityReceipt;
 };
 
-export interface ChatBlock {
+export type ChatBlock = JsonObject & {
   id: string;
   type: ChatBlockType;
   version: number;
@@ -111,12 +106,12 @@ export interface ChatBlock {
   title?: string;
   summary?: string;
   payload: JsonObject;
-}
+};
 
-export interface ChatBlockEnvelope {
+export type ChatBlockEnvelope = JsonObject & {
   op: ChatBlockOp;
   block: ChatBlock;
-}
+};
 
 export interface StreamDelta {
   type: StreamDeltaType;

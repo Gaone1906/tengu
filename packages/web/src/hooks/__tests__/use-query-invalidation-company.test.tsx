@@ -4,13 +4,15 @@ import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useQueryInvalidation } from '../use-query-invalidation'
 import { queryKeys } from '@/lib/query-keys'
+import type { GatewayEvent, GatewayEventListener } from '@jinn/gateway-events'
 
 let listener: ((event: string, payload: unknown) => void) | undefined
 
 vi.mock('@/hooks/use-gateway', () => ({
   useGateway: () => ({
     subscribe: (next: (event: string, payload: unknown) => void) => {
-      listener = next
+      const typedNext = next as unknown as GatewayEventListener
+      listener = (event, payload) => typedNext({ event, payload } as GatewayEvent)
       return () => { listener = undefined }
     },
   }),
@@ -119,7 +121,7 @@ describe('company + session:created invalidation', () => {
   it('invalidates workflow list + definition on a definition change', async () => {
     const { invalidate } = setup()
     act(() => listener?.('company:changed', {
-      entity: 'workflow-definition', action: 'updated', id: 'release-review', version: 4,
+      entity: 'workflow-definition', id: 'release-review', revision: 4,
     }))
     await act(async () => vi.advanceTimersByTimeAsync(1_000))
     expect(calledWithKey(invalidate, queryKeys.workflows.all)).toBe(true)
@@ -129,31 +131,37 @@ describe('company + session:created invalidation', () => {
   it('invalidates run list + detail on a run change', async () => {
     const { invalidate } = setup()
     act(() => listener?.('company:changed', {
-      entity: 'workflow-run', action: 'started', id: 'run-1', workflowId: 'release-review', runId: 'run-1', version: 3,
+      entity: 'workflow-run', workflowId: 'release-review', runId: 'run-1',
     }))
     await act(async () => vi.advanceTimersByTimeAsync(1_000))
     expect(calledWithKey(invalidate, queryKeys.workflows.runs('release-review'))).toBe(true)
     expect(calledWithKey(invalidate, queryKeys.workflows.run('release-review', 'run-1'))).toBe(true)
   })
 
-  it('invalidates trigger list + owning definition on a trigger change', async () => {
-    const { invalidate } = setup()
-    act(() => listener?.('company:changed', {
-      entity: 'workflow-trigger', action: 'created', id: 'nightly', workflowId: 'release-review', revision: 'r2',
-    }))
-    await act(async () => vi.advanceTimersByTimeAsync(1_000))
-    expect(calledWithKey(invalidate, queryKeys.workflows.triggers)).toBe(true)
-    expect(calledWithKey(invalidate, queryKeys.workflows.definition('release-review'))).toBe(true)
-  })
-
   it('invalidates the invoking session detail + transcript when sessionId is present', async () => {
     const { invalidate } = setup()
     act(() => listener?.('company:changed', {
-      entity: 'workflow-run', action: 'parked', id: 'run-1', workflowId: 'release-review', runId: 'run-1',
-      version: 3, sessionId: 'session-a',
+      entity: 'todo', action: 'delegated', id: 'wi_delegated', version: 3, sessionId: 'session-a',
     }))
     await act(async () => vi.advanceTimersByTimeAsync(1_000))
     expect(calledWithKey(invalidate, queryKeys.sessions.detail('session-a'))).toBe(true)
     expect(calledWithKey(invalidate, queryKeys.sessions.transcript('session-a'))).toBe(true)
+  })
+
+  it.each(['success', 'error'] as const)('invalidates cron run history and job keys on a %s run', async (status) => {
+    const { invalidate } = setup()
+    act(() => listener?.('cron:run-finished', { jobId: 'nightly', status }))
+    await act(async () => vi.advanceTimersByTimeAsync(1_000))
+    expect(calledWithKey(invalidate, ['cron-runs', 'nightly'])).toBe(true)
+    expect(calledWithKey(invalidate, queryKeys.cron.jobs)).toBe(true)
+    expect(calledWithKey(invalidate, queryKeys.cron.all)).toBe(true)
+  })
+
+  it('invalidates session list and detail when the shared stopped lifecycle event arrives', async () => {
+    const { invalidate } = setup()
+    act(() => listener?.('session:stopped', { sessionId: 'workflow-session' }))
+    await act(async () => vi.advanceTimersByTimeAsync(1_000))
+    expect(calledWithKey(invalidate, queryKeys.sessions.all)).toBe(true)
+    expect(calledWithKey(invalidate, queryKeys.sessions.detail('workflow-session'))).toBe(true)
   })
 })

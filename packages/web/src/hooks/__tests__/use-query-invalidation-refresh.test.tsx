@@ -4,13 +4,15 @@ import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useQueryInvalidation } from '../use-query-invalidation'
 import { queryKeys } from '@/lib/query-keys'
+import type { GatewayEvent, GatewayEventListener } from '@jinn/gateway-events'
 
 let listener: ((event: string, payload: unknown) => void) | undefined
 
 vi.mock('@/hooks/use-gateway', () => ({
   useGateway: () => ({
     subscribe: (next: (event: string, payload: unknown) => void) => {
-      listener = next
+      const typedNext = next as unknown as GatewayEventListener
+      listener = (event, payload) => typedNext({ event, payload } as GatewayEvent)
       return () => { listener = undefined }
     },
   }),
@@ -37,7 +39,7 @@ describe('mounted surface refresh on company:changed', () => {
     await waitFor(() => expect(queryFn).toHaveBeenCalledTimes(1))
 
     act(() => listener?.('company:changed', {
-      entity: 'workflow-definition', action: 'updated', id: 'release-review', version: 5,
+      entity: 'workflow-definition', id: 'release-review', revision: 5,
     }))
 
     await waitFor(() => expect(queryFn).toHaveBeenCalledTimes(2))

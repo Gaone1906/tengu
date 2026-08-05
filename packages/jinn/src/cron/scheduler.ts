@@ -7,6 +7,7 @@ import type {
 import { runCronJob } from "./runner.js";
 import { logger } from "../shared/logger.js";
 import type { SessionManager } from "../sessions/manager.js";
+import type { GatewayEmit } from "../shared/gateway-events.js";
 import { loadJobs, saveJobs } from "./jobs.js";
 import { validateCronSchedule } from "./validation.js";
 
@@ -14,15 +15,18 @@ let tasks: cron.ScheduledTask[] = [];
 let currentSessionManager: SessionManager;
 let currentConfig: JinnConfig;
 let currentConnectors: Map<string, Connector>;
+let currentEmit: GatewayEmit | undefined;
 export function startScheduler(
   jobs: CronJob[],
   sessionManager: SessionManager,
   config: JinnConfig,
   connectors: Map<string, Connector>,
+  emit?: GatewayEmit,
 ): void {
   currentSessionManager = sessionManager;
   currentConfig = config;
   currentConnectors = connectors;
+  currentEmit = emit;
   const started: cron.ScheduledTask[] = [];
   for (const job of jobs) {
     if (!job.enabled) continue;
@@ -79,7 +83,7 @@ function createTask(job: CronJob): cron.ScheduledTask {
       // (not recomputed inside runCronJob). A retry reusing this fireIso is
       // idempotent across session/work-item/link (GRS-003b-1).
       const fireIso = new Date().toISOString();
-      runCronJob(job, currentSessionManager, currentConfig, currentConnectors, { fireIso }).catch((err) => {
+      runCronJob(job, currentSessionManager, currentConfig, currentConnectors, { fireIso, emit: currentEmit }).catch((err) => {
         logger.error(`Cron job "${job.name}" crashed: ${err instanceof Error ? err.message : err}`);
       });
     },
@@ -96,7 +100,7 @@ export async function triggerCronJob(idOrName: string): Promise<CronJob | undefi
   // single-shot execution guard (GRS-003b-2a) and always runs. Only the scheduled
   // TICK carries a deterministic per-fire identity — the locus a future retrying
   // dispatcher (GRS-003b-2c) leans on for at-most-once execution.
-  await runCronJob(job, currentSessionManager, currentConfig, currentConnectors);
+  await runCronJob(job, currentSessionManager, currentConfig, currentConnectors, { emit: currentEmit });
   return job;
 }
 

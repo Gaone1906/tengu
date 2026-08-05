@@ -8,6 +8,7 @@ import { createWorkItem, linkSession, type WorkItem } from "../work-items/store.
 import { reconcileWorkItem } from "../work-items/reconcile.js";
 import { notifyTodoChanged } from "../work-items/live-events.js";
 import { getSessionBySessionKey } from "../sessions/registry.js";
+import type { GatewayEmit } from "../shared/gateway-events.js";
 
 /**
  * GRS-003b-2b — best-effort repair of the cron→work-item bridge for an already-spawned
@@ -66,6 +67,8 @@ export interface RunCronJobOptions {
    * are therefore never deduped — every ad-hoc call is a new fire by definition.
   */
   fireIso?: string;
+  /** Gateway broadcast seam. Absent in CLI/unit contexts without a live server. */
+  emit?: GatewayEmit;
 }
 
 export async function runCronJob(
@@ -246,6 +249,7 @@ export async function runCronJob(
       error: null,
       resultPreview: null,
     });
+    opts?.emit?.("cron:run-finished", { jobId: job.id, status: "success" });
     logger.info(`Cron job "${job.name}" completed in ${durationMs}ms`);
 
     // Latency alert: warn if job exceeded threshold
@@ -277,6 +281,7 @@ export async function runCronJob(
       error: message,
       resultPreview: null,
     });
+    opts?.emit?.("cron:run-finished", { jobId: job.id, status: "error" });
     logger.error(`Cron job "${job.name}" failed: ${message}`);
 
     // Send alert if configured

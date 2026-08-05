@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
+import type { GatewayEmit } from "../shared/gateway-events.js";
 import type { JinnConfig, Connector, Employee, Engine, JsonObject, Session, SlackConnectorConfig, TelegramConnectorConfig, WhatsAppConnectorConfig } from "../shared/types.js";
 import { loadConfig, normalizeClaudeEngineConfig } from "../shared/config.js";
 import {
@@ -838,7 +839,7 @@ export async function startGateway(
 
   // Broadcast function (defined early so apiContext can reference it)
   const wsClients = new Set<import("ws").WebSocket>();
-  const emit = (event: string, payload: unknown): void => {
+  const emit: GatewayEmit = (event, payload): void => {
     const message = JSON.stringify({ event, payload, ts: Date.now() });
     for (const client of wsClients) {
       if (client.readyState === 1) {
@@ -851,6 +852,7 @@ export async function startGateway(
       }
     }
   };
+  sessionManager.setGatewayEmitter(emit);
   // ICI-570: in-process Todo writes (cron mints, session-lifecycle reconciles)
   // reach the dashboard through the same company:changed lane the routes use.
   setTodoLiveEmitter((event) => emit("company:changed", event));
@@ -874,8 +876,8 @@ export async function startGateway(
     // prompt has to say so, and a dead run leaves its reason behind.
     todoLifecycle: workflowTodoLifecycle,
     readTranscript: (id) => getMessages(id).map(({ id: messageId, role, content, timestamp }) => ({ id: messageId, role, content, timestamp })),
-    onChange: ({ workflowId, runId }) => emit("company:changed", { entity: "workflow", workflowId, runId }),
-    onDefinitionChange: ({ workflowId, revision }) => emit("company:changed", { entity: "workflow", workflowId, revision }) });
+    onChange: ({ workflowId, runId }) => emit("company:changed", { entity: "workflow-run", workflowId, runId }),
+    onDefinitionChange: ({ workflowId, revision }) => emit("company:changed", { entity: "workflow-definition", id: workflowId, revision }) });
   await workflowService.recover(new Date().toISOString());
 
   // Discover dynamic engine models in the background. Fire-and-forget: the
@@ -1052,7 +1054,7 @@ export async function startGateway(
   });
 
   const cronJobs = loadJobs();
-  startScheduler(cronJobs, sessionManager, config, connectorMap);
+  startScheduler(cronJobs, sessionManager, config, connectorMap, emit);
   logger.info(`Loaded ${cronJobs.length} cron job(s)`);
 
   // Resolve web UI directory — bundled into dist/web/ by postbuild script
@@ -1346,23 +1348,6 @@ export async function startGateway(
   }
   if (callbackRecovery.orphanedRecovered > 0) {
     logger.warn(`Surfaced ${callbackRecovery.orphanedRecovered} orphaned delegation completion claim(s) after restart`);
-  }
-
-  // Notify connected WebSocket clients about interrupted sessions available for resume
-  if (resumable.length > 0) {
-    // Small delay to let WebSocket clients connect after server starts
-    setTimeout(() => {
-      emit("sessions:interrupted", {
-        count: resumable.length,
-        sessions: resumable.map((s) => ({
-          id: s.id,
-          engine: s.engine,
-          employee: s.employee,
-          title: s.title,
-          lastActivity: s.lastActivity,
-        })),
-      });
-    }, 1000);
   }
 
   // Prevent macOS from sleeping while the gateway is running

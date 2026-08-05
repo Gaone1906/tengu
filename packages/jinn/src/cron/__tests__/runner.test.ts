@@ -548,3 +548,35 @@ describe("ICI-570 — cron mints emit a live todo event", () => {
     }
   });
 });
+
+describe("gateway cron run lifecycle", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("emits a successful terminal run event after appending the run log", async () => {
+    const emit = vi.fn();
+    await runCronJob(
+      makeJob({ id: "nightly" }),
+      makeMockSessionManager(0),
+      makeConfig(),
+      new Map<string, Connector>(),
+      { emit } as never,
+    );
+    expect(emit).toHaveBeenCalledWith("cron:run-finished", { jobId: "nightly", status: "success" });
+  });
+
+  it("emits an error terminal run event after appending the failed run log", async () => {
+    const emit = vi.fn();
+    const manager = makeMockSessionManager(0);
+    manager.route.mockRejectedValueOnce(new Error("cron exploded"));
+    await runCronJob(
+      makeJob({ id: "nightly" }),
+      manager,
+      makeConfig(),
+      new Map<string, Connector>(),
+      { emit } as never,
+    );
+    expect(emit).toHaveBeenCalledWith("cron:run-finished", { jobId: "nightly", status: "error" });
+  });
+});

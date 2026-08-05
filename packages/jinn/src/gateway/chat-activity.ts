@@ -4,6 +4,7 @@ import type {
   ChatBlockEnvelope,
   CompanyChangedEvent,
 } from "../shared/types.js";
+import type { GatewayEmit } from "../shared/gateway-events.js";
 import { blockFallbackText } from "../shared/blocks.js";
 
 export interface ActivityOperation {
@@ -16,7 +17,7 @@ export interface ChatActivityContext {
   hasBlock?: (sessionId: string, blockId: string) => boolean;
   nextActivityOrder?: (sessionId: string, blockId: string) => number;
   applyBlock: (sessionId: string, envelope: ChatBlockEnvelope, fallback: string) => unknown;
-  emit: (event: string, payload: unknown) => void;
+  emit: GatewayEmit;
   log?: (message: string) => void;
 }
 

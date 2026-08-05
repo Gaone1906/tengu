@@ -38,8 +38,7 @@ import {
   type ChatBlockType,
   type LiveBlockArrival,
 } from '@/lib/blocks'
-
-type Listener = (event: string, payload: unknown) => void
+import type { GatewayEvent, GatewayEventListener } from '@jinn/gateway-events'
 
 /** After a reconnect, if a turn is still 'loading' but no delta has arrived for
  *  this long, assume the session:completed frame was dropped and reconcile from
@@ -85,7 +84,7 @@ export interface SessionMetaUpdate {
 
 export interface UseLiveSessionOptions {
   /** Gateway subscribe for WS events. */
-  subscribe: (fn: Listener) => () => void
+  subscribe: (fn: GatewayEventListener) => () => void
   /** Gateway connection seq — bumping it triggers reconnect backfill. */
   connectionSeq?: number
   /** Read-only consumers (the Talk modal) seed loading from running state and
@@ -693,7 +692,8 @@ export function useLiveSession(
 
   // Listen for session events via subscribe
   useEffect(() => {
-    return subscribe((event, payload) => {
+    return subscribe((frame: GatewayEvent) => {
+      const { event, payload } = frame
       const p = payload as Record<string, unknown>
       const sid = sessionIdRef.current
       if (!sid || p.sessionId !== sid) return

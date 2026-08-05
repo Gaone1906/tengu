@@ -1,7 +1,6 @@
 import { dlog } from "./debug-log";
 import { nextReconnectDelay } from "./ws-backoff";
-
-type EventHandler = (event: string, payload: unknown) => void;
+import { decodeGatewayEvent, type GatewayEventListener } from "@jinn/gateway-events";
 
 /**
  * App-level ping cadence. Keeps idle NAT/proxy/Tailscale flows warm and — paired
@@ -29,7 +28,7 @@ export interface GatewaySocket {
 }
 
 export function createGatewaySocket(
-  onEvent: EventHandler,
+  onEvent: GatewayEventListener,
   opts?: { onOpen?: () => void; onClose?: () => void },
 ): GatewaySocket {
   const gatewayUrl = process.env.NEXT_PUBLIC_GATEWAY_URL;
@@ -127,7 +126,12 @@ export function createGatewaySocket(
       try {
         const data = JSON.parse(e.data);
         if (data?.event === "pong") return; // liveness only — nothing to dispatch
-        onEvent(data.event, data.payload);
+        const frame = decodeGatewayEvent(data);
+        if (!frame) {
+          dlog("ws", `dropped invalid gateway event: ${String(data?.event)}`);
+          return;
+        }
+        onEvent(frame);
       } catch (err) {
         dlog("ws", `dropped malformed frame: ${String(err)}`);
       }

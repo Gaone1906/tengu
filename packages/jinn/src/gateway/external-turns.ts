@@ -4,6 +4,7 @@ import { getSession, getMessages, insertMessage, updateMessageContent, updateSes
 import { initDb } from "../shared/db.js";
 import { findTranscriptForSession } from "../engines/claude-interactive.js";
 import type { HookPayload } from "./hook-registry.js";
+import type { GatewayEmit } from "../shared/gateway-events.js";
 
 /**
  * External-turn sync: persist turns that happened OUTSIDE a gateway run() —
@@ -256,7 +257,7 @@ function findPersistedSequence(existing: SessionMessage[], entries: TranscriptTa
  */
 export function syncExternalTurn(
   sessionId: string,
-  emit: (event: string, payload: unknown) => void,
+  emit: GatewayEmit,
   payload?: HookPayload,
 ): number {
   const session = getSession(sessionId);
@@ -373,7 +374,7 @@ const onLoadSyncInProgress = new Set<string>();
  */
 export function scheduleOnLoadTailSync(
   sessionId: string,
-  emit: (event: string, payload: unknown) => void,
+  emit: GatewayEmit,
 ): void {
   if (onLoadSyncInProgress.has(sessionId)) return;
   onLoadSyncInProgress.add(sessionId);

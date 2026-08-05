@@ -677,7 +677,6 @@ async function saveFile(result: UploadResult, context: ApiContext): Promise<File
     spawn("open", [targetPath], { stdio: "ignore", detached: true }).unref();
   }
 
-  context.emit("file:uploaded", { id: result.id, filename: result.filename, size: result.buffer.length });
   logger.info(`File uploaded: ${result.filename} (${result.id}, ${result.buffer.length} bytes)`);
 
   return meta;
@@ -1153,7 +1152,6 @@ async function handleTransfer(req: HttpRequest, res: ServerResponse, context: Ap
 
   const ok = results.filter(r => r.status === "ok").length;
   const failed = results.filter(r => r.status === "error").length;
-  context.emit("file:transferred", { destination: destUrl, ok, failed });
   logger.info(`File transfer to ${destUrl}: ${ok} ok, ${failed} failed`);
 
   json(res, { destination: destUrl, results, summary: { ok, failed, total: results.length } });
@@ -1548,7 +1546,6 @@ export async function handleFilesRequest(
     }
 
     deleteFile(id);
-    context.emit("file:deleted", { id, filename: meta.filename });
     logger.info(`File deleted: ${meta.filename} (${id})`);
     json(res, { status: "deleted" });
     return true;

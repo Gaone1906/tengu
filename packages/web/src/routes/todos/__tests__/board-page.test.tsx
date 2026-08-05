@@ -8,6 +8,7 @@ import TodoBoardPage from "../board/board-page"
 import { boardColumnQueryKey, boardScopeParams } from "../board/use-board"
 import { clearBoardScrollCache } from "../board/board-route"
 import { useSetWorkItemStatus } from "../use-todos"
+import type { GatewayEvent, GatewayEventListener } from "@jinn/gateway-events"
 
 vi.mock("@/components/page-layout", () => ({ PageLayout: ({ children }: { children: React.ReactNode }) => <>{children}</> }))
 vi.mock("@/routes/settings-provider", () => ({ useSettings: () => ({ settings: { employeeOverrides: {} } }) }))
@@ -36,7 +37,8 @@ vi.mock("@/hooks/use-gateway", () => ({
   useGateway: () => ({
     connectionSeq: 1,
     subscribe: (next: (event: string, payload: unknown) => void) => {
-      gatewayListener = next
+      const typedNext = next as unknown as GatewayEventListener
+      gatewayListener = (event, payload) => typedNext({ event, payload } as GatewayEvent)
       return () => { gatewayListener = undefined }
     },
   }),

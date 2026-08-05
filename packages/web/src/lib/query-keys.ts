@@ -21,6 +21,7 @@ export const queryKeys = {
   },
   cron: {
     all: ['cron'] as const,
+    jobs: ['cron-jobs'] as const,
     runs: (id: string) => ['cron', id, 'runs'] as const,
   },
   workflows: {
@@ -30,7 +31,6 @@ export const queryKeys = {
     run: (id: string, runId: string) => ['workflows', 'runs', id, runId] as const,
     runPrompt: (id: string, runId: string, attemptKey: string) =>
       ['workflows', 'runs', id, runId, 'prompt', attemptKey] as const,
-    triggers: ['workflows', 'triggers'] as const,
   },
   skills: {
     all: ['skills'] as const,

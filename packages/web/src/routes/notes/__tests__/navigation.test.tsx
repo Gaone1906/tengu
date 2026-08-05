@@ -8,13 +8,15 @@ import { NAV_ITEMS, MOBILE_TAB_ITEMS, OVERFLOW_HREFS, navigationFor } from "@/li
 import { queryKeys } from "@/lib/query-keys"
 import { STATIC_PAGES, staticPagesFor } from "@/components/global-search"
 import { useQueryInvalidation } from "@/hooks/use-query-invalidation"
+import type { GatewayEvent, GatewayEventListener } from "@jinn/gateway-events"
 
 let gatewayListener: ((event: string, payload: unknown) => void) | undefined
 
 vi.mock("@/hooks/use-gateway", () => ({
   useGateway: () => ({
     subscribe: (listener: (event: string, payload: unknown) => void) => {
-      gatewayListener = listener
+      const typedListener = listener as unknown as GatewayEventListener
+      gatewayListener = (event, payload) => typedListener({ event, payload } as GatewayEvent)
       return () => { gatewayListener = undefined }
     },
   }),

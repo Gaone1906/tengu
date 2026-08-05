@@ -247,11 +247,10 @@ function SessionStatusChip({ status }: { status: string }) {
   )
 }
 
-function SessionSection({ sessionId, live }: { sessionId: string; live: boolean }) {
+function SessionSection({ sessionId }: { sessionId: string }) {
   const query = useQuery({
     queryKey: queryKeys.sessions.detail(sessionId),
     queryFn: () => api.getSession(sessionId, { messages: false }),
-    refetchInterval: live ? 5000 : false,
   })
   const status = typeof query.data?.["status"] === "string" ? (query.data["status"] as string) : null
   return (
@@ -446,7 +445,7 @@ export function RunInspector({ detail, nodeId, onClose, onDecide, deciding }: {
                   </div>
                 </Section>
               )}
-              {sessionId && <SessionSection sessionId={sessionId} live={status === "running" || status === "waiting-submit"} />}
+              {sessionId && <SessionSection sessionId={sessionId} />}
             </>
           )}
           {node.type === "condition" && <RouteSection node={node} nodeRun={nodeRun} />}

@@ -1,3 +1,4 @@
+import type { JsonObject } from "../shared/types.js";
 import type { WorkItem } from "./store.js";
 
 /**
@@ -14,7 +15,7 @@ export interface TodoLiveEvent {
   action: string;
   id: string;
   version: number;
-  value?: Record<string, unknown>;
+  value?: JsonObject;
 }
 
 type TodoLiveEmitter = (event: TodoLiveEvent) => void;
@@ -33,7 +34,7 @@ export function notifyTodoChanged(item: WorkItem, action: string): void {
       action,
       id: item.id,
       version: item.version,
-      value: item as unknown as Record<string, unknown>,
+      value: item as unknown as JsonObject,
     });
   } catch {
     // A broken listener must never fail the write it observes.

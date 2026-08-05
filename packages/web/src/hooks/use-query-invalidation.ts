@@ -6,8 +6,9 @@ import { queryKeys, TODO_WRITE_KEY } from '@/lib/query-keys'
 import { patchSessionBackgroundActivity, removeFromSessionsCache } from '@/hooks/use-sessions'
 import { mergeTodoIntoCaches } from '@/routes/todos/todo-edit-request'
 import type { BackgroundActivity, SessionsResponse } from '@/lib/api'
+import { GATEWAY_EVENTS, type GatewayEvent } from '@jinn/gateway-events'
 
-/** The one company mutation event (Todo, Workflow definition, run, trigger). */
+/** The one company mutation event (Todo, Workflow definition, run). */
 function handleCompanyChanged(
   qc: ReturnType<typeof useQueryClient>,
   p: Record<string, unknown>,
@@ -36,10 +37,6 @@ function handleCompanyChanged(
       qc.invalidateQueries({ queryKey: queryKeys.workflows.runs(workflowId) })
       if (runId) qc.invalidateQueries({ queryKey: queryKeys.workflows.run(workflowId, runId) })
     }
-  } else if (entity === 'workflow-trigger') {
-    const workflowId = typeof p.workflowId === 'string' ? p.workflowId : ''
-    qc.invalidateQueries({ queryKey: queryKeys.workflows.triggers })
-    if (workflowId) qc.invalidateQueries({ queryKey: queryKeys.workflows.definition(workflowId) })
   }
   // Loss recovery for the invoking transcript; normal session:delta stays the
   // surgical live path when the session is streaming.
@@ -94,6 +91,13 @@ export function useQueryInvalidation() {
           }
           continue
         }
+        if (key.startsWith('cron-run:')) {
+          const jobId = key.slice('cron-run:'.length)
+          qc.invalidateQueries({ queryKey: ['cron-runs', jobId] })
+          qc.invalidateQueries({ queryKey: queryKeys.cron.all })
+          qc.invalidateQueries({ queryKey: queryKeys.cron.jobs })
+          continue
+        }
         switch (key) {
           case 'sessions':
             qc.invalidateQueries({ queryKey: queryKeys.sessions.all })
@@ -102,7 +106,10 @@ export function useQueryInvalidation() {
             qc.invalidateQueries({ queryKey: ['work-item-sessions'] })
             break
           case 'cron':
+            // The cron routes query a raw ['cron-jobs'] key that ['cron'] does
+            // not prefix-match, so the visible list needs its own invalidation.
             qc.invalidateQueries({ queryKey: queryKeys.cron.all })
+            qc.invalidateQueries({ queryKey: queryKeys.cron.jobs })
             break
           case 'skills':
             qc.invalidateQueries({ queryKey: queryKeys.skills.all })
@@ -135,7 +142,8 @@ export function useQueryInvalidation() {
     }
 
     scheduleFlushRef.current = scheduleFlush
-    const unsub = subscribe((event: string, payload: unknown) => {
+    const unsub = subscribe((frame: GatewayEvent) => {
+      const { event, payload } = frame
       const p = payload as Record<string, unknown> | undefined
 
       switch (event) {
@@ -198,16 +206,18 @@ export function useQueryInvalidation() {
           }
           return
         case 'session:completed':
-        case 'session:error':
+        case GATEWAY_EVENTS.sessionStopped:
           pendingRef.current.add('sessions')
           pendingRef.current.add('work-item-sessions')
           if (p?.sessionId) {
             qc.invalidateQueries({ queryKey: queryKeys.sessions.detail(p.sessionId as string) })
           }
           break
-        case 'cron:completed':
-        case 'cron:error':
+        case 'cron:reloaded':
           pendingRef.current.add('cron')
+          break
+        case GATEWAY_EVENTS.cronRunFinished:
+          pendingRef.current.add(`cron-run:${payload.jobId}`)
           break
         case 'skills:changed':
           pendingRef.current.add('skills')
@@ -247,6 +257,8 @@ export function useQueryInvalidation() {
     if (connectionSeq === previousConnectionSeqRef.current) return
     previousConnectionSeqRef.current = connectionSeq
     pendingRef.current.add('todos')
+    qc.invalidateQueries({ queryKey: queryKeys.workflows.all })
+    qc.invalidateQueries({ queryKey: queryKeys.sessions.all })
     scheduleFlushRef.current()
-  }, [connectionSeq])
+  }, [connectionSeq, qc])
 }

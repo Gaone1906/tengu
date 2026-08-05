@@ -5,6 +5,8 @@
  * kokoro.ts and consumed by tts-stream.ts. Nothing else lives here.
  */
 
+import type { GatewayEmit } from "../shared/gateway-events.js"
+
 /** WebSocket event names emitted during synthesis (envelope: { event, payload, ts }). */
 export const TALK_EVENTS = {
   audio: "talk:audio",
@@ -14,7 +16,7 @@ export const TALK_EVENTS = {
 } as const
 
 /** Broadcast function injected everywhere (matches gateway server's `emit`). */
-export type Emit = (event: string, payload: unknown) => void
+export type Emit = GatewayEmit
 
 /** Kokoro-82M TTS engine (sidecar-backed). Implemented by kokoro.ts. */
 export interface Tts {

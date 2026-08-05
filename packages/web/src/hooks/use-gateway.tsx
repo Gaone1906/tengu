@@ -8,20 +8,14 @@ import {
   type ReactNode,
 } from "react";
 import { createGatewaySocket } from "@/lib/ws";
+import type { GatewayEvent, GatewayEventListener, GatewayEventName } from "@jinn/gateway-events";
 
-type Listener = (event: string, payload: unknown) => void;
-
-export interface GatewayEvent {
-  event: string;
-  payload: unknown;
-}
-
-interface GatewayContextValue {
+export interface GatewayContextValue {
   events: GatewayEvent[];
   connected: boolean;
   connectionSeq: number;
   skillsVersion: number;
-  subscribe: (fn: Listener) => () => void;
+  subscribe: (fn: GatewayEventListener) => () => void;
 }
 
 const GatewayContext = createContext<GatewayContextValue | null>(null);
@@ -39,9 +33,9 @@ const GatewayContext = createContext<GatewayContextValue | null>(null);
  * Subscribers are unaffected — they still receive every event via subscribe().
  */
 const EVENTS_ARRAY_PREFIXES = ["stt:"] as const;
-const EVENTS_ARRAY_EXACT = new Set<string>(["queue:updated"]);
+const EVENTS_ARRAY_EXACT = new Set<GatewayEventName>(["queue:updated"]);
 
-function shouldPushToEventsArray(event: string): boolean {
+function shouldPushToEventsArray(event: GatewayEventName): boolean {
   if (EVENTS_ARRAY_EXACT.has(event)) return true;
   for (const prefix of EVENTS_ARRAY_PREFIXES) {
     if (event.startsWith(prefix)) return true;
@@ -59,17 +53,18 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
   const [connected, setConnected] = useState(false);
   const [connectionSeq, setConnectionSeq] = useState(0);
   const [skillsVersion, setSkillsVersion] = useState(0);
-  const listenersRef = useRef<Set<Listener>>(new Set());
+  const listenersRef = useRef<Set<GatewayEventListener>>(new Set());
 
   useEffect(() => {
     const socket = createGatewaySocket(
-      (event, payload) => {
+      (frame) => {
+        const { event } = frame;
         // Only mutate the shared events array for frames that one of the
         // remaining events-array consumers actually filters for. Everything
         // else is delivered exclusively through subscribe() below, which
         // avoids waking every <ChatPane> on the page for unrelated frames.
         if (shouldPushToEventsArray(event)) {
-          setEvents((prev) => [...prev.slice(-99), { event, payload }]);
+          setEvents((prev) => [...prev.slice(-99), frame]);
         }
 
         if (event === "skills:changed") {
@@ -78,7 +73,7 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
 
         // Dispatch to synchronous subscribers (bypasses React 18 batching)
         for (const fn of listenersRef.current) {
-          fn(event, payload);
+          fn(frame);
         }
       },
       {
@@ -115,7 +110,7 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  const subscribe = useCallback((fn: Listener) => {
+  const subscribe = useCallback((fn: GatewayEventListener) => {
     listenersRef.current.add(fn);
     return () => {
       listenersRef.current.delete(fn);
