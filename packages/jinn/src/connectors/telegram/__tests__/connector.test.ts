@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import type { IncomingMessage, Target } from "../../../shared/types.js";
+import type { IncomingMessage, Session, Target } from "../../../shared/types.js";
 
 // Mock node-telegram-bot-api before importing connector
 const mockSendMessage = vi.fn().mockResolvedValue({ message_id: 1 });
@@ -32,6 +32,7 @@ vi.mock("../../../shared/logger.js", () => ({
 
 // Import after mocks are set up
 const { TelegramConnector } = await import("../index.js");
+const { deliverConnectorReply } = await import("../../../gateway/api.js");
 
 describe("TelegramConnector", () => {
   let connector: InstanceType<typeof TelegramConnector>;
@@ -97,6 +98,43 @@ describe("TelegramConnector", () => {
   });
 
   describe("onMessage", () => {
+    it("stamps and replies through a named connector instance id", async () => {
+      const named = new TelegramConnector({
+        id: "telegram-support",
+        botToken: "123456:ABC-DEF",
+      });
+      const handler = vi.fn();
+      named.onMessage(handler);
+      await named.start();
+
+      const messageCallback = mockOn.mock.calls.find(
+        (call) => call[0] === "message",
+      )?.[1];
+      await messageCallback({
+        message_id: 42,
+        chat: { id: 12345, type: "private" as const },
+        from: { id: 67890, username: "testuser", first_name: "Test", is_bot: false },
+        date: Math.floor(Date.now() / 1000) + 10,
+        text: "Hello named bot!",
+      });
+
+      const incoming: IncomingMessage = handler.mock.calls[0][0];
+      expect(incoming.connector).toBe("telegram-support");
+      expect(incoming.sessionKey).toBe("telegram-support:12345");
+
+      await deliverConnectorReply({
+        id: "session-named",
+        source: incoming.source,
+        connector: incoming.connector,
+        replyContext: incoming.replyContext,
+      } as Session, "Named reply", new Map([[named.id, named]]));
+
+      expect(mockSendMessage).toHaveBeenCalledWith("12345", "Named reply", {
+        parse_mode: "Markdown",
+        reply_parameters: { message_id: 42 },
+      });
+    });
+
     it("routes incoming messages to the handler", async () => {
       const handler = vi.fn();
       connector.onMessage(handler);

@@ -325,7 +325,7 @@ export class DiscordConnector implements Connector {
       }));
 
       const payload = {
-        sessionKey: deriveSessionKey(message, this.id),
+        sessionKey: deriveSessionKey(message),
         channel: message.channel.id,
         thread: message.channel.isThread() ? message.channel.id : undefined,
         user: message.author.username,

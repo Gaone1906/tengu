@@ -20,6 +20,7 @@ import {
   refreshPiModels,
 } from "../shared/models.js";
 import { configureLogger, logger } from "../shared/logger.js";
+import { CONNECTOR_ID_REQUIREMENTS, isValidConnectorId } from "../shared/connector-id.js";
 import { scheduleFtsBackfill, recoverStaleSessions, recoverStaleWorkflowAttemptSessions, recoverStaleQueueItems, clearAllPartialMessages, consumeRestartAcknowledgements, getInterruptedSessions, listSessions, updateSession, getSession, getMessages, getSessionSpend, RESTART_ACK_META_KEY } from "../sessions/registry.js";
 import { initDb } from "../shared/db.js";
 import { SessionManager, type RouteOptions } from "../sessions/manager.js";
@@ -381,7 +382,10 @@ export function connectorInstancesFromConfig(config: JinnConfig): NormalizedConn
   const instances: NormalizedConnector[] = [];
   const seen = new Set<string>();
 
-  const add = (id: string, type: string, raw: Record<string, unknown>): void => {
+  const add = (id: unknown, type: string, raw: Record<string, unknown>): void => {
+    if (!isValidConnectorId(id)) {
+      throw new Error(`Invalid connector instance id ${JSON.stringify(id)}: ${CONNECTOR_ID_REQUIREMENTS}`);
+    }
     if (seen.has(id)) {
       logger.warn(`Duplicate connector instance id "${id}", skipping`);
       return;
@@ -400,7 +404,7 @@ export function connectorInstancesFromConfig(config: JinnConfig): NormalizedConn
 
   for (const instance of declared.instances ?? []) {
     const { id, type, ...rest } = instance;
-    if (!id || !type) {
+    if (id === undefined || id === null || !type) {
       logger.warn(`Skipping connector instance without id or type`);
       continue;
     }
@@ -418,9 +422,13 @@ export function createConnector(instance: NormalizedConnector): Connector {
       return new SlackConnector(config as unknown as SlackConnectorConfig);
     case "discord":
       // Remote mode proxies all Discord I/O through the primary instance.
-      return config.proxyVia
-        ? new RemoteDiscordConnector({ id: instance.id, proxyVia: String(config.proxyVia), channelId: config.channelId as string | undefined })
-        : new DiscordConnector(config as unknown as DiscordConnectorConfig);
+      if (config.proxyVia) {
+        if (instance.id !== "discord") {
+          throw new Error("Named Remote Discord instances are not supported until the proxy protocol authenticates and validates instance identity");
+        }
+        return new RemoteDiscordConnector({ proxyVia: String(config.proxyVia), channelId: config.channelId as string | undefined });
+      }
+      return new DiscordConnector(config as unknown as DiscordConnectorConfig);
     case "telegram":
       return new TelegramConnector(config as unknown as TelegramConnectorConfig);
     case "whatsapp":

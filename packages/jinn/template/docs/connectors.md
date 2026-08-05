@@ -7,6 +7,7 @@ Connectors are modular adapters that bridge external messaging platforms with {{
 ```typescript
 interface Connector {
   name: string;
+  id: string;             // Connector instance id and registry key
   start(): Promise<void>;
   stop(): Promise<void>;
   sendMessage(sourceRef: string, text: string): Promise<void>;

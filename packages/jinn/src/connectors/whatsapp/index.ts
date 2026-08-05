@@ -70,7 +70,8 @@ export class WhatsAppConnector implements Connector {
   constructor(config: WhatsAppConnectorConfig) {
     this.id = config.id || "whatsapp";
     this.config = config;
-    this.authDir = config.authDir ?? path.join(JINN_HOME, ".whatsapp-auth");
+    const defaultAuthDir = path.join(JINN_HOME, ".whatsapp-auth");
+    this.authDir = config.authDir ?? (this.id === "whatsapp" ? defaultAuthDir : path.join(defaultAuthDir, this.id));
     this.allowedJids = new Set(config.allowFrom ?? []);
     fs.mkdirSync(this.authDir, { recursive: true });
   }

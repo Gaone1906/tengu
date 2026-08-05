@@ -1,6 +1,5 @@
 import { assertBoundCaller, gatewayRequest, JinnMcpToolError, type JinnMcpTool } from "./toolkit.js";
-
-const CONNECTOR_NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+import { CONNECTOR_ID_REQUIREMENTS, isValidConnectorId } from "../shared/connector-id.js";
 
 function requiredString(args: Record<string, unknown>, name: string, max: number): string {
   const value = args[name];
@@ -41,8 +40,8 @@ export function buildConnectorTools(): JinnMcpTool[] {
     handler: async (args, ctx) => {
       assertBoundCaller(ctx);
       const connector = requiredString(args, "connector", 64);
-      if (!CONNECTOR_NAME.test(connector)) {
-        throw new JinnMcpToolError("connector must use lowercase letters, numbers, hyphens, or underscores");
+      if (!isValidConnectorId(connector)) {
+        throw new JinnMcpToolError(`connector ${CONNECTOR_ID_REQUIREMENTS}`);
       }
       const channel = requiredString(args, "channel", 256);
       const text = requiredString(args, "text", 40_000);

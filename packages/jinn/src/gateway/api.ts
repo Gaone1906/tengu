@@ -28,6 +28,7 @@ import type { SessionManager } from "../sessions/manager.js";
 import { buildContext, buildPlatformContextSnapshot, type BuildContextOptions } from "../sessions/context.js";
 import { buildPlatformContextRefresh, fingerprintPlatformContext } from "../engines/platform-context.js";
 import { stripControlChars, hasControlBytes } from "../shared/sanitize.js";
+import { CONNECTOR_ID_REQUIREMENTS, isValidConnectorId } from "../shared/connector-id.js";
 import { initDb } from "../shared/db.js";
 import {
   listSessions,
@@ -2552,7 +2553,9 @@ export async function handleApiRequest(
       // on status!=='running'), so hydrate just those (~handful, idx_sessions_status)
       // instead of materializing + JSON-parsing every session to count them.
       const running = listSessions({ status: "running" }).filter((s) => isSessionLiveRunning(s, context)).length;
-      const connectors = Object.fromEntries(Array.from(context.connectors, ([id, connector]) => [id, connector.getHealth()]));
+      const connectors = Object.fromEntries(
+        Array.from(context.connectors.values()).map((connector) => [connector.name, connector.getHealth()]),
+      );
       let migration: Pick<PendingInstanceMigration, "required" | "fromVersion" | "toVersion" | "versions"> & { error?: string };
       try {
         const pending = pendingInstanceMigration(context);
@@ -6165,12 +6168,9 @@ export async function handleApiRequest(
       }
     }
 
-    // POST /api/connectors/:id/incoming — receive proxied Discord messages from primary instance
-    // Supports both the legacy /api/connectors/discord/incoming and named instance ids
-    params = matchRoute("/api/connectors/:id/incoming", pathname);
-    if (method === "POST" && params && params.id) {
-      // Try the exact instance id first, then fall back to "discord" for the legacy path
-      const connector = context.connectors.get(params.id) ?? (params.id === "discord" ? context.connectors.get("discord") : undefined);
+    // POST /api/connectors/discord/incoming — receive proxied Discord messages from a primary instance
+    if (method === "POST" && pathname === "/api/connectors/discord/incoming") {
+      const connector = context.connectors.get("discord");
       if (!connector) return notFound(res);
       if (!("deliverMessage" in connector)) {
         return json(res, { error: "Discord connector is not in remote mode" }, 400);
@@ -6198,7 +6198,7 @@ export async function handleApiRequest(
       );
 
       const incomingMsg: IncomingMessage = {
-        connector: params.id,
+        connector: "discord",
         source: "discord",
         sessionKey: body.sessionKey,
         channel: body.channel,
@@ -6218,11 +6218,9 @@ export async function handleApiRequest(
       return json(res, { status: "delivered" });
     }
 
-    // POST /api/connectors/:id/proxy — proxy connector operations from remote instances
-    // Supports both the legacy /api/connectors/discord/proxy and named instance ids
-    params = matchRoute("/api/connectors/:id/proxy", pathname);
-    if (method === "POST" && params && params.id) {
-      const connector = context.connectors.get(params.id) ?? (params.id === "discord" ? context.connectors.get("discord") : undefined);
+    // POST /api/connectors/discord/proxy — proxy connector operations from remote instances
+    if (method === "POST" && pathname === "/api/connectors/discord/proxy") {
+      const connector = context.connectors.get("discord");
       if (!connector) return notFound(res);
 
       const _parsed = await readJsonBody(req, res);
@@ -6270,6 +6268,7 @@ export async function handleApiRequest(
     // POST /api/connectors/:name/send — send via the connector with that instance id
     params = matchRoute("/api/connectors/:name/send", pathname);
     if (method === "POST" && params) {
+      if (!isValidConnectorId(params.name)) return badRequest(res, `connector id ${CONNECTOR_ID_REQUIREMENTS}`);
       const connector = context.connectors.get(params.name);
       if (!connector) return notFound(res);
       const _parsed = await readJsonBody(req, res);
@@ -6284,10 +6283,12 @@ export async function handleApiRequest(
       return json(res, { status: "sent" });
     }
 
-    // GET /api/connectors/whatsapp/qr — return current QR code as PNG data URL
-    if (method === "GET" && pathname === "/api/connectors/whatsapp/qr") {
-      const waConnector = context.connectors.get("whatsapp");
-      if (!waConnector) return notFound(res);
+    // GET /api/connectors/:id/qr — return the selected WhatsApp instance QR as a PNG data URL
+    params = matchRoute("/api/connectors/:id/qr", pathname);
+    if (method === "GET" && params) {
+      if (!isValidConnectorId(params.id)) return badRequest(res, `connector id ${CONNECTOR_ID_REQUIREMENTS}`);
+      const waConnector = context.connectors.get(params.id);
+      if (!waConnector || waConnector.name !== "whatsapp" || !("getQrCode" in waConnector)) return notFound(res);
       const qrString = (waConnector as WhatsAppConnector).getQrCode();
       if (!qrString) return json(res, { qr: null });
       const dataUrl = await QRCode.toDataURL(qrString, { width: 256, margin: 2 });

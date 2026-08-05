@@ -506,6 +506,7 @@ export interface CronJob {
 }
 
 export interface CronDelivery {
+  /** Connector instance id, matching the gateway registry key. */
   connector: string;
   channel: string;
 }
