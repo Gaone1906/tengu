@@ -13,6 +13,16 @@ describe("VideoPlayer", () => {
       .toBe("/api/files/clip?download=1")
   })
 
+  it("shows an optimistic local video preview with a play affordance", () => {
+    render(<VideoPlayer src="blob:http://jinn.local/clip" name="clip.mp4" />)
+
+    const preview = screen.getByTestId("video-player-preview") as HTMLVideoElement
+    expect(preview.getAttribute("src")).toBe("blob:http://jinn.local/clip")
+    expect(preview.controls).toBe(false)
+    expect(screen.queryByTestId("video-player-element")).toBeNull()
+    expect(screen.getByLabelText("Play clip.mp4")).toBeTruthy()
+  })
+
   it("plays the data-saver source with native controls", () => {
     render(<VideoPlayer src="/api/files/clip" name="clip.mp4" />)
     fireEvent.click(screen.getByLabelText("Play clip.mp4"))

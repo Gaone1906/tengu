@@ -35,7 +35,7 @@ export function VideoPlayer({ src, name, className }: { src: string; name: strin
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const restore = useRef<PlaybackSnapshot | null>(null)
   const poster = /^(?:blob:|data:)/.test(src) ? null : sourceWith(src, { quality: null, download: null, poster: "1" })
-  const showVideo = playing || posterFailed || !poster
+  const showVideo = playing || posterFailed
   const canChooseQuality = poster !== null && !posterFailed
 
   const restorePlayback = () => {
@@ -75,14 +75,25 @@ export function VideoPlayer({ src, name, className }: { src: string; name: strin
         />
       ) : (
         <>
-          <img
-            src={poster ?? undefined}
-            alt={`${name} preview`}
-            loading="lazy"
-            decoding="async"
-            onError={() => setPosterFailed(true)}
-            className="block size-full object-cover"
-          />
+          {poster ? (
+            <img
+              src={poster}
+              alt={`${name} preview`}
+              loading="lazy"
+              decoding="async"
+              onError={() => setPosterFailed(true)}
+              className="block size-full object-cover"
+            />
+          ) : (
+            <video
+              data-testid="video-player-preview"
+              src={src}
+              playsInline
+              preload="metadata"
+              aria-hidden
+              className="block size-full bg-[var(--bg-tertiary)] object-contain"
+            />
+          )}
           <button
             type="button"
             aria-label={`Play ${name}`}
