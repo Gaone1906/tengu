@@ -220,13 +220,16 @@ describe("POST /api/work-items/:id/status — asOperator", () => {
     expect([cap.status, cap.body.error]).toEqual([400, "asOperator must be a boolean"]);
   });
 
-  it("does not buy the COO done, cancelled, or a terminal reopen", async () => {
+  it("uses the open reviewer lane for done, while asOperator still cannot buy cancelled or a terminal reopen", async () => {
     const coo = portalSession("web:coo-terminals");
 
     const reviewing = store.createWorkItem({ title: "Someone else's review", status: "in_review" });
     const done = await setStatus(reviewing.id, { status: "done", asOperator: true }, toolHeaders(coo));
-    expect(done.status).toBe(403);
-    expect(done.body.error).toMatch(/is not Todo .*'s reviewer/);
+    expect([done.status, done.body.workItem.status]).toEqual([200, "done"]);
+    expect(store.listWorkItemEvents(reviewing.id).at(-1)).toMatchObject({
+      actor: "operator",
+      detail: { asOperator: `session:${coo}` },
+    });
 
     const live = store.createWorkItem({ title: "Cancel attempt", status: "executing" });
     const cancelled = await setStatus(live.id, { status: "cancelled", asOperator: true }, toolHeaders(coo));

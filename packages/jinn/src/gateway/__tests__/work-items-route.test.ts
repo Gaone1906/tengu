@@ -2086,22 +2086,21 @@ describe("POST /api/work-items/:id/status — open to any authenticated session"
     expect([cap.status, cap.body.workItem?.status]).toEqual([200, target]);
   });
 
-  it("refuses that same session done and cancelled, and the done refusal names the way forward", async () => {
-    const item = store.createWorkItem({ title: "Stranger cannot close", status: "in_review", assignee: "platform-worker" });
+  it("lets an unrelated session close an in-review Todo, while cancelled stays operator-only", async () => {
+    const item = store.createWorkItem({ title: "Stranger can review", status: "in_review", assignee: "platform-worker" });
     const session = strangerSession("open-status-closed-targets");
 
     const done = await post(item.id, { status: "done" }, toolHeaders(session.id));
-    expect(done.status).toBe(403);
-    expect(done.body.error).toMatch(/completion is the reviewer's.*in_review.*request approval/i);
+    expect([done.status, done.body.workItem?.status]).toEqual([200, "done"]);
 
-    const cancelled = await post(item.id, { status: "cancelled" }, toolHeaders(session.id));
+    const live = store.createWorkItem({ title: "Stranger cannot cancel", status: "assigned", assignee: "platform-worker" });
+    const cancelled = await post(live.id, { status: "cancelled" }, toolHeaders(session.id));
     expect(cancelled.status).toBe(403);
     expect(cancelled.body.error).toMatch(/human surface decision/i);
-
-    expect(store.getWorkItem(item.id)?.status).toBe("in_review");
+    expect(store.getWorkItem(live.id)?.status).toBe("assigned");
   });
 
-  it("keeps the self-review ban: the executing session cannot close its own Todo, its reviewer can", async () => {
+  it("keeps the self-review ban for a linked execution attempt but excludes a linked workflow phase", async () => {
     const reviewer = reg.createSession({ engine: "codex", source: "web", sourceRef: "open-status-reviewer" });
     const executor = reg.createSession({ engine: "codex", source: "web", sourceRef: "open-status-executor", parentSessionId: reviewer.id });
     const item = store.createWorkItem({
@@ -2120,9 +2119,39 @@ describe("POST /api/work-items/:id/status — open to any authenticated session"
     expect(selfClose.body.error).toMatch(/self-review ban/i);
     expect(store.getWorkItem(item.id)?.status).toBe("in_review");
 
-    const closed = await post(item.id, { status: "done" }, toolHeaders(reviewer.id));
-    expect([closed.status, store.getWorkItem(item.id)?.status]).toEqual([200, "done"]);
+    const phase = reg.createSession({
+      engine: "codex",
+      source: "workflow",
+      sourceRef: "workflow:review-flow:run-1:verify:1",
+      workflowProvenance: {
+        kind: "phase",
+        workflowId: "review-flow",
+        workflowName: "Review flow",
+        runId: "run-1",
+        triggerSource: "todo-status",
+        phase: { nodeId: "verify", name: "Verify", index: 2, round: 1, attempt: 1 },
+      },
+    });
+    const phaseItem = store.createWorkItem({ title: "Workflow phase reviews", status: "in_review" });
+    store.linkSession(phaseItem.id, phase.id);
+
+    const phaseClose = await post(phaseItem.id, { status: "done" }, toolHeaders(phase.id));
+    expect([phaseClose.status, store.getWorkItem(phaseItem.id)?.status]).toEqual([200, "done"]);
   });
+
+  it.each(["backlog", "assigned", "executing", "blocked"] as const)(
+    "still refuses an unrelated session done from %s",
+    async (status) => {
+      const item = store.createWorkItem({ title: `No done shortcut from ${status}`, status });
+      const session = strangerSession(`done-precondition-${status}`);
+
+      const done = await post(item.id, { status: "done" }, toolHeaders(session.id));
+
+      expect(done.status).toBe(403);
+      expect(done.body.error).toMatch(/done is not an agent shortcut/i);
+      expect(store.getWorkItem(item.id)?.status).toBe(status);
+    },
+  );
 
   it("leaves the operator lanes unaffected: POST done closes, PUT cancels", async () => {
     const reviewed = store.createWorkItem({ title: "Operator closes", status: "in_review" });

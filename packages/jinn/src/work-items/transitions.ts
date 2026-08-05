@@ -73,8 +73,9 @@ export interface TransitionOptions {
   /**
    * The calling session's id (the GRS-017 identity seam), when the transition
    * comes from an agent. Enforces the SELF-REVIEW BAN (design §1.5): a session
-   * that is one of the item's linked execution attempts cannot move the item to
-   * `done` — its reviewer does.
+   * that is one of the item's linked non-phase execution attempts cannot move
+   * the item to `done` — its reviewer does. Workflow phases are linked for run
+   * attribution and do not become producers merely because of that link.
    */
   callerSessionId?: string;
   /**
@@ -188,7 +189,7 @@ export function transition(id: string, to: WorkItemStatus, actor: string, opts: 
     }
     if (to === 'done' && opts.callerSessionId) {
       const linked = listSessionsByWorkItem(id);
-      if (linked.some((s) => s.id === opts.callerSessionId)) {
+      if (linked.some((s) => s.id === opts.callerSessionId && s.workflowProvenance?.kind !== 'phase')) {
         throw new TransitionError(
           'self-review-banned',
           `session ${opts.callerSessionId} executed work item ${id} and cannot mark it done — a reviewer does (self-review ban)`,

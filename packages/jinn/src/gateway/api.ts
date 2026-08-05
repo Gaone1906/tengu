@@ -261,7 +261,7 @@ import { resolveApprovalDecisionAuthority, resolveApprovalRouteTarget, resolveRo
 import { approvalIsOperatorOnly } from "./workflow-todo-binding.js";
 import { scanOrg } from "./org.js";
 import { TODO_DISPATCHER_NAME } from "./system-employees.js";
-import { resolveOrgHierarchy } from "./org-hierarchy.js";
+import { isOrgAncestor, resolveOrgHierarchy } from "./org-hierarchy.js";
 import { surfaceManagerVisibility } from "./manager-visibility.js";
 import { NOTE_FILE_MAX_BYTES, createNote, listNotes, readKnowledgeFile, readNote, searchKnowledge, updateNote, type NoteStoreResult } from "../notes/store.js";
 import {
@@ -1946,11 +1946,7 @@ function authorizeWorkItemOwnerManagerOrRoot(
   if (owner === employeeName) return { ok: true };
   if (owner && (employee.rank === 'manager' || employee.rank === 'executive')) {
     const hierarchy = resolveOrgHierarchy(roster);
-    let ancestor = hierarchy.nodes[owner]?.parentName ?? null;
-    while (ancestor) {
-      if (ancestor === employeeName) return { ok: true };
-      ancestor = hierarchy.nodes[ancestor]?.parentName ?? null;
-    }
+    if (isOrgAncestor(hierarchy, employeeName, owner)) return { ok: true };
   }
   return {
     ok: false,
@@ -2008,13 +2004,10 @@ function canReviewWorkItemDone(session: Session, item: WorkItem, linked: Session
   if (item.status !== 'in_review') {
     return { ok: false, error: `Todo ${item.id} is ${item.status}, and done is not an agent shortcut: ${instead}` };
   }
-  if (linked.some((s) => s.id === session.id)) {
-    return { ok: false, error: `session ${session.id} executed Todo ${item.id} and cannot close it (self-review ban): ${instead}, or close it from the reviewer session / the human review surface` };
+  if (linked.some((s) => s.id === session.id && s.workflowProvenance?.kind !== 'phase')) {
+    return { ok: false, error: `session ${session.id} executed Todo ${item.id} and cannot close it (self-review ban): ${instead}, or close it from the human review surface` };
   }
-  if (linked.some((s) => s.parentSessionId === session.id)) return { ok: true };
-  if (item.sourceRef?.startsWith(`delegate:${session.id}:`)) return { ok: true };
-  if (item.source === 'session' && item.sourceRef?.startsWith(`session:${session.id}:`)) return { ok: true };
-  return { ok: false, error: `session ${session.id} is not Todo ${item.id}'s reviewer: ${instead}, or close it from the reviewer session / the human review surface` };
+  return { ok: true };
 }
 
 /**
@@ -2026,10 +2019,12 @@ function canReviewWorkItemDone(session: Session, item: WorkItem, linked: Session
  * and every participant needs it, so it is open — and each new caller arrives
  * without needing its own relation and its own 403.
  *
- * Two targets stay closed. `done` is withheld here because "never close your own
- * work" is the basis of the review model. `cancelled` has no agent lane at all
- * and the route refuses it before this point, where cancellation's separate
- * archive path is chosen.
+ * `done` stays bounded to `in_review` and is withheld from a linked execution
+ * attempt because "never close your own work" is the basis of the review model.
+ * Workflow phase sessions are linked for spend attribution, not because every
+ * phase produced the Todo, so they are reviewers rather than execution attempts.
+ * `cancelled` has no agent lane at all and the route refuses it before this
+ * point, where cancellation's separate archive path is chosen.
  */
 function authorizeAgentWorkItemStatus(caller: WorkItemCaller, item: WorkItem, target: WorkItemStatus): { ok: true } | { ok: false; status: 403; error: string } {
   if (caller.kind === 'operator' || target !== 'done') return { ok: true };
