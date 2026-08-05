@@ -40,6 +40,15 @@ interface Section {
   summary: string; // compact fallback when budget is tight
 }
 
+/**
+ * `talk` is retained as stored provenance for pre-retirement sessions, but it
+ * no longer selects a distinct runtime. Historical Talk turns resume through
+ * the ordinary web lifecycle so no voice-orchestrator behavior can reappear.
+ */
+export function runtimeSessionSource(source: string): string {
+  return source === "talk" ? "web" : source;
+}
+
 export interface PlatformContextSnapshot {
   schemaVersion: 1;
   gatewayBootId: string;

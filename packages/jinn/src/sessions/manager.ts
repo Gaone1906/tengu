@@ -33,7 +33,7 @@ import {
   updateSessionForAttempt,
 } from "./registry.js";
 import { notifyParentSession, notifyRateLimited, notifyRateLimitResumed, notifyOperatorChannel } from "./callbacks.js";
-import { buildContext, buildPlatformContextSnapshot, type BuildContextOptions } from "./context.js";
+import { buildContext, buildPlatformContextSnapshot, runtimeSessionSource, type BuildContextOptions } from "./context.js";
 import { SessionQueue } from "./queue.js";
 import { JINN_HOME } from "../shared/paths.js";
 import { logger } from "../shared/logger.js";
@@ -424,8 +424,9 @@ export class SessionManager {
       const effortLevel = session.workflowProvenance?.kind === "phase" ? session.effortLevel ?? undefined
         : resolveEffort(engineConfig, session, employee, effortLevelsForModel(this.config, session.engine, session.model ?? undefined));
       const modelForTurn = session.model ?? engineConfig.model;
+      const runtimeSource = runtimeSessionSource(session.source);
       const contextOptions: BuildContextOptions = {
-        source: session.source,
+        source: runtimeSource,
         channel: msg.channel,
         thread: msg.thread,
         user: msg.user,
@@ -556,7 +557,7 @@ export class SessionManager {
         resolvedMcp,
         attachments: attachments.length > 0 ? attachments : undefined,
         sessionId: session.id,
-        source: session.source,
+        source: runtimeSource,
         onStream: (delta) => {
           if (!getSession(session.id)) return;
           const normalized = normalizeBlockDeltaForTurn(delta, turnStartedAt);

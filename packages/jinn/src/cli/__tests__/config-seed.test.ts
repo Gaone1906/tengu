@@ -17,6 +17,13 @@ describe("fresh-install: template seeding + config guidance", () => {
     expect(source).toMatch(/gateway:\n  port: 7777\n  host: "127\.0\.0\.1"\n  authRequired: true\n/);
   });
 
+  it("does not ship or seed the retired Talk orchestrator templates", () => {
+    const setupSource = readFileSync(SETUP, "utf-8");
+    expect(existsSync(join(TEMPLATE, "talk", "orchestrator-persona.md"))).toBe(false);
+    expect(existsSync(join(TEMPLATE, "talk", "card-reference.md"))).toBe(false);
+    expect(setupSource).not.toMatch(/copyTemplateDir\(\s*path\.join\(TEMPLATE_DIR, ["']talk["']\)/);
+  });
+
   it("seeds template/scripts/ into the home during setup", () => {
     expect(readFileSync(SETUP, "utf-8")).toMatch(/copyTemplateDir\(\s*path\.join\(TEMPLATE_DIR, "scripts"\)/);
   });

@@ -1,3 +1,4 @@
+import crypto from "node:crypto"
 import fs from "node:fs"
 import path from "node:path"
 import { parseDocument, Scalar, YAMLMap, isScalar } from "yaml"
@@ -43,6 +44,48 @@ function validateInstancePath(home: string, relative: string): void {
   if (!resolved.startsWith(`${home}${path.sep}`)) throw new Error(`reviewed path is outside the instance: ${relative}`)
 }
 
+interface SnapshotFileEntry {
+  path: string
+  state: "missing" | "file" | "symlink"
+  sha256?: string
+  linkTarget?: string
+}
+
+function sha256(value: Buffer | string): string {
+  return crypto.createHash("sha256").update(value).digest("hex")
+}
+
+function assertModifiedRemoveTargetsPreserved(options: {
+  home: string
+  snapshotDir: string
+  pending: PendingInstanceMigration
+  reviewed: Set<string>
+  skipped: Set<string>
+}): void {
+  if (!options.pending.materialization) return
+  const snapshot = JSON.parse(fs.readFileSync(path.join(options.snapshotDir, "snapshot.json"), "utf8")) as {
+    files?: SnapshotFileEntry[]
+  }
+  const entries = new Map((snapshot.files ?? []).map((entry) => [entry.path, entry]))
+  for (const operation of options.pending.materialization.files) {
+    if (operation.operation !== "remove" || !operation.base) continue
+    const entry = entries.get(operation.path)
+    if (!entry || entry.state === "missing") continue
+    const baseBytes = fs.readFileSync(path.join(options.snapshotDir, operation.base.destinationPath))
+    const stockAtSnapshot = entry.state === "file" && entry.sha256 === sha256(baseBytes)
+    if (stockAtSnapshot) continue
+
+    const currentPath = path.join(options.home, operation.path)
+    const current = fs.lstatSync(currentPath, { throwIfNoEntry: false })
+    const preserved = entry.state === "file"
+      ? Boolean(current?.isFile() && entry.sha256 === sha256(fs.readFileSync(currentPath)))
+      : Boolean(current?.isSymbolicLink() && entry.linkTarget === fs.readlinkSync(currentPath))
+    if (!preserved || !options.skipped.has(operation.path) || options.reviewed.has(operation.path)) {
+      throw new Error(`modified remove target ${operation.path} must be preserved and marked skipped/conflicted`)
+    }
+  }
+}
+
 export function completeInstanceMigration(options: {
   instanceHome: string
   installedPackageVersion: string
@@ -83,6 +126,7 @@ export function completeInstanceMigration(options: {
   for (const file of options.pending.changedFiles) {
     if (!reviewed.has(file.path) && !skipped.has(file.path)) throw new Error(`completion receipt has not reviewed or skipped ${file.path}`)
   }
+  assertModifiedRemoveTargetsPreserved({ home, snapshotDir, pending: options.pending, reviewed, skipped })
   const configPath = path.join(home, "config.yaml")
   const result = stampVersionInYaml(fs.readFileSync(configPath, "utf8"), options.targetVersion)
   if (!result.ok) throw new Error(result.reason)

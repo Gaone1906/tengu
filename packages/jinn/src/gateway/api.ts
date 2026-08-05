@@ -25,7 +25,7 @@ import {
 import { validateNewSessionSelection, validateSessionPatch } from "../sessions/session-patch.js";
 import { buildDelegatedActivityIndex } from "../sessions/delegated-activity.js";
 import type { SessionManager } from "../sessions/manager.js";
-import { buildContext, buildPlatformContextSnapshot, type BuildContextOptions } from "../sessions/context.js";
+import { buildContext, buildPlatformContextSnapshot, runtimeSessionSource, type BuildContextOptions } from "../sessions/context.js";
 import { buildPlatformContextRefresh, fingerprintPlatformContext } from "../engines/platform-context.js";
 import { stripControlChars, hasControlBytes } from "../shared/sanitize.js";
 import { CONNECTOR_ID_REQUIREMENTS, isValidConnectorId } from "../shared/connector-id.js";
@@ -6953,8 +6953,9 @@ async function runWebSession(
       effortLevelsForModel(config, currentSession.engine, currentSession.model ?? undefined),
     );
     let modelForTurn = currentSession.model ?? engineConfig.model;
+    const runtimeSource = runtimeSessionSource(currentSession.source);
     const baseContextOptions: Omit<BuildContextOptions, "model"> = {
-      source: currentSession.source,
+      source: runtimeSource,
       channel: currentSession.sourceRef,
       user: currentSession.userId ?? "web-user",
       employee,
@@ -7066,7 +7067,7 @@ async function runWebSession(
       resolvedMcp,
       attachments: attachments?.length ? attachments : undefined,
       sessionId: currentSession.id,
-      source: currentSession.source,
+      source: runtimeSource,
       onStream: (delta) => {
         // Same guard as runHeartbeat: a delta may arrive after the user
         // deleted the session; don't resurrect registry state for it.

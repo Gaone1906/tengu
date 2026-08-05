@@ -972,6 +972,12 @@ export interface JinnConfig {
   };
   /** Read-aloud TTS (`/api/tts` + Kokoro) — optional, off unless configured. */
   talk?: {
+    /** @deprecated The Talk orchestrator is retired. Kept for patch-release source compatibility. */
+    enabled?: boolean;
+    /** @deprecated The Talk orchestrator is retired. Kept for patch-release source compatibility. */
+    engine?: string;
+    /** @deprecated The Talk orchestrator is retired. Kept for patch-release source compatibility. */
+    orchestratorModel?: string;
     kokoro?: {
       voice?: string;
       modelDir?: string;
