@@ -13,6 +13,7 @@
   <a href="https://www.npmjs.com/package/jinn-cli"><img src="https://img.shields.io/npm/v/jinn-cli?color=7c3aed&label=npm" alt="npm version" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/npm/l/jinn-cli?color=7c3aed" alt="license" /></a>
   <img src="https://img.shields.io/node/v/jinn-cli?color=7c3aed" alt="node version" />
+  <img src="https://img.shields.io/badge/Docker-supported-2496ED?logo=docker&logoColor=white" alt="Docker supported" />
   <img src="https://img.shields.io/badge/status-beta-7c3aed" alt="status: beta" />
 </p>
 
@@ -42,6 +43,8 @@ You've already installed the best agent CLIs. On their own they're a pile of ter
 
 ## Quickstart
 
+### Native install
+
 > **Prerequisites:** Node.js **22 or newer** (the repository pins **24.13.0** in `.nvmrc`), and at least one agent CLI installed **and signed in**. Jinn orchestrates your engines and can't run a session without one.
 
 ```bash
@@ -69,11 +72,18 @@ brew install jinn
 jinn setup && jinn start
 ```
 
-Or run it in **Docker**. The engine spawns `claude` with its permission gate disabled, so containerising bounds that to the directories you choose to mount instead of your whole home directory:
+> **`--version` ≠ signed in.** Jinn drives the official engine CLIs, so authenticate each one *before* `jinn start` (run `claude` → `/login`, run `codex` to sign in, and so on). Without this, sessions can't reach the models - the most common fresh-install gotcha.
+
+### Docker
+
+Docker needs Docker Engine or Docker Desktop with Compose v2, but it does **not** need Node.js or an agent CLI installed on the host. The image includes Claude Code. Containerising bounds the engine's permission-free access to the directories you explicitly mount instead of your whole home directory:
 
 ```bash
-# First edit docker-compose.yml and uncomment at least one entry under "Project
-# mounts" — without one, /work is empty and the agents have nothing to work on.
+git clone https://github.com/hristo2612/jinn.git
+cd jinn
+
+# Edit docker-compose.yml and uncomment at least one "Project mounts" entry.
+# Without one, /work is empty and the agents have nothing to work on.
 docker compose up -d --build
 docker compose exec jinn claude     # run once, use /login, then quit
 docker compose exec jinn jinn pair  # prints a code for the browser
@@ -85,15 +95,22 @@ The compose image runs one Jinn instance. Additional instances need separate con
 
 The image ships the `claude` engine only. `codex`, `grok` and `hermes` are not included, and neither are `ffmpeg`/`whisper-cli` for speech-to-text — the same as a Homebrew or npm install, which leave those to you. See **[docs/docker.md](docs/docker.md)** for the mount model, what persists across upgrades, how to add speech-to-text, and what the isolation does and does not cover.
 
-> **`--version` ≠ signed in.** Jinn drives the official engine CLIs, so authenticate each one *before* `jinn start` (run `claude` → `/login`, run `codex` to sign in, and so on). Without this, sessions can't reach the models - the most common fresh-install gotcha.
-
-Everyday commands:
+Everyday commands for a native install:
 
 ```bash
 jinn start      # start the gateway daemon (auto-opens the dashboard)
 jinn stop       # stop it
 jinn restart    # restart safely (detached; works even from inside a session)
 jinn status     # is the daemon running?
+```
+
+Docker owns the gateway lifecycle instead — `jinn start`, `jinn stop`, and `jinn restart` are intentionally unavailable inside the container:
+
+```bash
+docker compose ps                 # status and health
+docker compose logs -f jinn       # follow gateway logs
+docker compose restart jinn       # restart safely
+docker compose down               # stop; named volumes remain intact
 ```
 
 Already running an older version? After upgrading, run **`jinn migrate`** and let your COO apply the composed migration prompt - it merges the latest operating doctrine into your instance without overwriting your personal customizations.
