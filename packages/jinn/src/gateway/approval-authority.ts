@@ -249,10 +249,7 @@ export function resolveApprovalDecisionAuthority(
   }
   if (emp.rank === "manager" || emp.rank === "executive") {
     const hierarchy = resolveOrgHierarchy(registry);
-    if (
-      (route.owner && isOrgAncestor(hierarchy, employee, route.owner))
-      || (route.target && isOrgAncestor(hierarchy, employee, route.target))
-    ) {
+    if (route.owner && isOrgAncestor(hierarchy, employee, route.owner)) {
       return { ok: true, authority: { ...route, kind: "employee", employee, actor: employee } };
     }
   }

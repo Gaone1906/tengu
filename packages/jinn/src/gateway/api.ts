@@ -4817,14 +4817,16 @@ export async function handleApiRequest(
       return json(res, withActivityReceipt({ workItem: updated }, activityReceiptId));
     }
 
-    // POST /api/work-items/:id/approval — approval DECISION surface.
+    // POST /api/work-items/:id/approvals/decide — approval DECISION surface.
+    // The singular /approval route remains as a compatibility alias.
     // COO-default: routed manager or root/COO can decide through the same
     // identity/capability seam MCP uses; operator/aCEO HTTP can decide only after
     // explicit escalation persisted on the Todo.
     // {decision:"approve"|"reject", note?}. Native decisions apply the FIXED
     // consequence rules (approve+in_review → done; reject+in_review → bounce/escalate;
     // otherwise the decision is recorded, status untouched).
-    params = matchRoute("/api/work-items/:id/approval", pathname);
+    params = matchRoute("/api/work-items/:id/approvals/decide", pathname)
+      ?? matchRoute("/api/work-items/:id/approval", pathname);
     if (method === "POST" && params) {
       const parsed = await readJsonBody(req, res);
       if (!parsed.ok) return;
