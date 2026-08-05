@@ -572,7 +572,7 @@ export function resumePendingWebQueueItems(context: ApiContext): void {
     // receipts are the exception: acceptance already committed this internal
     // turn, so startup replay must finish it regardless of the parent's source.
     const callbackDelivery = getSessionDeliveryByQueueItemId(item.id);
-    if (session.source !== "web" && !callbackDelivery) continue;
+    if (runtimeSessionSource(session.source) !== "web" && !callbackDelivery) continue;
     session = maybeRevertEngineOverride(session);
 
     const config = context.getConfig();

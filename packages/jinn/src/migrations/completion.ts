@@ -72,14 +72,32 @@ function assertModifiedRemoveTargetsPreserved(options: {
     const entry = entries.get(operation.path)
     if (!entry || entry.state === "missing") continue
     const baseBytes = fs.readFileSync(path.join(options.snapshotDir, operation.base.destinationPath))
-    const stockAtSnapshot = entry.state === "file" && entry.sha256 === sha256(baseBytes)
-    if (stockAtSnapshot) continue
-
+    const baseSha256 = sha256(baseBytes)
+    const stockAtSnapshot = entry.state === "file" && entry.sha256 === baseSha256
     const currentPath = path.join(options.home, operation.path)
     const current = fs.lstatSync(currentPath, { throwIfNoEntry: false })
-    const preserved = entry.state === "file"
-      ? Boolean(current?.isFile() && entry.sha256 === sha256(fs.readFileSync(currentPath)))
-      : Boolean(current?.isSymbolicLink() && entry.linkTarget === fs.readlinkSync(currentPath))
+    const currentSha256 = current?.isFile() ? sha256(fs.readFileSync(currentPath)) : null
+    if (currentSha256 === baseSha256) continue
+
+    // A missing target is a valid reviewed removal only when the immutable
+    // pre-migration snapshot proved that the deleted bytes were stock. Never
+    // read through a missing path, and never accept disappearance of custom
+    // snapshot bytes.
+    if (!current) {
+      if (stockAtSnapshot) continue
+      throw new Error(`modified remove target ${operation.path} must be preserved and marked skipped/conflicted`)
+    }
+
+    // A target can be customized after a stock snapshot was taken. Its current
+    // bytes therefore remain authoritative at completion: it is safe only when
+    // left present and explicitly recorded as skipped/conflicted. When the
+    // snapshot was already custom, additionally require exact preservation of
+    // those audited bytes (or symlink target).
+    const preserved = stockAtSnapshot
+      ? true
+      : entry.state === "file"
+        ? Boolean(current.isFile() && entry.sha256 === currentSha256)
+        : Boolean(current.isSymbolicLink() && entry.linkTarget === fs.readlinkSync(currentPath))
     if (!preserved || !options.skipped.has(operation.path) || options.reviewed.has(operation.path)) {
       throw new Error(`modified remove target ${operation.path} must be preserved and marked skipped/conflicted`)
     }

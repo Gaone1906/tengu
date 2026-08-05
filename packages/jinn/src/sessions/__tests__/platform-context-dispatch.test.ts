@@ -382,6 +382,55 @@ describe("web API platform context dispatch", () => {
     ]);
   });
 
+  it("replays a historical Talk pending turn after startup through the generic web runtime", async () => {
+    const runs: EngineRunOpts[] = [];
+    const engine = capturingEngine("codex", runs, () => ({
+      sessionId: "legacy-talk-pending-native",
+      result: "Recovered generic answer",
+    }));
+    const queue = new (await import("../queue.js")).SessionQueue();
+    const config = makeConfig();
+    const context = {
+      config,
+      gatewayBootId: "boot-recovery",
+      getConfig: () => config,
+      connectors: new Map(),
+      startTime: Date.now(),
+      gatewayAuthToken: "test-token",
+      emit: () => {},
+      sessionManager: {
+        getEngine: () => engine,
+        getEngines: () => new Map([["codex", engine]]),
+        getQueue: () => queue,
+      },
+    } as unknown as import("../../gateway/api.js").ApiContext;
+    const historical = registry.createSession({
+      engine: "codex",
+      source: "talk",
+      sourceRef: "talk:historical-pending",
+      connector: "web",
+      sessionKey: "talk:historical-pending",
+      title: "Interrupted historical voice session",
+    });
+    registry.recordEngineSessionId(historical.id, "codex", "legacy-talk-pending-native", {
+      model: "model-alpha",
+      effortLevel: "medium",
+    });
+    registry.enqueueQueueItem(historical.id, historical.sessionKey, "Resume pending ordinary chat");
+
+    api.resumePendingWebQueueItems(context);
+
+    await waitForRuns(runs, 1);
+    await waitForStatus(historical.id, "idle");
+    expect(runs[0]).toMatchObject({
+      prompt: "Resume pending ordinary chat",
+      resumeSessionId: "legacy-talk-pending-native",
+      source: "web",
+    });
+    expect(registry.getSession(historical.id)?.source).toBe("talk");
+    expect(registry.listAllPendingQueueItems()).toEqual([]);
+  });
+
   it("keeps a refresh pending when a rate-limit retry fails", async () => {
     const runs: EngineRunOpts[] = [];
     const results: EngineResult[] = [
