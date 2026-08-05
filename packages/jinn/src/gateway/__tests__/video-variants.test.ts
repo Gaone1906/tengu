@@ -1,9 +1,13 @@
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const originalPath = process.env.PATH;
+const spawnMock = vi.hoisted(() => vi.fn());
+
+vi.mock("node:child_process", () => ({ spawn: spawnMock }));
+
 const roots: string[] = [];
 
 function sourceFixture(): { source: string; root: string } {
@@ -15,32 +19,33 @@ function sourceFixture(): { source: string; root: string } {
 }
 
 function installFakeFfmpeg(root: string, mode: "success" | "fail" = "success"): string {
-  const bin = path.join(root, "bin");
   const log = path.join(root, "ffmpeg.log");
-  fs.mkdirSync(bin, { recursive: true });
-  fs.writeFileSync(
-    path.join(bin, "ffmpeg"),
-    `#!/bin/sh\nprintf '%s\\n' "$*" >> "$FAKE_FFMPEG_LOG"\nif [ "$1" = "-version" ]; then exit 0; fi\n${mode === "fail" ? "exit 1" : ""}\nfor arg in "$@"; do output="$arg"; done\nprintf 'variant' > "$output"\n`,
-  );
-  fs.chmodSync(path.join(bin, "ffmpeg"), 0o755);
-  process.env.PATH = bin;
-  process.env.FAKE_FFMPEG_LOG = log;
+  spawnMock.mockImplementation((_command: string, args: string[]) => {
+    const child = new EventEmitter();
+    queueMicrotask(() => {
+      fs.appendFileSync(log, `${args.join(" ")}\n`);
+      if (args[0] === "-version") child.emit("exit", 0);
+      else if (mode === "fail") child.emit("exit", 1);
+      else {
+        fs.writeFileSync(args.at(-1)!, "variant");
+        child.emit("exit", 0);
+      }
+    });
+    return child;
+  });
   return log;
 }
 
 async function loadVariants() {
-  vi.resetModules();
   return import("../video-variants.js");
 }
 
 beforeEach(() => {
-  process.env.PATH = originalPath;
-  delete process.env.FAKE_FFMPEG_LOG;
+  vi.resetModules();
+  spawnMock.mockReset();
 });
 
 afterEach(() => {
-  process.env.PATH = originalPath;
-  delete process.env.FAKE_FFMPEG_LOG;
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
   vi.restoreAllMocks();
 });
@@ -74,8 +79,12 @@ describe("video variants", () => {
   });
 
   it("falls back cleanly and logs once when ffmpeg is unavailable", async () => {
-    const { source, root } = sourceFixture();
-    process.env.PATH = path.join(root, "empty-bin");
+    const { source } = sourceFixture();
+    spawnMock.mockImplementation(() => {
+      const child = new EventEmitter();
+      queueMicrotask(() => child.emit("error", Object.assign(new Error("spawn ffmpeg ENOENT"), { code: "ENOENT" })));
+      return child;
+    });
     const logger = await import("../../shared/logger.js");
     const warn = vi.spyOn(logger.logger, "warn").mockImplementation(() => {});
     const variants = await import("../video-variants.js");
