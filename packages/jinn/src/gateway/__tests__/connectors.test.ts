@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { connectorInstancesFromConfig, createConnector } from "../server.js";
+import { connectorInstancesFromConfig, createConnector, reloadConnectorRegistry } from "../server.js";
 import { SlackConnector } from "../../connectors/slack/index.js";
 import { DiscordConnector } from "../../connectors/discord/index.js";
 import { RemoteDiscordConnector } from "../../connectors/discord/remote.js";
@@ -208,5 +208,30 @@ describe("connector wiring", () => {
     registry.delete("telegram");
     registry.set("discord-ops", stubConnector(async () => {}));
     expect(names()).toEqual(["slack", "slack-second", "discord-ops"]);
+  });
+
+  it("rejects an invalid reload config before stopping or deleting live connectors", async () => {
+    const stop = vi.fn(async () => {});
+    const live = {
+      id: "telegram",
+      name: "telegram",
+      start: async () => {},
+      stop,
+      sendMessage: async () => undefined,
+      onMessage: () => {},
+    } as unknown as Connector;
+    const registry = new Map<string, Connector>([[live.id, live]]);
+
+    await expect(reloadConnectorRegistry({
+      connectorMap: registry,
+      loadInstances: () => connectorInstancesFromConfig(configWith({
+        instances: [{ id: "Invalid ID", type: "telegram", botToken: "tg-new" }],
+      })),
+      initConnector: async () => {},
+      describeConnector: (instance) => `connector "${instance.id}"`,
+    })).rejects.toThrow(/invalid connector instance id/i);
+
+    expect(stop).not.toHaveBeenCalled();
+    expect([...registry.entries()]).toEqual([["telegram", live]]);
   });
 });

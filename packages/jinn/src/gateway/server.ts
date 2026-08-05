@@ -438,6 +438,52 @@ export function createConnector(instance: NormalizedConnector): Connector {
   }
 }
 
+interface ReloadConnectorRegistryOptions {
+  connectorMap: Map<string, Connector>;
+  loadInstances: () => NormalizedConnector[];
+  initConnector: (instance: NormalizedConnector) => Promise<void>;
+  describeConnector: (instance: NormalizedConnector) => string;
+}
+
+/** Reload a live connector registry from freshly normalized declarations. */
+export async function reloadConnectorRegistry({
+  connectorMap,
+  loadInstances,
+  initConnector,
+  describeConnector,
+}: ReloadConnectorRegistryOptions): Promise<{ started: string[]; stopped: string[]; errors: string[] }> {
+  const instances = loadInstances();
+  const started: string[] = [];
+  const stopped: string[] = [];
+  const errors: string[] = [];
+
+  for (const [id, connector] of [...connectorMap.entries()]) {
+    try {
+      await connector.stop();
+      connectorMap.delete(id);
+      stopped.push(id);
+      logger.info(`Stopped connector "${id}" for reload`);
+    } catch (err) {
+      errors.push(`Failed to stop ${id}: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  for (const instance of instances) {
+    // A connector that refused to stop is still live — leave it alone.
+    if (connectorMap.has(instance.id)) continue;
+    try {
+      await initConnector(instance);
+      started.push(instance.id);
+      logger.info(`Started ${describeConnector(instance)}`);
+    } catch (err) {
+      errors.push(`Failed to start "${instance.id}": ${err instanceof Error ? err.message : err}`);
+      logger.error(`Failed to start ${describeConnector(instance)}: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  return { started, stopped, errors };
+}
+
 export type GatewayCleanup = () => Promise<void>;
 
 export async function startGateway(
@@ -777,35 +823,12 @@ export async function startGateway(
 
   /** Stop every running connector and restart from fresh config (POST /api/connectors/reload). */
   async function reloadConnectorInstances(): Promise<{ started: string[]; stopped: string[]; errors: string[] }> {
-    const started: string[] = [];
-    const stopped: string[] = [];
-    const errors: string[] = [];
-
-    for (const [id, connector] of [...connectorMap.entries()]) {
-      try {
-        await connector.stop();
-        connectorMap.delete(id);
-        stopped.push(id);
-        logger.info(`Stopped connector "${id}" for reload`);
-      } catch (err) {
-        errors.push(`Failed to stop ${id}: ${err instanceof Error ? err.message : err}`);
-      }
-    }
-
-    for (const instance of connectorInstancesFromConfig(loadConfig())) {
-      // A connector that refused to stop is still live — leave it alone.
-      if (connectorMap.has(instance.id)) continue;
-      try {
-        await initConnector(instance);
-        started.push(instance.id);
-        logger.info(`Started ${describeConnector(instance)}`);
-      } catch (err) {
-        errors.push(`Failed to start "${instance.id}": ${err instanceof Error ? err.message : err}`);
-        logger.error(`Failed to start ${describeConnector(instance)}: ${err instanceof Error ? err.message : err}`);
-      }
-    }
-
-    return { started, stopped, errors };
+    return reloadConnectorRegistry({
+      connectorMap,
+      loadInstances: () => connectorInstancesFromConfig(loadConfig()),
+      initConnector,
+      describeConnector,
+    });
   }
 
   // Mutable config reference for hot-reload
