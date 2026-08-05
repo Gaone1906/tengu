@@ -14,6 +14,11 @@ let api: Api;
 const home = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-notes-route-data-"));
 const emitted: Array<{ event: string; payload: unknown }> = [];
 let notesEnabled = true;
+let staleChat = {
+  enabled: false,
+  tokenThreshold: 42_000,
+  staleAfterMinutes: 12,
+};
 
 function seed(relativePath: string, content: string): string {
   const absolutePath = path.join(home, relativePath);
@@ -49,7 +54,7 @@ function makeRes() {
 }
 
 const apiContext = {
-  getConfig: () => ({ gateway: { notesEnabled }, engines: { default: "codex" }, sessions: {} }),
+  getConfig: () => ({ gateway: { notesEnabled }, engines: { default: "codex" }, sessions: { staleChat } }),
   connectors: new Map(),
   startTime: Date.now(),
   emit: (event: string, payload: unknown) => emitted.push({ event, payload }),
@@ -116,7 +121,13 @@ describe("Notes HTTP routes", () => {
   });
 
   it("reports the Notes feature state", async () => {
-    expect(await request("GET", "/api/features")).toMatchObject({ status: 200, body: { notesEnabled: true } });
+    expect(await request("GET", "/api/features")).toMatchObject({
+      status: 200,
+      body: {
+        notesEnabled: true,
+        staleChat,
+      },
+    });
     notesEnabled = false;
     expect(await request("GET", "/api/features")).toMatchObject({ status: 200, body: { notesEnabled: false } });
   });

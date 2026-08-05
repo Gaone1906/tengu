@@ -11,6 +11,9 @@ import { QueuePanel } from '@/components/chat/queue-panel'
 import { BackgroundActivityStatus } from '@/components/chat/background-activity-status'
 import { ModelSelectorRow, type SelectorValue } from '@/components/chat/model-selector-row'
 import { useLiveSession } from '@/hooks/use-live-session'
+import { useFeatures } from '@/hooks/use-features'
+import { StaleChatNotice } from '@/components/chat/stale-chat-notice'
+import { dismissStaleChat, isStaleChatDismissed, shouldSuggestFreshChat } from '@/lib/stale-chat'
 
 const CliTerminal = lazy(() => import('@/components/cli-terminal').then(m => ({ default: m.CliTerminal })))
 import type { CliTerminalHandle } from '@/components/cli-terminal'
@@ -92,6 +95,16 @@ interface ChatPaneProps {
   /** Live list-derived descendant activity. `null` is authoritative rest;
    *  `undefined` falls back to the session detail payload. */
   delegatedActivity?: DelegatedActivity | null
+  /** Create and navigate to a continuation of the current session. */
+  onStartFreshChat?: (session: FreshChatSourceSession) => Promise<void>
+}
+
+export interface FreshChatSourceSession {
+  id: string
+  employee?: string
+  engine?: string
+  model?: string
+  effortLevel?: string
 }
 
 export function ChatPane({
@@ -116,6 +129,7 @@ export function ChatPane({
   onPeek,
   onContentReady,
   delegatedActivity,
+  onStartFreshChat,
 }: ChatPaneProps) {
   // If this pane was opened from the onboarding wizard, the wizard stored the
   // seed user message in sessionStorage so we can display it immediately
@@ -171,6 +185,69 @@ export function ChatPane({
     reset: resetPane,
     reload: reloadSession,
   } = live
+  const { data: features } = useFeatures()
+  const staleChatPolicy = features?.staleChat ?? {
+    enabled: false,
+    tokenThreshold: 300_000,
+    staleAfterMinutes: 60,
+  }
+  const [staleChatNow, setStaleChatNow] = useState(() => Date.now())
+  const [suggestedSessionId, setSuggestedSessionId] = useState<string | null>(null)
+  const [dismissedSessionId, setDismissedSessionId] = useState<string | null>(null)
+  const staleChatContextTokens = liveContextTokens
+    ?? (currentSession?.lastContextTokens as number | null | undefined)
+    ?? null
+  const staleChatLastActivity = currentSession?.lastActivity as string | null | undefined
+  const staleChatDismissed = Boolean(
+    sessionId && (dismissedSessionId === sessionId || isStaleChatDismissed(sessionId)),
+  )
+  const staleChatEligible = Boolean(sessionId && viewMode === 'chat' && shouldSuggestFreshChat({
+    policy: staleChatPolicy,
+    status: loading || turnPending ? 'running' : currentSession?.status as string | undefined,
+    contextTokens: staleChatContextTokens,
+    lastActivity: staleChatLastActivity,
+    now: staleChatNow,
+    dismissed: staleChatDismissed,
+  }))
+  const showStaleChatNotice = Boolean(
+    staleChatPolicy.enabled
+    && sessionId
+    && viewMode === 'chat'
+    && !staleChatDismissed
+    && (suggestedSessionId === sessionId || staleChatEligible),
+  )
+
+  useEffect(() => {
+    if (staleChatEligible && sessionId) setSuggestedSessionId(sessionId)
+  }, [sessionId, staleChatEligible])
+
+  useEffect(() => {
+    if (!sessionId || !staleChatPolicy.enabled || showStaleChatNotice) return
+    const interval = window.setInterval(() => setStaleChatNow(Date.now()), 60_000)
+    return () => window.clearInterval(interval)
+  }, [sessionId, staleChatPolicy.enabled, showStaleChatNotice])
+
+  const handleStaleChatDismiss = useCallback(() => {
+    if (!sessionId) return
+    dismissStaleChat(sessionId)
+    setDismissedSessionId(sessionId)
+    setSuggestedSessionId(null)
+  }, [sessionId])
+
+  const handleStartFreshChat = useCallback(async () => {
+    if (!sessionId || !currentSession || !onStartFreshChat) {
+      throw new Error('Fresh chat is unavailable')
+    }
+    await onStartFreshChat({
+      id: sessionId,
+      employee: typeof currentSession.employee === 'string' ? currentSession.employee : undefined,
+      engine: typeof currentSession.engine === 'string' ? currentSession.engine : undefined,
+      model: typeof currentSession.model === 'string' ? currentSession.model : undefined,
+      effortLevel: typeof (currentSession.effortLevel ?? currentSession.effort_level) === 'string'
+        ? String(currentSession.effortLevel ?? currentSession.effort_level)
+        : undefined,
+    })
+  }, [currentSession, onStartFreshChat, sessionId])
 
   // Kept local for handleSelectorChange so it stays a stable ([]) callback that
   // reads the current session id at call time (mirrors the previous behaviour).
@@ -569,6 +646,14 @@ export function ChatPane({
           blockArrivals={blockArrivals}
           liveTerminalDelegationIds={liveTerminalDelegationIds}
           blockAnnouncement={blockAnnouncement}
+          footer={showStaleChatNotice && staleChatContextTokens != null && staleChatLastActivity ? (
+            <StaleChatNotice
+              contextTokens={staleChatContextTokens}
+              idleMinutes={(staleChatNow - Date.parse(staleChatLastActivity)) / 60_000}
+              onDismiss={handleStaleChatDismiss}
+              onStartFresh={handleStartFreshChat}
+            />
+          ) : undefined}
         />
       ) : null}
 
