@@ -45,8 +45,8 @@ async function freePort(): Promise<number> {
   });
 }
 
-async function spawnChild(script: string): Promise<ChildProcess> {
-  const child = spawn(process.execPath, ["-e", script], { stdio: "ignore" });
+async function spawnChild(script: string, env: NodeJS.ProcessEnv = process.env): Promise<ChildProcess> {
+  const child = spawn(process.execPath, ["-e", script], { stdio: "ignore", env });
   children.push(child);
   await new Promise<void>((resolve, reject) => {
     child.once("spawn", resolve);
@@ -119,11 +119,40 @@ describe("getInstanceStatus", () => {
 /** `jinn list` resolves this per row: the defaults inside getInstanceStatus describe the
  *  AMBIENT instance, so rows printed red on a host or port mismatch. */
 describe("resolveInstanceEndpoint", () => {
-  it("prefers what the instance's running gateway recorded", () => {
+  it("ignores stale runtime binding when no matching live gateway owns it", async () => {
     const home = tempHome();
-    fs.writeFileSync(path.join(home, "gateway.json"), JSON.stringify({ port: 7900, host: "127.0.0.1" }, null, 2));
+    const runtimePort = await freePort();
+    const unrelated = await spawnChild(
+      `require("node:net").createServer().listen(${runtimePort}, "::1"); setInterval(() => {}, 1000);`,
+    );
+    for (let i = 0; i < 50; i++) {
+      if (getInstanceStatus(path.join(home, "gateway.pid"), runtimePort, "::1").running) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    fs.writeFileSync(path.join(home, "gateway.json"), JSON.stringify({
+      port: runtimePort,
+      host: "::1",
+      pid: unrelated.pid,
+    }, null, 2));
+    fs.writeFileSync(path.join(home, "config.yaml"), "gateway:\n  port: 7778\n  host: 127.0.0.1\n");
+
+    expect(resolveInstanceEndpoint(home, 7000)).toEqual({ host: "127.0.0.1", port: 7778 });
+  });
+
+  it("prefers what the instance's running gateway recorded", async () => {
+    const home = tempHome();
+    const port = await freePort();
+    const child = await spawnChild(
+      `require("node:net").createServer().listen(${port}, "127.0.0.1"); setInterval(() => {}, 1000);`,
+      { ...process.env, JINN_HOME: home, JINN_HOME_IDENTITY: fs.realpathSync.native(home) },
+    );
+    for (let i = 0; i < 50; i++) {
+      if (getInstanceStatus(path.join(home, "gateway.pid"), port, "127.0.0.1").running) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    fs.writeFileSync(path.join(home, "gateway.json"), JSON.stringify({ port, host: "127.0.0.1", pid: child.pid }, null, 2));
     fs.writeFileSync(path.join(home, "config.yaml"), "gateway:\n  port: 7778\n  host: 100.64.0.3\n");
-    expect(resolveInstanceEndpoint(home, 7778)).toEqual({ host: "127.0.0.1", port: 7900 });
+    expect(resolveInstanceEndpoint(home, 7778)).toEqual({ host: "127.0.0.1", port });
   });
 
   it("falls back to the instance's own config.yaml over the registry", () => {

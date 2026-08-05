@@ -17,7 +17,7 @@ export interface RestartOptions {
 }
 
 function exitOnPortOwnershipError(err: unknown): never {
-  if (err instanceof Error && err.name === "PortOwnershipError") {
+  if (err instanceof Error && (err.name === "PortOwnershipError" || err.name === "UnsafeContainerTakeoverError")) {
     console.error(err.message);
     process.exit(1);
   }

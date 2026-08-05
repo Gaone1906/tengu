@@ -103,19 +103,14 @@ export function cleanupSessionSettings(dir: string, sessionId: string): void {
 }
 
 /**
- * Idempotently mark a project directory trusted AND complete the global first-run
- * onboarding in the real ~/.claude.json, so the interactive (PTY) `claude` never
- * blocks on a one-time consent dialog.
+ * Idempotently mark a project directory trusted and complete non-destructive global
+ * onboarding in the real ~/.claude.json.
  *
  * Recent Claude Code versions gate the interactive TUI behind blocking first-run
- * prompts: the "Bypass Permissions mode" consent (triggered by
- * --dangerously-skip-permissions) and the "Claude in Chrome (beta)" intro
- * (triggered by --chrome). The InteractiveClaudeEngine launches `claude`
- * interactively with both flags and never sends a keystroke to dismiss the
- * dialogs, so on any install where onboarding is not already complete (fresh,
- * headless/CI, or after a Claude Code upgrade resets onboarding for a new
- * version) every work turn hangs forever before reaching the API. Pre-seeding
- * these flags at gateway boot answers the dialogs up front. See upstream issue #66.
+ * Host startup must not accept Claude Code's Bypass Permissions consent on the user's
+ * behalf. The Docker entrypoint handles that container-only consent explicitly inside
+ * the dedicated Claude volume; this host path only handles ordinary onboarding and
+ * per-project trust. See upstream issue #66.
  */
 export function seedTrust(claudeJsonFile: string, projectDir: string): void {
   const realDir = fs.realpathSync(projectDir);
@@ -126,7 +121,6 @@ export function seedTrust(claudeJsonFile: string, projectDir: string): void {
   const alreadySeeded =
     data.hasCompletedOnboarding === true &&
     data.hasCompletedClaudeInChromeOnboarding === true &&
-    data.bypassPermissionsModeAccepted === true &&
     proj.hasTrustDialogAccepted === true &&
     proj.hasCompletedProjectOnboarding === true;
   if (alreadySeeded) return;
@@ -141,10 +135,6 @@ export function seedTrust(claudeJsonFile: string, projectDir: string): void {
   // otherwise block the interactive PTY.
   data.hasCompletedOnboarding = true;
   data.hasCompletedClaudeInChromeOnboarding = true;
-  // Bypass Permissions consent, recorded explicitly: up to 2.1.170 completing
-  // global onboarding implied it, and from 2.1.220 it does not — leaving every
-  // spawn blocked on a dialog no PTY can answer.
-  data.bypassPermissionsModeAccepted = true;
   // Per-project trust: dismisses the folder-trust dialog.
   proj.hasTrustDialogAccepted = true;
   proj.hasCompletedProjectOnboarding = true;

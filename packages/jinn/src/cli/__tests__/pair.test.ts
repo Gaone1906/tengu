@@ -59,6 +59,35 @@ describe("pair CLI helpers", () => {
     expect(fs.existsSync(challengePath)).toBe(false);
   });
 
+  it("uses the resolved IPv6 loopback endpoint for both pairing requests", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-pair-cli-ipv6-"));
+    const challengeId = "challenge-id-ipv60001";
+    const challengePath = path.join(home, `pair-challenge-${challengeId}`);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        challengeId,
+        nonce: "nonce-value-ipv60001",
+        path: challengePath,
+        expiresAt: "2026-07-14T20:00:10.000Z",
+      }), { status: 200, headers: { "content-type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        code: "ABCD-EFGH-JKLM",
+        expiresAt: "2026-07-14T20:05:00.000Z",
+      }), { status: 200, headers: { "content-type": "application/json" } }));
+
+    await requestPairingCode({
+      port: 7777,
+      host: "::1",
+      jinnHome: home,
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+      "http://[::1]:7777/api/auth/pairing-challenges",
+      "http://[::1]:7777/api/auth/pairing-codes",
+    ]);
+  });
+
   it("cleans up its proof file on failure and refuses a server path outside JINN_HOME", async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-pair-cli-failure-"));
     const challengeId = "challenge-id-failure0001";

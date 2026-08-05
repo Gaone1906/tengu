@@ -9,7 +9,7 @@ import {
   type AccessProvisionResult,
   type ExecFileFn,
 } from "./access.js";
-import { isPortAvailable } from "./create.js";
+import { assertSecondaryInstancesSupported, isPortAvailable } from "./create.js";
 import {
   loadInstances,
   saveInstances,
@@ -79,6 +79,7 @@ export async function startInstance(
   input: StartInstanceInput,
   dependencies: StartInstanceDependencies = {},
 ): Promise<StartInstanceResult> {
+  assertSecondaryInstancesSupported();
   if (!fs.existsSync(path.join(input.instance.home, "config.yaml"))) {
     throw new Error(`Workspace directory ${input.instance.home} is not initialized`);
   }
@@ -93,6 +94,8 @@ export async function startInstance(
     JINN_INSTANCE: input.instance.name,
     JINN_NO_OPEN: "1",
   };
+  delete childEnv.JINN_HOST;
+  delete childEnv.JINN_PORT;
   await execFile(process.execPath, [dependencies.cliEntry ?? resolveCliEntry(), "start", "--daemon"], {
     env: childEnv,
     timeout: 30_000,

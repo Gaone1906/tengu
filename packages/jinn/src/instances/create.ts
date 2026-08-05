@@ -49,6 +49,13 @@ export interface CreateInstanceDependencies extends DirectoryOptions {
   now?: () => Date;
 }
 
+export function assertSecondaryInstancesSupported(env: NodeJS.ProcessEnv = process.env): void {
+  if (env.JINN_CONTAINER !== "1") return;
+  throw new Error(
+    "The Docker image supports one Jinn instance. Run each additional instance in its own container with dedicated jinn-home and jinn-claude volumes and a separately published port.",
+  );
+}
+
 export function normalizeWorkspaceName(input: string): NormalizedWorkspaceName {
   const collapsed = input.trim().replace(/\s+/g, " ");
   if (!collapsed || collapsed.length > 48 || /[\\/]|\.\./.test(collapsed)) {
@@ -174,6 +181,7 @@ export async function createInstance(
   input: CreateInstanceInput,
   dependencies: CreateInstanceDependencies = {},
 ): Promise<CreateInstanceResult> {
+  assertSecondaryInstancesSupported();
   const naming = normalizeWorkspaceName(input.name);
   const homeDir = dependencies.homeDir ?? os.homedir();
   const home = path.join(homeDir, naming.homeName);

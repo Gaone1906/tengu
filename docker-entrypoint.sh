@@ -26,6 +26,8 @@ start_gateway() {
     jinn setup
   fi
 
+  # Container-only consent: docker-configure records Claude's bypass-permissions
+  # acknowledgement in the dedicated /home/node/.claude volume. Host startup does not.
   node /opt/jinn/scripts/docker-configure.mjs
 
   # Exported rather than written into config.yaml: "bind every interface" is true of this
@@ -45,20 +47,23 @@ start_gateway() {
 # A command passed to `docker run` / `docker compose run` must REPLACE the gateway,
 # not be appended to it: `jinn start jinn pair` would boot a second gateway against
 # the same volume, rewriting gateway.json under the live one. A leading flag is
-# still meant for the gateway, so `docker run … --take-port` keeps working.
+# still meant for the gateway, but none is safe against the shared container home.
 case "${1:-}" in
   "") start_gateway ;;
   -*)
-    # A whitelist, because `jinn start` has three options and only --take-port is safe
-    # in a container — and a blacklist defaults a future option to being forwarded.
-    # Patterns cover commander's attached-value form (`-p8080`), which a bare `-p` missed.
+    # A blacklist with explicit remediation for today's options; the fallback refuses
+    # future options too. Patterns cover commander's attached-value form (`-p8080`),
+    # which a bare `-p` missed.
     for arg in "$@"; do
       case "$arg" in
-        --take-port) ;;
+        --take-port)
+          echo "jinn-entrypoint: --take-port is disabled because one-off commands use the shared container home and Claude volume. Stop the container, or run the other instance in its own container with dedicated volumes and a published port." >&2
+          exit 64
+          ;;
         -i*|--instance|--instance=*)
           # Program-level (bin/jinn.ts), and JINN_HOME above already came from
           # JINN_INSTANCE — so this would boot on a home the entrypoint never prepared.
-          echo "jinn-entrypoint: -i/--instance cannot be forwarded to \`jinn start\` — it is a program-level flag that must precede the subcommand. Select the instance with -e JINN_INSTANCE=<name> (or -e JINN_HOME=<path>) so setup and the gateway agree." >&2
+          echo "jinn-entrypoint: secondary Jinn instances are not supported in this container. Run each instance in its own container with dedicated jinn-home and jinn-claude volumes and a separately published port." >&2
           exit 64
           ;;
         -p*|--port|--port=*)
@@ -74,7 +79,7 @@ case "${1:-}" in
           exit 64
           ;;
         *)
-          echo "jinn-entrypoint: refusing to forward \`$arg\` to \`jinn start\` — only --take-port is safe to pass to the containerised gateway. Pass a full command instead (\`docker compose run --rm jinn jinn <command>\`)." >&2
+          echo "jinn-entrypoint: refusing to forward \`$arg\` to the containerised gateway. Pass a full command instead (\`docker compose run --rm jinn jinn <command>\`)." >&2
           exit 64
           ;;
       esac

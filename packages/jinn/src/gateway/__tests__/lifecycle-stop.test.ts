@@ -18,8 +18,9 @@ engines:
   claude: {}
 `);
 
-const { buildGatewayChildEnv, lookupPidOnPort, selectPortOwnerPid, shouldSignalPidFileProcess, stop, stopAndWait } = await import("../lifecycle.js");
+const { assertPortTakeoverAllowed, buildGatewayChildEnv, lookupPidOnPort, selectPortOwnerPid, shouldSignalPidFileProcess, stop, stopAndWait } = await import("../lifecycle.js");
 const { CONFIG_PATH, PID_FILE, GATEWAY_INFO_FILE } = await import("../../shared/paths.js");
+const { currentNamespace } = await import("../gateway-info.js");
 const tmpHomeIdentity = fs.realpathSync.native(tmpHome);
 
 /** Pick a free ephemeral port (nothing will be listening on it afterwards). */
@@ -345,7 +346,13 @@ describe("foreground gateway ownership (no JINN_HOME in env)", () => {
   }
 
   function writeGatewayJson(port: number, pid: number): void {
-    fs.writeFileSync(GATEWAY_INFO_FILE, JSON.stringify({ port, host: "127.0.0.1", pid, secret: "s" }), { mode: 0o600 });
+    fs.writeFileSync(GATEWAY_INFO_FILE, JSON.stringify({
+      port,
+      host: "127.0.0.1",
+      pid,
+      secret: "s",
+      namespace: currentNamespace(),
+    }), { mode: 0o600 });
   }
 
   it("stops a foreground gateway whose pid is recorded in gateway.json", async () => {
@@ -398,6 +405,23 @@ describe("foreground gateway ownership (no JINN_HOME in env)", () => {
     expect(() => stop(port)).toThrow(/owned by another jinn instance/i);
   });
 
+  it("refuses a port-owning pid when the runtime record has no namespace proof", async () => {
+    const port = await freePort();
+    const child = spawnForegroundGatewayChild(port);
+    children.push(child);
+    await waitForSpawn(child);
+    await waitForListening(port);
+    fs.writeFileSync(GATEWAY_INFO_FILE, JSON.stringify({
+      port,
+      host: "127.0.0.1",
+      pid: child.pid,
+      secret: "s",
+    }), { mode: 0o600 });
+
+    expect(() => stop(port)).toThrow(/owned by another jinn instance/i);
+    expect(pidIsAliveForTest(child.pid!)).toBe(true);
+  });
+
   // The pid file path where the recorded pid does NOT hold the port: with that evidence
   // gone the recorded namespace has to carry the claim, or a SIGTERM goes to whatever
   // unrelated process inherited the number after a restart.
@@ -433,6 +457,17 @@ function pidIsAliveForTest(pid: number): boolean {
 }
 
 describe("shouldSignalPidFileProcess", () => {
+  it("rejects --take-port inside a container sharing the primary home", () => {
+    const previous = process.env.JINN_CONTAINER;
+    process.env.JINN_CONTAINER = "1";
+    try {
+      expect(() => assertPortTakeoverAllowed(7777, { takePort: true })).toThrow(/shared container home/i);
+    } finally {
+      if (previous === undefined) delete process.env.JINN_CONTAINER;
+      else process.env.JINN_CONTAINER = previous;
+    }
+  });
+
   it("prefers the Jinn daemon when a proxy and the gateway both listen on the configured port", () => {
     expect(selectPortOwnerPid([27_247, 43_201], (pid) => pid === 43_201)).toBe(43_201);
   });
@@ -452,6 +487,19 @@ describe("shouldSignalPidFileProcess", () => {
 });
 
 describe("buildGatewayChildEnv", () => {
+  it("passes the selected host and port to detached daemon children", () => {
+    const env = buildGatewayChildEnv({
+      gateway: { port: 8123, host: "::1" },
+      engines: { default: "claude" },
+    } as any, {
+      JINN_HOST: "0.0.0.0",
+      JINN_PORT: "7777",
+    });
+
+    expect(env.JINN_HOST).toBe("::1");
+    expect(env.JINN_PORT).toBe("8123");
+  });
+
   it("overrides stale gateway env from another instance", () => {
     const env = buildGatewayChildEnv({
       gateway: { port: 7789, host: "127.0.0.1" },

@@ -81,6 +81,7 @@ async function jsonOrThrow<T>(res: Response, fallback: string): Promise<T> {
 
 export async function requestPairingCode(opts: {
   port: number;
+  host?: string;
   jinnHome?: string;
   fetchImpl?: typeof fetch;
 }): Promise<PairingCodeResponse> {
@@ -88,7 +89,7 @@ export async function requestPairingCode(opts: {
   const jinnHome = opts.jinnHome ?? JINN_HOME;
   // Pairing challenges are intentionally sent to loopback even when the gateway
   // advertises a wildcard/LAN host. The route also verifies the Host header.
-  const baseUrl = gatewayHttpBase(opts.port);
+  const baseUrl = gatewayHttpBase(opts.port, opts.host);
   const challengeRes = await fetchImpl(`${baseUrl}/api/auth/pairing-challenges`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -227,7 +228,7 @@ export async function runPair(opts: { json?: boolean } = {}): Promise<void> {
 
   const instance = resolveJinnInstance();
   try {
-    const pairing = await requestPairingCode({ port: info.port });
+    const pairing = await requestPairingCode({ port: info.port, host: info.host });
     if (opts.json) {
       console.log(JSON.stringify({ ...pairing, instance }, null, 2));
     } else {

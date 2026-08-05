@@ -4,7 +4,7 @@
 
 `InteractiveClaudeEngine` spawns `claude` with `--dangerously-skip-permissions` on every turn. That disables Claude Code's approval prompt for everything the process can reach — on a workstation, your entire home directory. The flag is deliberate (Jinn enforces its own policy through `PreToolUse` hooks rather than interactive prompts), but it means a mistake or a prompt injection has a large blast radius.
 
-In a container, that radius is exactly the directories you mount. Nothing else on the host exists as far as the agents are concerned.
+In a container, the filesystem radius is every writable mount: project bind mounts plus the `jinn-home` and `jinn-claude` named volumes. Those named volumes include Jinn secrets, session transcripts and browser-pairing state, plus Claude OAuth credentials, session history, MCP/plugin configuration and trust state. Nothing else on the host exists as far as the agents are concerned, but network egress is unrestricted, so any readable mounted data must be treated as exfiltratable.
 
 Containerising also avoids a class of packaging problem. `better-sqlite3` needs its native binding compiled and `node-pty` needs its prebuilt `spawn-helper` to be executable, both at install time. Any install that skips lifecycle scripts yields a Jinn that crashes on boot or fails every PTY spawn with `posix_spawnp failed.` The image installs normally, so both are correct by construction.
 
@@ -32,7 +32,7 @@ Open **http://localhost:7777** and enter the code at the **Pair This Browser** p
 
 `jinn pair` is the way in: run inside the container it dials loopback and proves it controls `JINN_HOME`, then hands you a code to type into the browser. You only do this once per browser.
 
-If you run several instances, name the one you mean: `docker compose exec jinn jinn -i <instance> pair`.
+The image is intentionally a **single Jinn-instance deployment**. Secondary workspace creation/start and `--take-port` are rejected because the compose service persists and publishes only the primary instance. Run another instance as another container with its own `jinn-home` and `jinn-claude` volumes and its own published port.
 
 ## Credentials
 
@@ -70,6 +70,7 @@ Prefer `:ro` wherever the agents only need to read — that list is the blast ra
 **Not covered:**
 
 - **Mounted directories are fully writable.** An agent can delete or rewrite anything under a read-write mount without asking. Use `:ro` where you can, and prefer repositories with a clean git state.
+- **The named volumes are writable too.** `jinn-home` contains Jinn secrets, OAuth-adjacent connector state, browser pairing, sessions and transcripts; `jinn-claude` contains Claude OAuth credentials, sessions/history, plugins, MCP configuration and trust state.
 - **Network egress is unrestricted.** The container has to reach the Anthropic API; it can therefore reach anything else, so treat data inside mounts as exfiltratable.
 - **Credentials in the container are real.** The `jinn-claude` volume holds a live token for your account.
 - **Only the `claude` engine is installed.** `codex`, `grok` and `hermes` appear in the default config but their binaries are not in the image, so selecting one in the dashboard will fail. A Homebrew or npm install does not provide them either.
@@ -150,7 +151,8 @@ After upgrading, run `jinn migrate` as you would on a host install.
 - **Editing the binding from the dashboard.** Settings shows the *effective* host and port, so in the container it shows what `JINN_HOST`/`JINN_PORT` resolved to. Saving that page never writes those two values back into `config.yaml` — that is what would carry the container's binding onto the volume. Changing either one there is refused with an explicit message instead of being silently ignored: unset the variable and the field becomes yours again.
 - **Health.** The image ships a `HEALTHCHECK` that asks `/api/status` at the address *and* port the gateway actually bound, both read from `gateway.json` — so a deliberate non-loopback `gateway.host` stays healthy. It catches the failure a restart policy cannot see: a live process that is no longer serving. Docker reports it in `docker compose ps` and does not restart on it.
 - **Running one-off commands.** `docker compose run --rm jinn <command>` replaces the gateway with your command; the setup and container-configuration steps are skipped for it deliberately, since they rewrite `gateway.json`, `gateway.pid` and `.claude.json` — state the running gateway owns. Use `docker compose exec` to run something inside the live container instead.
-- **Bypass consent.** `bypassPermissionsModeAccepted` is recorded in `~/.claude/.claude.json`. Claude Code answers `--dangerously-skip-permissions` with a one-time blocking dialog, and nothing in a PTY presses a key — without this, every turn hangs and is eventually abandoned with *"no completion signal and no recoverable transcript"*. Claude Code 2.1.170 implied the consent through global onboarding and 2.1.220 does not, so the gateway now seeds it on every install, host ones included; the entrypoint still writes it before boot, which is also where an unparseable `.claude.json` gets rescued.
+- **Single instance.** The compose service persists and publishes one Jinn instance. `jinn create`, offline secondary start, `-i/--instance` gateway forwarding and `--take-port` are rejected in the image. A second instance needs a second container, dedicated Jinn/Claude volumes and a separately published port.
+- **Bypass consent.** The container configuration step explicitly records `bypassPermissionsModeAccepted` in `/home/node/.claude/.claude.json`, which is inside the dedicated `jinn-claude` volume. Claude Code answers `--dangerously-skip-permissions` with a one-time blocking dialog, and nothing in a PTY presses a key — without this, every turn hangs and is eventually abandoned with *"no completion signal and no recoverable transcript"*. Host gateway startup does not accept this consent; it remains a container-scoped choice documented here.
 - **Config location.** `CLAUDE_CONFIG_DIR=/home/node/.claude` keeps Claude Code's `.claude.json` inside the volume; see [Persistence and upgrades](#persistence-and-upgrades).
 - **Engine version.** `@anthropic-ai/claude-code` is pinned by the `CLAUDE_CODE_VERSION` build arg so two builds of the same commit get the same engine, and `DISABLE_AUTOUPDATER=1` stops the CLI relocating itself onto the volume and drifting past the pin. Override with `docker compose build --build-arg CLAUDE_CODE_VERSION=<version>`.
 - **Timezone.** The container is UTC. Shells do not normally export `TZ`, so `${TZ:-UTC}` takes the default unless you set it explicitly — either in your shell or, more reliably, in a `.env` file beside `docker-compose.yml` (`TZ=Europe/Paris`), which Compose reads automatically. It matters because a cron job with no explicit `timezone` fires in the container's zone; giving each job its own timezone is the more robust fix.

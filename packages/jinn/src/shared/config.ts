@@ -197,6 +197,10 @@ export function withoutGatewayEnvValues<T>(
  */
 export function saveConfigAtomic(config: unknown, dumpOptions?: yaml.DumpOptions): void {
   const tmpPath = `${CONFIG_PATH}.tmp-${process.pid}`;
-  fs.writeFileSync(tmpPath, yaml.dump(withoutGatewayEnvValues(config), dumpOptions), "utf-8");
+  fs.writeFileSync(tmpPath, yaml.dump(withoutGatewayEnvValues(config), dumpOptions), {
+    encoding: "utf-8",
+    mode: 0o600,
+  });
   fs.renameSync(tmpPath, CONFIG_PATH);
+  fs.chmodSync(CONFIG_PATH, 0o600);
 }

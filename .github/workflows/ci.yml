@@ -141,6 +141,14 @@ jobs:
           docker run -d --name jinn-smoke --init -p 127.0.0.1:7777:7777 jinn:ci
           wait_for_status || give_up "gateway never answered on /api/status"
 
+          # A healthy public status route does not prove the auth boundary survived the
+          # image/entrypoint wiring. A protected read must reject a request with no token.
+          protected_status=$(curl -sS -m 10 -o /tmp/jinn-protected.json -w '%{http_code}' \
+            http://127.0.0.1:7777/api/sessions) \
+            || give_up "the protected-route auth probe could not reach the gateway"
+          [ "$protected_status" = "401" ] \
+            || give_up "unauthenticated /api/sessions returned HTTP $protected_status instead of 401"
+
           # The dashboard, not just the API: a build filtered to the jinn package ships a
           # gateway with no UI, and /api/status answers 200 either way. `id="root"` is the
           # marker dashboardIsReady() uses in gateway/lifecycle.ts. Not piped into grep —

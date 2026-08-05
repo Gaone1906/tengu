@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
+import { isIP } from "node:net";
 import path from "node:path";
 import type { IncomingMessage } from "node:http";
 import type { JinnConfig } from "../shared/types.js";
@@ -233,8 +234,12 @@ export function isLoopbackHost(host: string | undefined): boolean {
   const raw = host.trim().toLowerCase();
   const h = raw.startsWith("[")
     ? raw.slice(1, raw.indexOf("]") >= 0 ? raw.indexOf("]") : undefined)
-    : raw.replace(/:\d+$/, "");
-  return h === "localhost" || h.endsWith(".localhost") || h === "127.0.0.1" || h === "::1";
+    : isIP(raw) > 0 ? raw : raw.replace(/:\d+$/, "");
+  return h === "localhost"
+    || h.endsWith(".localhost")
+    || h === "127.0.0.1"
+    || h === "::1"
+    || h === "0:0:0:0:0:0:0:1";
 }
 
 export function isNetworkHost(host: string | undefined): boolean {

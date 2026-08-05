@@ -17,6 +17,7 @@ function tempDir(): string {
   return dir;
 }
 afterEach(() => {
+  vi.unstubAllEnvs();
   for (const dir of scratch.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -50,6 +51,21 @@ describe("workspace naming", () => {
 });
 
 describe("workspace creation", () => {
+  it("rejects secondary workspace creation in the single-instance Docker image", async () => {
+    vi.stubEnv("JINN_CONTAINER", "1");
+    const root = tempDir();
+    const execFile = vi.fn(async () => ({ stdout: "", stderr: "" }));
+
+    await expect(createInstance({ name: "John", currentPort: 7777 }, {
+      homeDir: root,
+      registryPath: path.join(root, "instances.json"),
+      legacyRegistryPath: path.join(root, "missing.json"),
+      execFile,
+      isPortAvailable: async () => true,
+    })).rejects.toThrow(/Docker image supports one Jinn instance/i);
+    expect(execFile).not.toHaveBeenCalled();
+  });
+
   it("sets up, configures, registers, starts, and provisions a fresh workspace", async () => {
     const root = tempDir();
     const registryPath = path.join(root, "host", "instances.json");

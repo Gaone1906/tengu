@@ -77,6 +77,11 @@ describe("gateway auth", () => {
     expect(shouldRequireGatewayAuth({ gateway: { host: "127.0.0.1", authRequired: true } } as any)).toBe(true);
   });
 
+  it("recognizes bare compressed and expanded IPv6 loopback addresses", () => {
+    expect(isLoopbackHost("::1")).toBe(true);
+    expect(isLoopbackHost("0:0:0:0:0:0:0:1")).toBe(true);
+  });
+
   it("refuses unauthenticated network binds unless the explicit insecure escape hatch is set", () => {
     expect(isNetworkHost("0.0.0.0")).toBe(true);
     expect(validateGatewayExposure({ gateway: { host: "127.0.0.1", authRequired: true } } as any).ok).toBe(true);

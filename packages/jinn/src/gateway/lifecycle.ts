@@ -8,7 +8,7 @@ import { logger } from "../shared/logger.js";
 import type { JinnConfig } from "../shared/types.js";
 import { startGateway } from "./server.js";
 import { loadConfig, gatewayFileBinding } from "../shared/config.js";
-import { gatewayBaseUrl, readGatewayInfo, recordedInThisNamespace, resolveGatewayEndpoint } from "./gateway-info.js";
+import { gatewayBaseUrl, readGatewayInfo, recordedInThisNamespace, resolveGatewayEndpoint, type GatewayInfo } from "./gateway-info.js";
 import { ensureGatewayAuthToken } from "./auth.js";
 import { buildRestartEntryArgv } from "./restart-entry-options.js";
 
@@ -84,6 +84,7 @@ export interface RestartDetachedOptions extends LifecycleKillOptions {
 }
 
 export function restartDetached(options: RestartDetachedOptions = {}): void {
+  assertContainerTakeoverSafe(options);
   const loadedConfig = loadConfig();
   const port = options.port ?? loadedConfig.gateway.port ?? 7777;
   const config: JinnConfig = {
@@ -127,6 +128,8 @@ export function buildGatewayChildEnv(
     ...env,
     JINN_HOME,
     JINN_HOME_IDENTITY,
+    JINN_HOST: host,
+    JINN_PORT: String(port),
     JINN_GATEWAY_URL: gatewayBaseUrl({ port, host }),
     JINN_GATEWAY_TOKEN: ensureGatewayAuthToken(JINN_HOME),
   };
@@ -190,6 +193,21 @@ export class PortOwnershipError extends Error {
   }
 }
 
+export class UnsafeContainerTakeoverError extends Error {
+  constructor() {
+    super(
+      "--take-port is disabled inside Docker because one-off commands use the shared container home and Claude volume. Stop the container, or run the other instance in its own container with dedicated volumes and a published port.",
+    );
+    this.name = "UnsafeContainerTakeoverError";
+  }
+}
+
+function assertContainerTakeoverSafe(options: LifecycleKillOptions): void {
+  if (options.takePort && process.env.JINN_CONTAINER === "1") {
+    throw new UnsafeContainerTakeoverError();
+  }
+}
+
 export function formatPortOwnedByAnotherInstanceError(port: number, ownerJinnHome: string): string {
   return `port ${port} is owned by another jinn instance (JINN_HOME=${ownerJinnHome}); change this instance's port in ${CONFIG_PATH}, or pass --take-port to override.`;
 }
@@ -204,13 +222,14 @@ export function shouldSignalPidFileProcess(
 }
 
 export function assertPortTakeoverAllowed(port: number, options: LifecycleKillOptions = {}): void {
+  assertContainerTakeoverSafe(options);
   if (options.takePort) return;
 
   const portOwner = lookupPidOnPort(port);
   if (portOwner.status === "none") return;
   if (portOwner.status === "unknown") throw new PortOwnershipError(port, "unknown");
 
-  assertPidBelongsToThisInstance(portOwner.pid, port, options, portOwner);
+  assertPidBelongsToThisInstance(portOwner.pid, port, options);
 }
 
 export function readProcessJinnHome(pid: number): ProcessJinnHomeLookup {
@@ -258,7 +277,6 @@ function assertPidBelongsToThisInstance(
   pid: number,
   port: number,
   options: LifecycleKillOptions,
-  portOwner?: PortOwnerLookup,
 ): void {
   if (options.takePort) return;
 
@@ -270,15 +288,12 @@ function assertPidBelongsToThisInstance(
   // daemon gets one injected. The env lookup therefore reports "unknown" and we
   // would refuse to stop/restart our own gateway.
   //
-  // gateway.json records the running gateway's own pid, so a match proves ownership;
-  // gateway.pid is no use here because only startDaemon() writes it. Trustworthy on one
-  // of two grounds: the pid holds the port we are about to free (a recycled number does
-  // not inherit the listener), or the file was written in this pid namespace. Neither
-  // holds once a reboot leaves gateway.json naming an unrelated live process.
+  // gateway.json records the running gateway's own pid, so a match is useful only when
+  // the record was written in this process namespace. Owning the port is not identity
+  // proof: a stale record can name a recycled pid that now belongs to a foreign listener.
   if (owner.status !== "found") {
     const info = readGatewayInfo(GATEWAY_INFO_FILE);
-    const ownsPort = portOwner?.status === "found" && portOwner.pid === pid;
-    if (info && info.pid === pid && info.port === port && (ownsPort || recordedInThisNamespace(info))) return;
+    if (info && info.pid === pid && info.port === port && recordedInThisNamespace(info)) return;
   }
 
   if (!pidIsAlive(pid)) return;
@@ -295,6 +310,7 @@ function pidIsAlive(pid: number): boolean {
 }
 
 function signalGateway(port?: number, options: LifecycleKillOptions = {}): number | null {
+  assertContainerTakeoverSafe(options);
   const targetPort = port ?? resolvePort();
 
   // Try PID file first
@@ -312,7 +328,7 @@ function signalGateway(port?: number, options: LifecycleKillOptions = {}): numbe
       );
       fs.unlinkSync(PID_FILE);
     } else {
-      assertPidBelongsToThisInstance(pid, targetPort, options, portOwner);
+      assertPidBelongsToThisInstance(pid, targetPort, options);
       try {
         process.kill(pid, "SIGTERM");
         logger.info(`Sent SIGTERM to gateway process ${pid}`);
@@ -335,7 +351,7 @@ function signalGateway(port?: number, options: LifecycleKillOptions = {}): numbe
   const portOwner = lookupPidOnPort(targetPort);
   if (portOwner.status === "found") {
     const pid = portOwner.pid;
-    assertPidBelongsToThisInstance(pid, targetPort, options, portOwner);
+    assertPidBelongsToThisInstance(pid, targetPort, options);
     try {
       process.kill(pid, "SIGTERM");
       logger.info(`Killed process ${pid} on port ${targetPort}`);
@@ -467,8 +483,20 @@ function resolveHost(): string {
 export function resolveInstanceEndpoint(home: string, registryPort: number): { host: string; port: number } {
   const recorded = readGatewayInfo(path.join(home, "gateway.json"));
   const onFile = gatewayFileBinding(path.join(home, "config.yaml"));
-  const endpoint = resolveGatewayEndpoint(recorded, { port: onFile.port ?? registryPort, host: onFile.host });
+  const liveRecorded = recorded && runtimeRecordBelongsToHome(home, recorded) ? recorded : null;
+  const endpoint = resolveGatewayEndpoint(liveRecorded, { port: onFile.port ?? registryPort, host: onFile.host });
   return { host: endpoint.host?.trim() || "127.0.0.1", port: endpoint.port };
+}
+
+function runtimeRecordBelongsToHome(home: string, recorded: GatewayInfo): boolean {
+  if (!Number.isSafeInteger(recorded.pid) || recorded.pid <= 0) return false;
+  const host = recorded.host?.trim() || "127.0.0.1";
+  const status = getInstanceStatus(path.join(home, "gateway.pid"), recorded.port, host);
+  if (!status.running || status.pid !== recorded.pid) return false;
+
+  const owner = readProcessJinnHome(recorded.pid);
+  if (owner.status === "found") return owner.identity === resolveHomeIdentity(home);
+  return recordedInThisNamespace(recorded) && pidLooksLikeGateway(recorded.pid);
 }
 
 function lsofListenerHost(name: string): string {
