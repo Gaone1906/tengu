@@ -426,7 +426,7 @@ describe("buildContext — audience scoping", () => {
   it("connector section is slim — recipe details live in CLAUDE.md", () => {
     const out = buildContext({ ...baseOpts, connectors: ["slack"] });
     expect(out).toContain("## Available connectors: slack");
-    expect(out).toContain("/api/connectors/<name>/send");
+    expect(out).toContain("/api/connectors/<id>/send");
     // The old per-connector recipe block is gone:
     expect(out).not.toContain("**Send threaded reply**");
   });

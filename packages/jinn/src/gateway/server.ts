@@ -20,6 +20,7 @@ import {
   refreshPiModels,
 } from "../shared/models.js";
 import { configureLogger, logger } from "../shared/logger.js";
+import { CONNECTOR_ID_REQUIREMENTS, isValidConnectorId } from "../shared/connector-id.js";
 import { scheduleFtsBackfill, recoverStaleSessions, recoverStaleWorkflowAttemptSessions, recoverStaleQueueItems, clearAllPartialMessages, consumeRestartAcknowledgements, getInterruptedSessions, listSessions, updateSession, getSession, getMessages, getSessionSpend, RESTART_ACK_META_KEY } from "../sessions/registry.js";
 import { initDb } from "../shared/db.js";
 import { SessionManager, type RouteOptions } from "../sessions/manager.js";
@@ -381,7 +382,10 @@ export function connectorInstancesFromConfig(config: JinnConfig): NormalizedConn
   const instances: NormalizedConnector[] = [];
   const seen = new Set<string>();
 
-  const add = (id: string, type: string, raw: Record<string, unknown>): void => {
+  const add = (id: unknown, type: string, raw: Record<string, unknown>): void => {
+    if (!isValidConnectorId(id)) {
+      throw new Error(`Invalid connector instance id ${JSON.stringify(id)}: ${CONNECTOR_ID_REQUIREMENTS}`);
+    }
     if (seen.has(id)) {
       logger.warn(`Duplicate connector instance id "${id}", skipping`);
       return;
@@ -400,7 +404,7 @@ export function connectorInstancesFromConfig(config: JinnConfig): NormalizedConn
 
   for (const instance of declared.instances ?? []) {
     const { id, type, ...rest } = instance;
-    if (!id || !type) {
+    if (id === undefined || id === null || !type) {
       logger.warn(`Skipping connector instance without id or type`);
       continue;
     }
@@ -418,9 +422,13 @@ export function createConnector(instance: NormalizedConnector): Connector {
       return new SlackConnector(config as unknown as SlackConnectorConfig);
     case "discord":
       // Remote mode proxies all Discord I/O through the primary instance.
-      return config.proxyVia
-        ? new RemoteDiscordConnector({ proxyVia: String(config.proxyVia), channelId: config.channelId as string | undefined })
-        : new DiscordConnector(config as unknown as DiscordConnectorConfig);
+      if (config.proxyVia) {
+        if (instance.id !== "discord") {
+          throw new Error("Named Remote Discord instances are not supported until the proxy protocol authenticates and validates instance identity");
+        }
+        return new RemoteDiscordConnector({ proxyVia: String(config.proxyVia), channelId: config.channelId as string | undefined });
+      }
+      return new DiscordConnector(config as unknown as DiscordConnectorConfig);
     case "telegram":
       return new TelegramConnector(config as unknown as TelegramConnectorConfig);
     case "whatsapp":
@@ -428,6 +436,52 @@ export function createConnector(instance: NormalizedConnector): Connector {
     default:
       throw new Error(`Unknown connector type "${instance.type}" for instance "${instance.id}"`);
   }
+}
+
+interface ReloadConnectorRegistryOptions {
+  connectorMap: Map<string, Connector>;
+  loadInstances: () => NormalizedConnector[];
+  initConnector: (instance: NormalizedConnector) => Promise<void>;
+  describeConnector: (instance: NormalizedConnector) => string;
+}
+
+/** Reload a live connector registry from freshly normalized declarations. */
+export async function reloadConnectorRegistry({
+  connectorMap,
+  loadInstances,
+  initConnector,
+  describeConnector,
+}: ReloadConnectorRegistryOptions): Promise<{ started: string[]; stopped: string[]; errors: string[] }> {
+  const instances = loadInstances();
+  const started: string[] = [];
+  const stopped: string[] = [];
+  const errors: string[] = [];
+
+  for (const [id, connector] of [...connectorMap.entries()]) {
+    try {
+      await connector.stop();
+      connectorMap.delete(id);
+      stopped.push(id);
+      logger.info(`Stopped connector "${id}" for reload`);
+    } catch (err) {
+      errors.push(`Failed to stop ${id}: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  for (const instance of instances) {
+    // A connector that refused to stop is still live — leave it alone.
+    if (connectorMap.has(instance.id)) continue;
+    try {
+      await initConnector(instance);
+      started.push(instance.id);
+      logger.info(`Started ${describeConnector(instance)}`);
+    } catch (err) {
+      errors.push(`Failed to start "${instance.id}": ${err instanceof Error ? err.message : err}`);
+      logger.error(`Failed to start ${describeConnector(instance)}: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  return { started, stopped, errors };
 }
 
 export type GatewayCleanup = () => Promise<void>;
@@ -723,7 +777,6 @@ export async function startGateway(
   const sessionManager = new SessionManager(config, engines, bootId, (id) => employeeRegistry.get(id));
 
   // Start connectors — one normalized list covers both config forms.
-  const connectors: Connector[] = [];
   const connectorMap = new Map<string, Connector>();
 
   /**
@@ -745,7 +798,6 @@ export async function startGateway(
         logger.error(`${instance.id} route error: ${err instanceof Error ? err.message : err}`);
       });
     });
-    connectors.push(connector);
     connectorMap.set(instance.id, connector);
     return connector.start();
   };
@@ -753,7 +805,7 @@ export async function startGateway(
   const describeConnector = (instance: NormalizedConnector): string =>
     `connector "${instance.id}" (type: ${instance.type}, employee: ${instance.employee || "default"})`;
 
-  // Session context reads connector names off this map, so publish it before the
+  // Session context reads connector ids off this map, so publish it before the
   // first connector can deliver a message.
   sessionManager.setConnectorProvider(() => connectorMap);
 
@@ -771,37 +823,12 @@ export async function startGateway(
 
   /** Stop every running connector and restart from fresh config (POST /api/connectors/reload). */
   async function reloadConnectorInstances(): Promise<{ started: string[]; stopped: string[]; errors: string[] }> {
-    const started: string[] = [];
-    const stopped: string[] = [];
-    const errors: string[] = [];
-
-    for (const [id, connector] of [...connectorMap.entries()]) {
-      try {
-        await connector.stop();
-        connectorMap.delete(id);
-        const idx = connectors.indexOf(connector);
-        if (idx >= 0) connectors.splice(idx, 1);
-        stopped.push(id);
-        logger.info(`Stopped connector "${id}" for reload`);
-      } catch (err) {
-        errors.push(`Failed to stop ${id}: ${err instanceof Error ? err.message : err}`);
-      }
-    }
-
-    for (const instance of connectorInstancesFromConfig(loadConfig())) {
-      // A connector that refused to stop is still live — leave it alone.
-      if (connectorMap.has(instance.id)) continue;
-      try {
-        await initConnector(instance);
-        started.push(instance.id);
-        logger.info(`Started ${describeConnector(instance)}`);
-      } catch (err) {
-        errors.push(`Failed to start "${instance.id}": ${err instanceof Error ? err.message : err}`);
-        logger.error(`Failed to start ${describeConnector(instance)}: ${err instanceof Error ? err.message : err}`);
-      }
-    }
-
-    return { started, stopped, errors };
+    return reloadConnectorRegistry({
+      connectorMap,
+      loadInstances: () => connectorInstancesFromConfig(loadConfig()),
+      initConnector,
+      describeConnector,
+    });
   }
 
   // Mutable config reference for hot-reload
@@ -1414,7 +1441,7 @@ export async function startGateway(
     setTodoApprovalDecisionListener(null);
 
     // Stop connectors
-    for (const connector of connectors) {
+    for (const connector of connectorMap.values()) {
       try {
         await connector.stop();
       } catch (err) {

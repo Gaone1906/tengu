@@ -37,8 +37,8 @@ export interface DiscordConnectorConfig {
 }
 
 export class DiscordConnector implements Connector {
-  name: string;
-  instanceId: string;
+  name = "discord";
+  id: string;
   private client: Client;
   private config: DiscordConnectorConfig;
   private handler: ((msg: IncomingMessage) => void) | null = null;
@@ -49,8 +49,7 @@ export class DiscordConnector implements Connector {
   private typingIntervals = new Map<string, ReturnType<typeof setInterval>>();
 
   constructor(config: DiscordConnectorConfig) {
-    this.name = config.id || "discord";
-    this.instanceId = config.id || "discord";
+    this.id = config.id || "discord";
     this.config = config;
     // Normalize Discord IDs to strings (YAML may parse large snowflake IDs as numbers)
     if (this.config.guildId) this.config.guildId = String(this.config.guildId);
@@ -271,7 +270,7 @@ export class DiscordConnector implements Connector {
 
     if (!this.handler) return;
 
-    const sessionKey = deriveSessionKey(message, this.instanceId);
+    const sessionKey = deriveSessionKey(message, this.id);
     const replyContext = buildReplyContext(message);
 
     // Download attachments
@@ -287,7 +286,7 @@ export class DiscordConnector implements Connector {
     ).then((results) => results.filter(Boolean) as Array<{ name: string; localPath: string; mimeType: string }>);
 
     const incomingMessage: IncomingMessage = {
-      connector: this.instanceId,
+      connector: this.id,
       source: "discord",
       sessionKey,
       channel: message.channel.id,

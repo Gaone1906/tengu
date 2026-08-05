@@ -20,6 +20,7 @@ export interface RemoteDiscordConfig {
  */
 export class RemoteDiscordConnector implements Connector {
   name = "discord";
+  id = "discord";
   private handler: ((msg: IncomingMessage) => void) | null = null;
   private baseUrl: string;
 

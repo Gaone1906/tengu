@@ -24,6 +24,8 @@ import path from "node:path";
 import fs from "node:fs";
 
 export interface WhatsAppConnectorConfig {
+  /** Unique instance identifier (e.g. "whatsapp-main") */
+  id?: string;
   /** Where to store session credentials (default: JINN_HOME/.whatsapp-auth) */
   authDir?: string;
   /** Allowed phone numbers in JID format (e.g. "447700900000@s.whatsapp.net") — empty = allow all */
@@ -44,6 +46,7 @@ const silentLogger = {
 
 export class WhatsAppConnector implements Connector {
   name = "whatsapp";
+  id: string;
   private sock: WASocket | null = null;
   private config: WhatsAppConnectorConfig;
   private handler: ((msg: IncomingMessage) => void) | null = null;
@@ -65,8 +68,10 @@ export class WhatsAppConnector implements Connector {
   };
 
   constructor(config: WhatsAppConnectorConfig) {
+    this.id = config.id || "whatsapp";
     this.config = config;
-    this.authDir = config.authDir ?? path.join(JINN_HOME, ".whatsapp-auth");
+    const defaultAuthDir = path.join(JINN_HOME, ".whatsapp-auth");
+    this.authDir = config.authDir ?? (this.id === "whatsapp" ? defaultAuthDir : path.join(defaultAuthDir, this.id));
     this.allowedJids = new Set(config.allowFrom ?? []);
     fs.mkdirSync(this.authDir, { recursive: true });
   }
@@ -305,11 +310,11 @@ export class WhatsAppConnector implements Connector {
       }
     }
 
-    const sessionKey = `whatsapp:${jid}`;
+    const sessionKey = `${this.id}:${jid}`;
     const replyContext = { channel: jid, thread: null, messageTs: message.key.id ?? null };
 
     const incomingMessage: IncomingMessage = {
-      connector: "whatsapp",
+      connector: this.id,
       source: "whatsapp",
       sessionKey,
       channel: jid,

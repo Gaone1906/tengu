@@ -270,6 +270,8 @@ export type ReplyContext = JsonObject;
 
 export interface Connector {
   name: string;
+  /** Instance id — the connector's registry key; equals the type for legacy top-level config. */
+  id: string;
   start(): Promise<void>;
   stop(): Promise<void>;
   getCapabilities(): ConnectorCapabilities;
@@ -504,6 +506,7 @@ export interface CronJob {
 }
 
 export interface CronDelivery {
+  /** Connector instance id, matching the gateway registry key. */
   connector: string;
   channel: string;
 }

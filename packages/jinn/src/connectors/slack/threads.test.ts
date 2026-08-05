@@ -40,6 +40,13 @@ test("deriveSessionKey treats same-ts thread_ts as root message", () => {
   expect(key).toBe("slack:C123:1700000000.000100");
 });
 
+test("deriveSessionKey honours a custom instance prefix", () => {
+  const dm = { channel: "D123", user: "U123", channel_type: "im", ts: "1700000000.000100" };
+  expect(deriveSessionKey(dm, "slack-support")).toBe("slack-support:dm:U123");
+  const channel = { channel: "C123", user: "U123", ts: "1700000000.000100" };
+  expect(deriveSessionKey(channel, "slack-support")).toBe("slack-support:C123:1700000000.000100");
+});
+
 test("buildReplyContext sets thread for channel root messages", () => {
   const context = buildReplyContext({
     channel: "C123",

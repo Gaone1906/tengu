@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { deliverConnectorReply } from "../api.js";
+import { logger } from "../../shared/logger.js";
 import type { Connector, Session } from "../../shared/types.js";
 
 /** Build a minimal mocked connector exposing the two methods the helper uses. */
@@ -13,8 +14,8 @@ function makeConnector(name: string) {
 
 /** Build the minimal slice of a Session the helper reads. */
 function makeSession(
-  overrides: Partial<Pick<Session, "source" | "connector" | "replyContext">> = {},
-): Pick<Session, "source" | "connector" | "replyContext"> {
+  overrides: Partial<Pick<Session, "source" | "connector" | "replyContext">> & { id?: string } = {},
+): Pick<Session, "source" | "connector" | "replyContext"> & { id?: string } {
   return {
     source: "slack",
     connector: "slack",
@@ -57,10 +58,23 @@ describe("deliverConnectorReply", () => {
     expect(slack.replyMessage).not.toHaveBeenCalled();
   });
 
-  it("does not throw and does not call when connector missing from map", async () => {
-    const session = makeSession({ connector: "telegram", source: "telegram" });
+  it("delivers to a named connector instance keyed by instance id", async () => {
+    const support = makeConnector("slack");
+    const named = new Map<string, Connector>([["slack-support", support.connector]]);
+    await deliverConnectorReply(makeSession({ connector: "slack-support" }), "hi", named);
+    expect(support.reconstructTarget).toHaveBeenCalledTimes(1);
+    expect(support.replyMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("logs a warning and does not call when connector missing from map", async () => {
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+    const session = makeSession({ id: "sess-42", connector: "telegram", source: "telegram" });
     await expect(deliverConnectorReply(session, "hi", map)).resolves.toBeUndefined();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain("sess-42");
+    expect(warn.mock.calls[0][0]).toContain("telegram");
     expect(slack.replyMessage).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 
   it("does not deliver when text is empty", async () => {

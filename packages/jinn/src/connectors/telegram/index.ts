@@ -27,6 +27,7 @@ type SendMessageOptions = Omit<SendMessageParams, "chat_id" | "text">;
 
 export class TelegramConnector implements Connector {
   name = "telegram";
+  id: string;
   private bot: TelegramBot;
   private handler: ((msg: IncomingMessage) => void) | null = null;
   private readonly allowedUsers: Set<number> | null;
@@ -48,6 +49,7 @@ export class TelegramConnector implements Connector {
   private sttPending = 0;
 
   constructor(config: TelegramConnectorConfig) {
+    this.id = config.id || "telegram";
     this.bot = new TelegramBot(config.botToken, { polling: false });
     this.ignoreOldMessagesOnBoot = config.ignoreOldMessagesOnBoot !== false;
     this.allowedUsers =
@@ -101,7 +103,7 @@ export class TelegramConnector implements Connector {
         }
       }
 
-      const sessionKey = deriveSessionKey(telegramMsg);
+      const sessionKey = deriveSessionKey(telegramMsg, this.id);
       const replyContext = buildReplyContext(telegramMsg);
 
       const username =
@@ -302,7 +304,7 @@ export class TelegramConnector implements Connector {
       }
 
       const msg: IncomingMessage = {
-        connector: this.name,
+        connector: this.id,
         source: "telegram",
         sessionKey,
         replyContext,

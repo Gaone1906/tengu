@@ -16,7 +16,7 @@ interface CronJob {
   employee?: string;     // Employee persona to use
   prompt: string;        // The prompt to send to the engine
   delivery?: {           // Optional output delivery
-    connector: string;   // Connector name (e.g., "slack")
+    connector: string;   // Connector instance id (e.g., "slack" or "slack-support")
     channel: string;     // Target channel or user
   };
 }

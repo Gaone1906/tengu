@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { connectorInstancesFromConfig, createConnector } from "../server.js";
+import { describe, expect, it, vi } from "vitest";
+import { connectorInstancesFromConfig, createConnector, reloadConnectorRegistry } from "../server.js";
 import { SlackConnector } from "../../connectors/slack/index.js";
 import { DiscordConnector } from "../../connectors/discord/index.js";
 import { RemoteDiscordConnector } from "../../connectors/discord/remote.js";
@@ -60,6 +60,26 @@ describe("connectorInstancesFromConfig", () => {
     );
     expect(normalized.map((entry) => entry.id)).toEqual(["slack", "telegram-support"]);
   });
+
+  it.each([
+    "",
+    "Slack-Support",
+    "slack support",
+    "-slack",
+    "_slack",
+    `s${"x".repeat(64)}`,
+  ])("rejects invalid connector instance id %j during normalization", (id) => {
+    expect(() => connectorInstancesFromConfig(configWith({
+      instances: [{ id, type: "slack", appToken: "xapp-test", botToken: "xoxb-test" }],
+    }))).toThrow(/invalid connector instance id/i);
+  });
+
+  it("accepts the 64-character lowercase connector id boundary", () => {
+    const id = `s${"x".repeat(63)}`;
+    expect(connectorInstancesFromConfig(configWith({
+      instances: [{ id, type: "slack", appToken: "xapp-test", botToken: "xoxb-test" }],
+    }))[0].id).toBe(id);
+  });
 });
 
 describe("createConnector", () => {
@@ -69,13 +89,78 @@ describe("createConnector", () => {
   it("dispatches every supported type to its connector class", () => {
     expect(build("slack", { appToken: "xapp-test", botToken: "xoxb-test" })).toBeInstanceOf(SlackConnector);
     expect(build("discord", { botToken: "d-test" })).toBeInstanceOf(DiscordConnector);
-    expect(build("discord", { proxyVia: "http://127.0.0.1:1" })).toBeInstanceOf(RemoteDiscordConnector);
+    expect(createConnector({ id: "discord", type: "discord", config: { id: "discord", proxyVia: "http://127.0.0.1:1" } })).toBeInstanceOf(RemoteDiscordConnector);
     expect(build("telegram", { botToken: "tg-test" })).toBeInstanceOf(TelegramConnector);
     expect(build("whatsapp")).toBeInstanceOf(WhatsAppConnector);
   });
 
+  it("carries the instance id on id while name stays the type literal", () => {
+    const slack = build("slack", { appToken: "xapp-test", botToken: "xoxb-test" });
+    expect([slack.id, slack.name]).toEqual(["slack-1", "slack"]);
+    const discord = build("discord", { botToken: "d-test" });
+    expect([discord.id, discord.name]).toEqual(["discord-1", "discord"]);
+  });
+
   it("rejects an unknown type", () => {
     expect(() => build("carrier-pigeon")).toThrow(/Unknown connector type "carrier-pigeon"/);
+  });
+
+  it("rejects named Remote Discord until authenticated identity is supported", () => {
+    expect(() => build("discord", { proxyVia: "http://127.0.0.1:1" }))
+      .toThrow(/named Remote Discord.*not supported/i);
+  });
+
+  it("keeps legacy Remote Discord identity and proxy addressing byte-identical", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ messageId: "m1" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const remote = createConnector({
+        id: "discord",
+        type: "discord",
+        config: { id: "discord", proxyVia: "http://127.0.0.1:7788" },
+      });
+      expect([remote.id, remote.name]).toEqual(["discord", "discord"]);
+      await remote.sendMessage({ channel: "C1" }, "hello");
+      expect(fetchMock).toHaveBeenCalledWith(
+        "http://127.0.0.1:7788/api/connectors/discord/proxy",
+        expect.objectContaining({ method: "POST" }),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps the local-to-remote Discord session key on the legacy discord prefix", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const local = build("discord", { botToken: "d-test" }) as DiscordConnector;
+      await (local as unknown as { proxyToRemote(url: string, message: unknown): Promise<void> }).proxyToRemote(
+        "http://127.0.0.1:7788",
+        {
+          id: "M1",
+          content: "hello",
+          attachments: new Map(),
+          author: { id: "U1", username: "tester" },
+          guild: { id: "G1" },
+          channel: {
+            id: "C1",
+            name: "general",
+            isDMBased: () => false,
+            isThread: () => false,
+            isTextBased: () => true,
+          },
+        },
+      );
+      const request = fetchMock.mock.calls[0][1] as RequestInit;
+      expect(JSON.parse(String(request.body)).sessionKey).toBe("discord:C1");
+      expect(fetchMock.mock.calls[0][0]).toBe("http://127.0.0.1:7788/api/connectors/discord/incoming");
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 
@@ -123,5 +208,30 @@ describe("connector wiring", () => {
     registry.delete("telegram");
     registry.set("discord-ops", stubConnector(async () => {}));
     expect(names()).toEqual(["slack", "slack-second", "discord-ops"]);
+  });
+
+  it("rejects an invalid reload config before stopping or deleting live connectors", async () => {
+    const stop = vi.fn(async () => {});
+    const live = {
+      id: "telegram",
+      name: "telegram",
+      start: async () => {},
+      stop,
+      sendMessage: async () => undefined,
+      onMessage: () => {},
+    } as unknown as Connector;
+    const registry = new Map<string, Connector>([[live.id, live]]);
+
+    await expect(reloadConnectorRegistry({
+      connectorMap: registry,
+      loadInstances: () => connectorInstancesFromConfig(configWith({
+        instances: [{ id: "Invalid ID", type: "telegram", botToken: "tg-new" }],
+      })),
+      initConnector: async () => {},
+      describeConnector: (instance) => `connector "${instance.id}"`,
+    })).rejects.toThrow(/invalid connector instance id/i);
+
+    expect(stop).not.toHaveBeenCalled();
+    expect([...registry.entries()]).toEqual([["telegram", live]]);
   });
 });

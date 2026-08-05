@@ -5,6 +5,7 @@ import path from "node:path"
 import { Readable } from "node:stream"
 import type { ServerResponse } from "node:http"
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
+import type { Connector, IncomingMessage } from "../../shared/types.js"
 
 const registryHome = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-migration-api-registry-"))
 process.env.JINN_HOME = registryHome
@@ -117,10 +118,89 @@ beforeEach(() => {
   seedBundle()
   dispatched.length = 0
   engineAvailable = true
+  context.connectors.clear()
   for (const session of registry.listSessions()) registry.deleteSession(session.id)
 })
 
+function connectorStub(id: string, name: string): Connector {
+  const capabilities = { threading: false, messageEdits: false, reactions: false, attachments: false }
+  return {
+    id,
+    name,
+    start: async () => {},
+    stop: async () => {},
+    getCapabilities: () => capabilities,
+    getHealth: () => ({ status: "running", capabilities }),
+    reconstructTarget: () => ({ channel: "test" }),
+    sendMessage: async () => undefined,
+    replyMessage: async () => undefined,
+    addReaction: async () => {},
+    removeReaction: async () => {},
+    editMessage: async () => {},
+    onMessage: () => {},
+  }
+}
+
 describe("instance migration API", () => {
+  it("keeps operator-chosen connector labels out of public status", async () => {
+    context.connectors.set("private-support-label", connectorStub("private-support-label", "slack"))
+    context.connectors.set("private-ops-label", connectorStub("private-ops-label", "telegram"))
+
+    const status = await request("GET", "/api/status", undefined, false)
+
+    expect(status.status).toBe(200)
+    expect(Object.keys(status.body.connectors).sort()).toEqual(["slack", "telegram"])
+    expect(JSON.stringify(status.body)).not.toContain("private-support-label")
+    expect(JSON.stringify(status.body)).not.toContain("private-ops-label")
+  })
+
+  it("addresses the selected named WhatsApp instance when reading a QR code", async () => {
+    const legacyQr = vi.fn(() => "legacy-qr")
+    const supportQr = vi.fn(() => "support-qr")
+    context.connectors.set("whatsapp", Object.assign(connectorStub("whatsapp", "whatsapp"), { getQrCode: legacyQr }))
+    context.connectors.set("whatsapp-support", Object.assign(connectorStub("whatsapp-support", "whatsapp"), { getQrCode: supportQr }))
+
+    const named = await request("GET", "/api/connectors/whatsapp-support/qr")
+
+    expect(named.status).toBe(200)
+    expect(named.body.qr).toMatch(/^data:image\/png;base64,/)
+    expect(supportQr).toHaveBeenCalledOnce()
+    expect(legacyQr).not.toHaveBeenCalled()
+  })
+
+  it("rejects HTTP connector ids outside the normalized lowercase contract", async () => {
+    const invalid = await request("POST", "/api/connectors/Slack-Support/send", { channel: "C1", text: "hello" })
+    expect(invalid.status).toBe(400)
+    expect(invalid.body.error).toMatch(/connector id/i)
+  })
+
+  it("keeps legacy Remote Discord inbound identity and rejects named route widening", async () => {
+    const legacyDelivery = vi.fn<(message: IncomingMessage) => void>()
+    context.connectors.set("discord", Object.assign(connectorStub("discord", "discord"), { deliverMessage: legacyDelivery }))
+    const body = {
+      sessionKey: "discord:C1",
+      channel: "C1",
+      user: "tester",
+      userId: "U1",
+      text: "hello",
+      messageId: "M1",
+      replyContext: { channel: "C1" },
+    }
+
+    const legacy = await request("POST", "/api/connectors/discord/incoming", body)
+    expect(legacy.status).toBe(200)
+    expect(legacyDelivery).toHaveBeenCalledWith(expect.objectContaining({
+      connector: "discord",
+      sessionKey: "discord:C1",
+    }))
+
+    const namedDelivery = vi.fn<(message: IncomingMessage) => void>()
+    context.connectors.set("discord-ops", Object.assign(connectorStub("discord-ops", "discord"), { deliverMessage: namedDelivery }))
+    const named = await request("POST", "/api/connectors/discord-ops/incoming", body)
+    expect(named.status).toBe(404)
+    expect(namedDelivery).not.toHaveBeenCalled()
+  })
+
   it("adds version and a compact migration summary to status and exposes the canonical contract", async () => {
     const status = await request("GET", "/api/status")
     const migration = await request("GET", "/api/instance-migration")
