@@ -22,6 +22,7 @@ WORKDIR /src
 # recompile better-sqlite3 and node-pty. The rest arrives with `COPY . .` below.
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json tsconfig.base.json .npmrc ./
 COPY scripts/fix-prebuild-permissions.mjs ./scripts/
+COPY packages/gateway-events/package.json ./packages/gateway-events/
 COPY packages/jinn/package.json ./packages/jinn/
 COPY packages/jinn/scripts/fix-node-pty-permissions.mjs ./packages/jinn/scripts/
 COPY packages/web/package.json ./packages/web/

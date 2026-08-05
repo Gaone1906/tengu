@@ -124,6 +124,23 @@ describe.skipIf(process.platform === "win32")("Docker entrypoint runtime cleanup
     expect(source).toContain("command -v flock");
   });
 
+  it("copies every workspace package manifest before installing dependencies", () => {
+    const source = fs.readFileSync(dockerfile, "utf-8");
+    const installIndex = source.indexOf("RUN pnpm install --frozen-lockfile");
+    const packagesDir = path.join(path.dirname(dockerfile), "packages");
+
+    expect(installIndex).toBeGreaterThan(-1);
+    for (const entry of fs.readdirSync(packagesDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const manifest = `packages/${entry.name}/package.json`;
+      if (!fs.existsSync(path.join(path.dirname(dockerfile), manifest))) continue;
+
+      const copyIndex = source.indexOf(`COPY ${manifest} `);
+      expect(copyIndex, `${manifest} must be copied before pnpm install`).toBeGreaterThan(-1);
+      expect(copyIndex, `${manifest} must be copied before pnpm install`).toBeLessThan(installIndex);
+    }
+  });
+
   it("holds an exclusive shared-volume lock before cleanup and releases it on process death", async () => {
     const { home, ready, env } = fixture();
     seedRuntimeRecords(home);
