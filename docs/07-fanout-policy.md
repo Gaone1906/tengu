@@ -1,5 +1,10 @@
 # Fan-out policy — when to parallelise, decided conservatively
 
+> ⚠️ **Amended by [08-pacing-controller.md](08-pacing-controller.md).** The absolute thresholds here
+> ("fan out only below 30% usage") are wrong late in a 5-hour window, where unused capacity is
+> *destroyed* rather than saved. The gates below still hold as hard floors; the pacing controller
+> decides where inside them to sit, and puts **`effort` ahead of fan-out** as the primary throttle.
+
 **Design principle: the executor never decides.** Current models delegate readily — Opus 5 reaches for
 subagents far more than 4.8 did — so "let the agent judge whether to fan out" optimises for exactly
 the behaviour we're trying to bound. Instead:

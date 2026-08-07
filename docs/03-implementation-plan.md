@@ -217,6 +217,8 @@ Runtime can only ever **downgrade** to sequential — never exceed the planner's
 
 **Circuit breakers:** a member halted mid-flight disables fan-out for the window; pace ratio > 1.0 or any merge conflict disables it for the week; fan-out costing more per todo than sequential over 10 samples auto-disables and flags in the stand-up.
 
+**Pacing controller** (step 7c, [08-pacing-controller.md](08-pacing-controller.md)) — new `shared/pacing-controller.ts`. Unused 5-hour capacity is destroyed at reset, so under-spending is a real loss; but the weekly cap means you can't fill every window. Derive a per-window target from the weekly budget (`fairShare = weeklyRemaining / windowsLeft`), compute `paceRatio`, and steer: accelerate below 0.8 when `windowElapsed > 0.6`, throttle above 1.2. **`effort` is the primary lever, fan-out second** — effort burns budget smoothly with no duplication, no merge risk, and no mid-flight-halt risk. No fan-out at all past 85% window elapsed. Evaluated on every (free) telemetry write plus a 60s tick — **not** a polling agent. Requires persisting `sevenDay.used%` at window boundaries (add to step 1).
+
 Surface the current mode **and its reason** in the telemetry bar — "Sequential: weekly pace 1.3× budget" is what tells you the governor is working rather than the system just being slow.
 
 ### 8. Security officer
@@ -257,7 +259,7 @@ Surface the current mode **and its reason** in the telemetry bar — "Sequential
 
 ## Files
 
-**New:** `shared/session-telemetry.ts`, `shared/fanout-policy.ts`, `work-items/progress.ts`, `work-items/standup.ts`, `sessions/handoff.ts`, `security/restore-points.ts`, `web/src/hooks/use-session-telemetry.ts`, `web/src/components/TelemetryBar.tsx`, `web/src/routes/standup/page.tsx`
+**New:** `shared/session-telemetry.ts`, `shared/fanout-policy.ts`, `shared/pacing-controller.ts`, `work-items/progress.ts`, `work-items/standup.ts`, `sessions/handoff.ts`, `security/restore-points.ts`, `web/src/hooks/use-session-telemetry.ts`, `web/src/components/TelemetryBar.tsx`, `web/src/routes/standup/page.tsx`
 
 **Modified:** `shared/usageAwareness.ts`, `shared/engine-limits.ts`, `shared/command-policy.ts` (extend deny-list; add per-tool + path evaluators), `shared/config.ts`, `gateway/hook-endpoint.ts` (dispatch beyond Bash), `gateway/budgets.ts` (call site), `gateway/rate-limit-waiting-resume.ts`, `gateway/hook-registry.ts`, `engines/claude-interactive.ts` (`buildPtyEnv`; `autoApproveSafetyPrompts` ordering), `work-items/{store,departments}.ts` (`workspacePath` on roots; `parallelSafe`/`parallelGroup` on sub-tasks), `cron/{validation,jobs,scheduler}.ts`, `packages/gateway-events/src/index.ts`, `web/src/routes/limits/page.tsx`, `web/src/routes/providers.tsx`
 
@@ -277,10 +279,11 @@ Assuming comfort with TypeScript and React, and no major upstream churn mid-buil
 | 6. Context compaction at 80% | 1–2 days | Includes empirically verifying `CLAUDE_CODE_AUTO_COMPACT_WINDOW` |
 | 7. Continuous loop on Stop | ~1 day | Hook relay path, guarded by the governor |
 | 7b. Fan-out policy | 1–1.5 days | Planner fields + `fanout-policy.ts` arithmetic + circuit breakers |
+| 7c. Pacing controller | 1–1.5 days | Fair-share maths, effort ladder, window-boundary bookkeeping |
 | 8. Security officer | 1.5–2.5 days | Deny-list extension is hours; per-tool + path evaluators and restore points are the bulk |
 | 9. Stand-up | 2–3 days | `workspacePath` migration, aggregation, cached narration, new route |
 
-**Total: roughly 13–21 working days — call it 3–4 weeks solo**, with steps 5 and 9 carrying most of the risk.
+**Total: roughly 14–23 working days — call it 4 weeks solo**, with steps 5 and 9 carrying most of the risk.
 
 Two natural stopping points, both of which stand alone:
 

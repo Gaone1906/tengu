@@ -25,6 +25,7 @@ destroying work.
 | [05-org-structure.md](docs/05-org-structure.md) | Recommended roster, responsibilities, and when to add more |
 | [06-concurrency.md](docs/06-concurrency.md) | Sequential vs parallel — why throughput doesn't scale with agents |
 | [07-fanout-policy.md](docs/07-fanout-policy.md) | How the system decides to parallelise — two gates, fails closed |
+| [08-pacing-controller.md](docs/08-pacing-controller.md) | Spend the window, protect the week — effort before concurrency |
 
 ## Quick orientation
 

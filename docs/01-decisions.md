@@ -188,3 +188,36 @@ on with measured numbers rather than the estimates in D7.
 **Rejected:** executor decides per task (no cross-task context, adds an LLM call per unit of work);
 dispatcher agent decides (reintroduces the coordinator rejected in D6); reviewer decides at gates
 (too late — work already done).
+
+---
+
+## D9 — Pacing controller: spend the window, protect the week (amends D8)
+
+*(see [08-pacing-controller.md](08-pacing-controller.md))*
+
+**Correction:** unused 5-hour capacity is **destroyed at reset, not saved**. At 50% used with an hour
+left, going slow isn't conservative — it wastes ~40% of the window. D8's absolute thresholds ("fan out
+only below 30% usage") get this backwards in the endgame.
+
+**But** a week holds ~33 five-hour windows and the weekly cap is far below 33× the 5-hour cap, so
+maximising every window is exactly what the weekly cap punishes — burn every window and the week ends
+in 2–3 days.
+
+**Resolution:** derive a per-window target from the weekly budget and pace to hit it.
+`fairShare = weeklyRemaining / windowsLeft`; `paceRatio = spentThisWindow / (fairShare × windowElapsed)`.
+Accelerate below 0.8 (only when `windowElapsed > 0.6`), hold 0.8–1.2, throttle above 1.2.
+
+**Second correction: `effort` is the primary throttle, not concurrency.** Effort burns budget smoothly
+with zero duplication, zero merge risk, zero mid-flight-halt risk, and is reversible next task.
+Ladder: accelerate `effort medium→high→xhigh` *then* `fanout 1→2→3`; throttle in reverse. **No fan-out
+past 85% window elapsed** — insufficient runway, and mid-flight halts are the worst case.
+
+Modes: `even` / `balanced` (default) / `eager`. The stated preference ("idle beats trickling") is
+`eager` — front-loads hard, then idles Thursday–Sunday. Start on `balanced`; switch after a week of
+real data.
+
+**Rejected: a polling agent.** It's arithmetic, not judgment; ~48 cold-start sessions/day would spend
+the budget it exists to protect; 30-minute resolution is far too coarse for the endgame; and the
+statusline recorder already emits free, token-free telemetry on every assistant message. Evaluate
+`shared/pacing-controller.ts` on each telemetry write plus a 60s idle tick. **It's a thermostat, not
+an employee.**
