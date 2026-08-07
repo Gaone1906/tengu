@@ -59,6 +59,19 @@ wants a trend line (cost-per-todo over time, weekly pace) — see the open quest
 
 ---
 
+## Mockup
+
+[mockups/limits-page.html](mockups/limits-page.html) — a real, standalone HTML file (open it directly
+in a browser), not a description. Built with the actual verified tokens above: real embedded Hanken
+Grotesk + IBM Plex Mono (not a system-font approximation), both themes properly implemented via
+`data-theme`, the icon rail with the "active = soft fill, never accent" rule honored, and the exact
+Ledger Dark/Light hex values from `globals.css`. Shows the extended Limits page — pacing strip, the new
+per-session cards alongside the existing per-engine cards — plus smaller previews of the Stand-up
+grouped-list pattern and the sub-sub-task verify glyph, both labeled as new. Toggle light/dark with the
+icon in the rail footer.
+
+---
+
 ## What changes, screen by screen
 
 ### 1. Governor + telemetry — extend Limits, don't add a bar
