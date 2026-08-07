@@ -377,3 +377,35 @@ in rather than left as "if needed":
 box ([13-costs.md](13-costs.md) has real 2026 pricing — $40–48/mo personal, $96–126/mo work profile,
 if that's ever wanted). Step 13's boot-start config is identical either way — a laptop just needs to
 actually be on for "on boot" to mean anything.
+
+---
+
+## D15 — Privileged host commands (`pmset disablesleep`) stay local-native, never behind the web gateway
+
+*(see [14-lid-close-mode.md](14-lid-close-mode.md))*
+
+Proposed: a "Close Laptop Mode" toggle in the web dashboard, running `sudo pmset -a disablesleep 1/0`
+with user consent/auth. Directly solves a real footgun (D14/[14](14-lid-close-mode.md) flagged that
+`disablesleep` persists until manually cleared — easy to forget on a daily-driver laptop). **The idea
+is right; the location is wrong.**
+
+**Why not the web app, concretely:** a browser tab has no path to macOS's native privilege-auth dialog;
+the gateway daemon runs as a normal user with no TTY inside an HTTP handler. Making a **web-reachable**
+button actually flip `disablesleep` requires one of three things, all worse than the problem: a
+passwordless `sudoers` rule (a standing elevated capability behind an HTTP endpoint — "authenticate
+each time" stops being true after setup); a signed privileged helper (`SMAppService`) — the same
+code-signing/notarization cost (~3–5 days, $99/yr) D14 already declined for the desktop-app question;
+or running the gateway daemon itself elevated — actively dangerous given it already spawns
+`--dangerously-skip-permissions` Claude sessions gated only by a regex deny-list
+([11](11-deviation-assessment.md)'s "speed bump, not a sandbox").
+
+**Chosen:** a local, native toggle outside the gateway entirely —
+`osascript -e 'do shell script "pmset -a disablesleep 1" with administrator privileges'`, which triggers
+macOS's real native password/Touch ID dialog. No signing needed for a script run locally by its own
+author (notarization is a distribution requirement). Ship as two tiny scripts/Shortcuts now (zero new
+code), fold into the deferred menu-bar glancer (D13) later as two menu items.
+
+**General principle this sets:** privileged host-level actions (power management, disk operations,
+anything needing elevation) stay **local-native, never routed through the web gateway** — the gateway's
+threat model already includes semi-autonomous AI-driven shell execution, and every privileged action
+added to that surface multiplies exactly the risk the security officer (step 10) exists to bound.
