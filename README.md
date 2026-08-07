@@ -24,6 +24,7 @@ destroying work.
 | [04-efficiency.md](docs/04-efficiency.md) | Ongoing discussion: making continuous execution affordable |
 | [05-org-structure.md](docs/05-org-structure.md) | Recommended roster, responsibilities, and when to add more |
 | [06-concurrency.md](docs/06-concurrency.md) | Sequential vs parallel — why throughput doesn't scale with agents |
+| [07-fanout-policy.md](docs/07-fanout-policy.md) | How the system decides to parallelise — two gates, fails closed |
 
 ## Quick orientation
 

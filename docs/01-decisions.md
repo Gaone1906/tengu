@@ -156,3 +156,35 @@ still lands on Opus.
 
 **Measure, don't argue:** compare cost-per-completed-todo for a sequential batch vs a fanned-out one
 once the loop runs. Raise the cap if duplication is smaller than estimated.
+
+---
+
+## D8 — Fan-out is planner-annotated, budget-gated, and fails closed
+
+*(see [07-fanout-policy.md](07-fanout-policy.md))*
+
+**The executor never decides.** Current models over-delegate by default, so "let the agent judge"
+optimises for the behaviour we're bounding. Instead: **a planning-time annotation validated by a
+runtime budget gate**, both must pass, uncertainty resolves to sequential.
+
+- **Gate 1 (planning):** `planner` sets `parallelSafe` (**defaults false**) and `parallelGroup`,
+  justified in the todo body — requires a distinct `workspacePath` or read-only work, no shared files,
+  no ordering dependency. Judged once, by the most capable model, with full decomposition context.
+- **Gate 2 (runtime):** `shared/fanout-policy.ts` — pure arithmetic, no model call. Weekly **pace
+  ratio** (`sevenDay.used% ÷ weekElapsedFraction`) is the primary brake; plus ≥90 min window runway,
+  projected 5h spend < 60%, and **≥20 completed todos of cost history** before fan-out is ever
+  permitted.
+
+Degree ladder: `<15%/<30%` → 3, `<30%/<50%` → 2, else 1. Hard cap 3. Runtime can only **downgrade**.
+
+Every threshold sits well below the 80% halt line — fan-out happens when comfortably ahead of budget,
+never to catch up. Circuit breakers disable it for the window (member halted mid-flight) or the week
+(pace > 1.0, merge conflict), and it auto-disables if measured cost-per-todo is worse than sequential
+over 10 samples.
+
+**Consequence:** the first week runs sequential by construction (no cost history), so the policy turns
+on with measured numbers rather than the estimates in D7.
+
+**Rejected:** executor decides per task (no cross-task context, adds an LLM call per unit of work);
+dispatcher agent decides (reintroduces the coordinator rejected in D6); reviewer decides at gates
+(too late — work already done).

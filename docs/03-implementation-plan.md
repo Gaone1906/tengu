@@ -202,9 +202,22 @@ Enforce it at the **same seam as budgets**: `packages/jinn/src/gateway/budgets.t
 - When `context_window.used_percentage ≥ 80`, have the governor inject a turn telling the agent to write its handoff file and then run `/compact`. Claude Code's `PreCompact` hook already relays through `HOOK_RELAY_SCRIPT`, so Jinn can record the compaction in the activity feed.
 - `SessionStart` (already wired in `buildSessionSettings()`) fires again after compaction with `source: "compact"` — use it to re-inject the handoff file, so post-compaction context still knows what was done and what remains.
 
-### 7. Continuous loop
+### 7. Continuous loop + fan-out policy
 
 The repeat-until-done behaviour: on `Stop`, if the governor says `run` and the employee has an open todo, dispatch the next sub-task instead of idling. Implement in the existing `Stop` hook relay path (`gateway/hook-registry.ts` / `hook-endpoint.ts`), guarded by the governor so the loop can never outrun the budget.
+
+**Assignment is a query, not a model call** — next open sub-task by priority. No dispatcher employee.
+
+**Fan-out** (full policy in [07-fanout-policy.md](07-fanout-policy.md)) — two gates, both must pass, uncertainty resolves to sequential:
+
+1. **Planning-time annotation.** `planner` writes `parallelSafe` (defaults **false**) and `parallelGroup` onto sub-tasks, justified in the todo body. Requires distinct `workspacePath` or read-only work, no shared files, no ordering dependency. New fields on `work-items/store.ts`.
+2. **Runtime budget gate.** New `shared/fanout-policy.ts` → `allowFanout(telemetry, history, config): 1|2|3`. Pure arithmetic, no model call, evaluated beside the governor. Weekly **pace ratio** (`sevenDay.used% ÷ weekElapsedFraction`) is the primary brake; also requires ≥90 min of window runway, projected 5h spend under 60%, and ≥20 completed todos of cost history before fan-out is ever permitted.
+
+Runtime can only ever **downgrade** to sequential — never exceed the planner's group. Hard cap 3.
+
+**Circuit breakers:** a member halted mid-flight disables fan-out for the window; pace ratio > 1.0 or any merge conflict disables it for the week; fan-out costing more per todo than sequential over 10 samples auto-disables and flags in the stand-up.
+
+Surface the current mode **and its reason** in the telemetry bar — "Sequential: weekly pace 1.3× budget" is what tells you the governor is working rather than the system just being slow.
 
 ### 8. Security officer
 
@@ -244,9 +257,9 @@ The repeat-until-done behaviour: on `Stop`, if the governor says `run` and the e
 
 ## Files
 
-**New:** `shared/session-telemetry.ts`, `work-items/progress.ts`, `work-items/standup.ts`, `sessions/handoff.ts`, `security/restore-points.ts`, `web/src/hooks/use-session-telemetry.ts`, `web/src/components/TelemetryBar.tsx`, `web/src/routes/standup/page.tsx`
+**New:** `shared/session-telemetry.ts`, `shared/fanout-policy.ts`, `work-items/progress.ts`, `work-items/standup.ts`, `sessions/handoff.ts`, `security/restore-points.ts`, `web/src/hooks/use-session-telemetry.ts`, `web/src/components/TelemetryBar.tsx`, `web/src/routes/standup/page.tsx`
 
-**Modified:** `shared/usageAwareness.ts`, `shared/engine-limits.ts`, `shared/command-policy.ts` (extend deny-list; add per-tool + path evaluators), `shared/config.ts`, `gateway/hook-endpoint.ts` (dispatch beyond Bash), `gateway/budgets.ts` (call site), `gateway/rate-limit-waiting-resume.ts`, `gateway/hook-registry.ts`, `engines/claude-interactive.ts` (`buildPtyEnv`; `autoApproveSafetyPrompts` ordering), `work-items/{store,departments}.ts` (`workspacePath` on roots), `cron/{validation,jobs,scheduler}.ts`, `packages/gateway-events/src/index.ts`, `web/src/routes/limits/page.tsx`, `web/src/routes/providers.tsx`
+**Modified:** `shared/usageAwareness.ts`, `shared/engine-limits.ts`, `shared/command-policy.ts` (extend deny-list; add per-tool + path evaluators), `shared/config.ts`, `gateway/hook-endpoint.ts` (dispatch beyond Bash), `gateway/budgets.ts` (call site), `gateway/rate-limit-waiting-resume.ts`, `gateway/hook-registry.ts`, `engines/claude-interactive.ts` (`buildPtyEnv`; `autoApproveSafetyPrompts` ordering), `work-items/{store,departments}.ts` (`workspacePath` on roots; `parallelSafe`/`parallelGroup` on sub-tasks), `cron/{validation,jobs,scheduler}.ts`, `packages/gateway-events/src/index.ts`, `web/src/routes/limits/page.tsx`, `web/src/routes/providers.tsx`
 
 ## Effort
 
@@ -263,10 +276,11 @@ Assuming comfort with TypeScript and React, and no major upstream churn mid-buil
 | 5. Handoff + auto-resume | **2–3 days** | Hardest. Turn injection, one-shot cron kind, clearing `waiting` |
 | 6. Context compaction at 80% | 1–2 days | Includes empirically verifying `CLAUDE_CODE_AUTO_COMPACT_WINDOW` |
 | 7. Continuous loop on Stop | ~1 day | Hook relay path, guarded by the governor |
+| 7b. Fan-out policy | 1–1.5 days | Planner fields + `fanout-policy.ts` arithmetic + circuit breakers |
 | 8. Security officer | 1.5–2.5 days | Deny-list extension is hours; per-tool + path evaluators and restore points are the bulk |
 | 9. Stand-up | 2–3 days | `workspacePath` migration, aggregation, cached narration, new route |
 
-**Total: roughly 12–19 working days — call it 3–4 weeks solo**, with steps 5 and 9 carrying most of the risk.
+**Total: roughly 13–21 working days — call it 3–4 weeks solo**, with steps 5 and 9 carrying most of the risk.
 
 Two natural stopping points, both of which stand alone:
 
