@@ -308,8 +308,10 @@ code — the gap is that **upstream has no daemon supervisor at all** (confirmed
 the Homebrew formula, no systemd/launchd files anywhere in the repo; Docker's `restart: unless-stopped`
 only survives container crashes, not a laptop going to sleep).
 
-- `launchd` `.plist` (macOS) / systemd user unit (Linux), restart-on-failure. Required regardless of
-  everything else — closing the laptop lid suspends the `node-pty` child processes mid-unit, below any
+- `launchd` `.plist` (macOS, `RunAtLoad: true`) / systemd user unit (Linux, `WantedBy=default.target`
+  + `systemctl --user enable`), **starts on boot/login and restarts on failure** (D14 — locked, not
+  optional). Required regardless of everything else — closing the laptop lid suspends the `node-pty`
+  child processes mid-unit, below any
   layer the governor can recover from.
 - `caffeinate` / `systemd-inhibit` wrapper, **gated on pacing-controller state** — assert only while
   there's queued work, or it defeats the controller's own decision to idle overnight for weekly-budget
