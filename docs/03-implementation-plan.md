@@ -301,6 +301,31 @@ recurring background job must not compete with the work.
 Cron produces a scheduled snapshot plus on-demand refresh. Security blocks and circuit-breaker trips
 appear inline as incidents.
 
+### 13. Process supervision — *~1 day*
+
+Full reasoning in [12-deployment-and-ux.md](12-deployment-and-ux.md). Mechanical, no Jinn-internal
+code — the gap is that **upstream has no daemon supervisor at all** (confirmed: no `service` block in
+the Homebrew formula, no systemd/launchd files anywhere in the repo; Docker's `restart: unless-stopped`
+only survives container crashes, not a laptop going to sleep).
+
+- `launchd` `.plist` (macOS) / systemd user unit (Linux), restart-on-failure. Required regardless of
+  everything else — closing the laptop lid suspends the `node-pty` child processes mid-unit, below any
+  layer the governor can recover from.
+- `caffeinate` / `systemd-inhibit` wrapper, **gated on pacing-controller state** — assert only while
+  there's queued work, or it defeats the controller's own decision to idle overnight for weekly-budget
+  reasons. Small addition to `shared/pacing-controller.ts`, not a new module.
+- `tengu service install/start/stop/status` CLI subcommands.
+
+**Explicitly not building:** an Electron/Tauri wrapper. It doesn't address the actual gap (the daemon
+still has to be running somewhere) and it's the single most against-the-grain thing we could add to the
+fork — permanently divergent, nothing to merge back. The web dashboard already is the app; a pinned
+browser tab plus real OS notifications on halt/resume/council-input covers what people actually want
+from "an app." A menu-bar status glancer (~50-line poller against the existing telemetry API) is real
+value and cheap, but deferred — additive polish, not core.
+
+**Open before building:** does this run on the daily laptop, or a dedicated always-on box? Changes
+whether the sleep-prevention piece matters at all.
+
 ### 12. Work profile & council — *4–6 days*
 
 [09-work-profile-and-council.md](09-work-profile-and-council.md).

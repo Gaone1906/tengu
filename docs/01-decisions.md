@@ -311,3 +311,38 @@ checklist inside the sub-task body (weaker — no transitions, not countable in 
 
 **Correction to D11's open question:** root/task/sub-task/sub-sub-task is 0/1/2/3, which *fits*
 `depth ≤ 3` if depth is 0-indexed. Verify in `work-items/relations.ts` before assuming a migration.
+
+---
+
+## D13 — Local web app, not a desktop wrapper; the real gap is daemon supervision
+
+*(see [12-deployment-and-ux.md](12-deployment-and-ux.md))*
+
+**"Web app vs desktop app" is already decided by forking Jinn** — it's a local Node gateway + a
+browser-rendered dashboard, no native binary anywhere upstream (confirmed: no `electron/`, `tauri/`,
+`desktop/` directory in the repo). Local-first, not hosted — nothing runs anywhere but the user's
+machine unless deliberately pointed elsewhere.
+
+**The real gap, verified:** upstream has **no daemon supervisor at all** — no `service` block in the
+Homebrew formula, no systemd/launchd anywhere. Docker's `restart: unless-stopped` only survives
+container crashes, not a host going to sleep, and binds to `127.0.0.1` only by design. The pairing
+mechanism (`pairing-challenge.ts`) is a **local filesystem proof**, not remote-device auth — the whole
+posture assumes one operator on one machine watching a tab they opened. Same supervised-autonomy root
+cause as D11, showing up at the infrastructure layer.
+
+Concretely: closing a laptop lid suspends the `node-pty` sessions mid-unit — below any layer the
+governor can recover from.
+
+**Chosen:** OS-level service supervision (`launchd`/systemd, restart-on-failure) — required regardless
+of anything else. Plus `caffeinate`/`systemd-inhibit`, **gated on pacing-controller state** so it never
+overrides the controller's own decision to idle overnight for weekly-budget reasons. A dedicated
+always-on host is the durable long-term answer but a config decision, not new code — don't build it
+speculatively.
+
+**Rejected: an Electron/Tauri desktop wrapper.** Doesn't address the actual gap (the daemon still has
+to run somewhere), and it's the single most against-the-grain addition available — a permanently
+divergent parallel codebase with its own packaging/signing/auto-update, nothing mergeable upstream.
+
+**Deferred, not rejected:** a menu-bar status glancer — a small poller against the existing telemetry
+API showing state and firing OS notifications on halt/resume/council-input. Real value, genuinely
+cheap, but additive polish that can land any time after the core loop works.
