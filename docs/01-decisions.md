@@ -409,3 +409,45 @@ code), fold into the deferred menu-bar glancer (D13) later as two menu items.
 anything needing elevation) stay **local-native, never routed through the web gateway** — the gateway's
 threat model already includes semi-autonomous AI-driven shell execution, and every privileged action
 added to that surface multiplies exactly the risk the security officer (step 10) exists to bound.
+
+---
+
+## D16 — UI extends Jinn's existing screens; no standalone TelemetryBar (corrects step 2)
+
+*(see [15-ui-ux.md](15-ui-ux.md))*
+
+**Verified against actual source, not route names.** Jinn has a real, deliberate design system —
+"Ledger Dark/Light," two hand-tuned palettes (warm charcoal `#14130F` / warm paper `#F4F1E8`, amber
+accent `#E0A33C`/`#926516`), Hanken Grotesk + IBM Plex Mono, a 56px icon-only nav rail with floating
+pills instead of fixed headers, and an explicit rule: *"Active item = soft fill, NEVER accent."* No
+persistent top bar anywhere, by design.
+
+**Correction:** step 2's `TelemetryBar.tsx` "mounted in the shared layout" doesn't fit this shell —
+there is no persistent bar anywhere in the app to mount it in. Building one would be the most visible
+way to make Tengu feel bolted-on rather than native.
+
+**Chosen instead — extend existing screens rather than add new chrome:**
+- Governor/telemetry → a status dot on the Limits **rail icon** (ambient, zero new chrome) + extend
+  the **existing Limits page** (already has status-dot cards, threshold-colored bars, reset countdowns)
+  with per-session cards and a pacing/fan-out state strip, rather than a parallel dashboard.
+- Council phase progress → **no new UI** — step 12 already generates a Jinn workflow from the council's
+  output, and Workflow's existing Runs lens (`run-inspector.tsx`, a 20KB step inspector) renders
+  multi-phase execution for free once the council's phases are workflow steps.
+- Sub-sub-task checkpoints → deeper nodes in the todo board's existing `card-tree.tsx` subtree
+  expansion, plus one new verify-status glyph reusing the existing status-dot visual language.
+- Security incidents → a filtered lens on the existing `/logs` Activity page, not a new page.
+- Stand-up → the one genuinely new **route**, following Cron's existing grouped-list pattern
+  (employee-groups → project-groups; job-rows → department-rows).
+- Profile switcher → **possibly zero new UI** — the rail already has a `WorkspaceSwitcher`; whether it
+  supports separate `JINN_INSTANCE`s or just views within one is unverified and must be checked before
+  building a parallel one.
+
+**Net effect:** the honest new-UI surface is small — per-session Limits cards, a pacing/fan-out strip,
+the Stand-up route, one new glyph, one new filter lens, and possibly nothing for profiles. Most of "how
+Tengu looks" is "how Jinn already looks," which is the right outcome given D1/D11's whole thesis of
+reusing what's legitimately reusable.
+
+**Gap noted, not yet resolved:** no charting library exists anywhere in the app — every stat today is a
+hand-rolled progress bar. A real trend line (cost-per-todo, weekly pace) needs either a hand-rolled SVG
+sparkline (matches the codebase's evident preference for small custom primitives) or a new dependency.
+Decide once the data shape is known.

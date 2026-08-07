@@ -152,13 +152,19 @@ per-window delta.
 
 ### 2. Live GUI surface — *1–2 days*
 
+**Corrected per [D16](01-decisions.md#d16--ui-extends-jinns-existing-screens-no-standalone-telemetrybar-corrects-step-2)/[15-ui-ux.md](15-ui-ux.md)** — verified against actual source rather than assumed. Jinn's
+nav has no persistent top bar anywhere (56px icon rail + floating pills, deliberately); a standalone
+`TelemetryBar` mounted in a shared layout doesn't fit and would be the most visible way to make this
+feel bolted-on.
+
 `session.telemetry` event in `packages/gateway-events/src/index.ts`, broadcast on the existing
 live-events channel, debounced ~1s. New `web/src/hooks/use-session-telemetry.ts` (model on
-`routes/limits/use-engine-limits.ts`) and `web/src/components/TelemetryBar.tsx`, mounted in the shared
-layout. Shows account 5h/7d bars with the 80% line marked and reset countdowns; per-agent rows with
-model, context remaining, current todo; overall and per-employee completion. Green <60 / amber 60–80 /
-red ≥80. Copy OpenClaw's per-window bar design. Extend `routes/limits/page.tsx` rather than competing
-with it.
+`routes/limits/use-engine-limits.ts`). Extend `routes/limits/page.tsx` — it already has exactly the
+right visual vocabulary (status-dot cards, threshold-colored progress bars at 90%, reset countdowns):
+add a per-session card section (model, context remaining %, current todo) alongside the existing
+per-engine cards, plus a pacing/fan-out state strip at the top. Ambient awareness from any screen via a
+small status dot on the Limits rail icon itself — green/amber/red, same language Cron already uses —
+rather than new chrome. Green <60 / amber 60–80 / red ≥80.
 
 ### 3. Progress rollups — *0.5–1 day*
 
