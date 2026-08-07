@@ -244,3 +244,36 @@ latency. That has two consequences worth holding onto:
 (git-/data-destructive patterns) and restore points. Unattended is exactly when nobody is watching an
 agent do something irreversible, and the deny-list extension is a few hours against an existing,
 already-enforced function.
+
+---
+
+## D11 — Two profiles; per-service employees in work; a council that plans across them
+
+*(see [09-work-profile-and-council.md](09-work-profile-and-council.md))*
+
+**Profiles cost nothing.** `shared/home.ts` honours `JINN_HOME` and `JINN_INSTANCE`, and `src/instances/`
+(create/start/directory/access) is a first-class upstream feature. `JINN_INSTANCE=personal` → `~/.personal`,
+`=work` → `~/.work`. Separate employees, skills, cron, ledger, DB, port.
+
+**The work profile overturns D6 — legitimately.** D6 named the exception: promote a department to its own
+employee when the context genuinely differs. Separate services are separate repos with separate domain
+models, so there is no shared orientation to duplicate. Same test, opposite answer. Cross-service work is
+also the cleanest fan-out available (distinct repos, no merge conflicts) — though the weekly budget still
+governs the degree.
+
+**Council replaces `planner` in the work profile**: intake (interactive Opus) → impact triage via a service
+registry (Opus) → **parallel read-only consultation** by each affected service against its own knowledge
+base (Sonnet) → synthesis into a dependency graph, todo tree, and a generated **Jinn workflow** (Opus) →
+**mandatory human approval** → governed execution. Opus on the reasoning phases, Sonnet on the widest one.
+
+**Blocker found:** `--disallowedTools AskUserQuestion,ExitPlanMode` means agents cannot ask clarifying
+questions. Resolution: don't fork the arg builder — the council asks in **chat** and idles for a reply.
+Requires `interactive: true` on the council employee and excluding interactive sessions from Stop-hook
+continuation, or it answers its own questions.
+
+**Knowledge bases are Jinn skills** (no knowledge subsystem exists — confirmed). `SERVICE.md` per repo,
+bootstrapped once, appended to after each completed todo or it rots.
+
+**Unresolved and important:** two instances share one Claude account and therefore one set of limits, but
+each would run its own governor believing it owns the whole budget. **The pacing controller must read
+account-level state shared across instances** before both run concurrently.

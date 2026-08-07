@@ -257,6 +257,38 @@ Surface the current mode **and its reason** in the telemetry bar — "Sequential
 
 **Surfacing it:** a Jinn cron job produces a stored stand-up snapshot on a schedule, plus an on-demand refresh button. New route `packages/web/src/routes/standup/page.tsx` — projects as cards, departments as rows within each, every row showing a progress bar, done/left counts, blocked items, and the narrative paragraph. Security-officer blocks from step 8 appear inline as incidents, which is where they become genuinely useful: an agent that tried something destructive shows up in the morning report attributed to a department.
 
+### 10. Work profile & council *(work profile only)*
+
+Full design in [09-work-profile-and-council.md](09-work-profile-and-council.md).
+
+**Profiles are free** — `JINN_INSTANCE=personal` / `=work` (`shared/home.ts`, `src/instances/`).
+Separate employees, skills, cron, ledger, DB, port.
+
+**Roster (work):** `council` (executive, Opus, **interactive**) subsumes `planner`; one **senior Sonnet
+employee per service** (`onboarding`, `kyc`, `mobile-backend`, `app`, `address-service`), each with
+`cwd` = its repo and a Jinn **skill** as its knowledge base; plus `reviewer`, `security`, `scribe`.
+This is the exception [D6](01-decisions.md#d6--departments-are-labels-not-agents) named — genuinely
+distinct repos and domains, so no orientation is duplicated.
+
+**Council flow:** intake (interactive, Opus) → impact triage against a service registry (Opus) →
+**parallel read-only consultation** by each affected service (Sonnet) → synthesis into a dependency
+graph and a generated **Jinn workflow** + todo tree (Opus) → **mandatory human approval** → governed
+execution.
+
+**Required change:** `buildInteractiveArgs()` passes `--disallowedTools AskUserQuestion,ExitPlanMode`,
+so agents cannot ask clarifying questions. Don't fork the arg builder — the council asks in **chat**
+and the session idles awaiting a reply. But add `interactive: true` to the council employee and
+**exclude interactive sessions from Stop-hook continuation** (step 7), or the council answers its own
+questions and proceeds on invented requirements.
+
+**Knowledge bases:** `SERVICE.md` per repo (purpose, owns, contracts, integration points, invariants,
+gotchas) surfaced as a Jinn skill. One-time bootstrap task per service. Each completed todo appends
+what was learned — without that they're stale in a month and routing silently degrades.
+
+**Blocker to check first:** work items cap at `depth ≤ 3`. Project root → task → sub-task →
+sub-sub-task is four levels. Check `work-items/relations.ts`; may need the cap raised or the project
+root modelled outside the tree.
+
 ## Files
 
 **New:** `shared/session-telemetry.ts`, `shared/fanout-policy.ts`, `shared/pacing-controller.ts`, `work-items/progress.ts`, `work-items/standup.ts`, `sessions/handoff.ts`, `security/restore-points.ts`, `web/src/hooks/use-session-telemetry.ts`, `web/src/components/TelemetryBar.tsx`, `web/src/routes/standup/page.tsx`
@@ -282,8 +314,9 @@ Assuming comfort with TypeScript and React, and no major upstream churn mid-buil
 | 7c. Pacing controller | 1–1.5 days | Fair-share maths, effort ladder, window-boundary bookkeeping |
 | 8. Security officer | 1.5–2.5 days | Deny-list extension is hours; per-tool + path evaluators and restore points are the bulk |
 | 9. Stand-up | 2–3 days | `workspacePath` migration, aggregation, cached narration, new route |
+| 10. Work profile & council | 4–6 days | Service registry, skills bootstrap, council workflow, interactive-session handling, depth fix |
 
-**Total: roughly 14–23 working days — call it 4 weeks solo**, with steps 5 and 9 carrying most of the risk.
+**Total: roughly 18–29 working days — ~4 weeks for the personal profile, ~6 with the work profile and council**, with steps 5 and 9 carrying most of the risk.
 
 Two natural stopping points, both of which stand alone:
 

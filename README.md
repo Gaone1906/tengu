@@ -26,6 +26,7 @@ destroying work.
 | [06-concurrency.md](docs/06-concurrency.md) | Sequential vs parallel — why throughput doesn't scale with agents |
 | [07-fanout-policy.md](docs/07-fanout-policy.md) | How the system decides to parallelise — two gates, fails closed |
 | [08-pacing-controller.md](docs/08-pacing-controller.md) | Spend the window, protect the week — effort before concurrency |
+| [09-work-profile-and-council.md](docs/09-work-profile-and-council.md) | Personal vs work profiles; per-service agents; the council flow |
 
 ## Quick orientation
 

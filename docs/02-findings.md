@@ -109,6 +109,40 @@ Hardcoded deny-list:
 patterns; no workspace path confinement; no restore points. And since `--dangerously-skip-permissions`
 is set and safety prompts are auto-approved, **this deny-list is the only gate**.
 
+## ⚠️ Source-listing caveat
+
+Early file lists came from GitHub's **recursive tree API, which truncates** on a repo this size — the
+summariser filled gaps with plausible-but-wrong paths. Two have already 404'd
+(`gateway/static-web-assets.ts`, `gateway/knowledge-route.ts`). **Trust only listings from the
+`/contents/` API** (verified below); treat any other `gateway/*.ts` name in these notes as unconfirmed
+until checked.
+
+**There is no knowledge-base subsystem.** Confirmed by listing `gateway/` — the only matches are
+`skills.ts`, `workflow-api.ts`, `workflow-approval-caller.ts`, `workflow-todo-binding.ts`,
+`workflow-todo-surface.ts`. Nothing for knowledge, notes, instances, delegation, or dispatch.
+
+## Instances — profiles are a first-class feature
+
+`shared/home.ts`:
+
+```
+if (process.env.JINN_HOME) return path.resolve(process.env.JINN_HOME);
+// else JINN_INSTANCE (default "jinn") → ~/.{instance}
+```
+
+`src/instances/` = `access.ts`, `create.ts`, `directory.ts`, `start.ts` (+ tests each). So separate
+profiles need **zero code** — `JINN_INSTANCE=personal` / `JINN_INSTANCE=work`.
+
+## Workflows — the pipeline primitive
+
+`src/workflows/` = `bindings`, `contract`, `failure`, `import-v1`, `index`, `issues`, `model`,
+`output`, `repository{,-migrations,-run-transaction,-runs,-support}`, `runner`, `runtime`, `service`,
+`session-executor`, `todo-approval-ref`, `trigger-service`, `validation`.
+
+Plus `gateway/workflow-todo-binding.ts` and `workflow-todo-surface.ts` — **workflow nodes bind to
+todos**. Sequential / conditional / parallel / switch paths, per-phase engine+model, approval gates.
+A generated pipeline doesn't need a new execution engine.
+
 ## Org and work items
 
 - `shared/types.ts` — `Employee { name, system?, displayName, department, rank: "executive"|"manager"|"senior"|"employee", engine, model, persona, ... }`.
