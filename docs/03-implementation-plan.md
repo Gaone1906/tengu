@@ -1,4 +1,4 @@
-# Implementation plan — Jinn fork
+# Implementation plan — Tengu (a Jinn fork)
 
 Consolidated build plan. Supersedes the earlier draft; incorporates decisions **D1–D12** from
 [01-decisions.md](01-decisions.md). Design rationale lives in the topic docs — this file is what you

@@ -1,7 +1,11 @@
-# jinn — working notes
+# Tengu — working notes
 
-Planning workspace for a fork of [hristo2612/jinn](https://github.com/hristo2612/jinn): an autonomous,
+A fork of [hristo2612/jinn](https://github.com/hristo2612/jinn), named for the mountain guardian of
+Japanese folklore — famously skilled, watches from places humans don't go. **Tengu** is an autonomous,
 usage-governed AI agent org running on a Claude Max 5x ($100) subscription.
+
+Publishing name (not yet published): npm `tengu-cli`, binary `tengu`, GitHub `tengu-cli` — matching
+Jinn's own `jinn-cli` convention. Confirmed available on both npm and GitHub as of 2026-08-07.
 
 **Status:** design complete, no code yet. Nothing installed (`~/.jinn` does not exist).
 [03-implementation-plan.md](docs/03-implementation-plan.md) is consolidated and ready to execute;
@@ -31,6 +35,13 @@ destroying work.
 | [09-work-profile-and-council.md](docs/09-work-profile-and-council.md) | Personal vs work profiles; per-service agents; the council flow |
 | [10-checkpointing.md](docs/10-checkpointing.md) | Sub-sub-task checkpoints, verify-before-act idempotency, graceful stops |
 | [11-deviation-assessment.md](docs/11-deviation-assessment.md) | How far this is from stock Jinn, and where the fork risk concentrates |
+
+## Naming note
+
+Throughout these docs, **"Jinn"** refers to the upstream project (`hristo2612/jinn`) and its actual
+behavior, commands, and environment variables (`jinn setup`, `JINN_HOME`, `~/.jinn`, etc.) — those
+stay literal since they describe real upstream code. **"Tengu"** refers to our fork as a product.
+Where a doc says "the fork" or "our fork" generically, that's Tengu.
 
 ## Quick orientation
 

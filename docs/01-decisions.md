@@ -6,7 +6,7 @@ Newest decisions at the bottom. Each records what we chose, the reasoning, and w
 
 ## D1 — Fork Jinn, not OpenClaw
 
-**Chosen:** fork `hristo2612/jinn`.
+**Chosen:** fork `hristo2612/jinn`. Our fork is named **Tengu** — see the README's naming note.
 
 Both are MIT TypeScript pnpm monorepos with a local gateway daemon and a web dashboard, but they're
 built for different jobs.
