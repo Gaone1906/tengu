@@ -126,3 +126,33 @@ you do.
 
 **Add early:** a `scribe` on Haiku/Sonnet-`low` for stand-up narration — it's a fixed recurring
 background cost and must not sit on the work's engine.
+
+---
+
+## D7 — Sequential default, bounded fan-out (amends D2)
+
+*(see [06-concurrency.md](06-concurrency.md))*
+
+Re-examined 1 agent × 10 tasks vs 10 agents × 1 task. **Not token-equivalent**: ten agents duplicate
+orientation (~9×O, roughly 25–50% overhead for related tasks in one repo), plus merge coordination and
+a burst of simultaneous Opus review gates.
+
+**The throughput intuition inverts.** The 5-hour limit caps *usage* in a rolling window, so work
+available per window is fixed by the cap, not by concurrency. Parallelism doesn't raise the ceiling —
+it reaches it in ~45 minutes and then idles ~4h15m, delivering *less* total work because of the
+duplication overhead. For sustained operation the weekly cap binds, and higher tokens-per-task means
+lower weekly output. Parallelism buys **latency, not throughput**.
+
+Context-window pressure genuinely does drop with single-task agents — but compaction is the cheap,
+already-solved problem; trading it for duplicated orientation and merge cost is a bad exchange.
+
+**Amendment to D2:** sequential remains the default for sustained backlog work. Allow bounded fan-out
+— **cap 2–3** — for genuinely independent contexts (separate repos/services), freely for read-only
+investigation, and deliberately for deadline bursts with headroom. Fan-out must be **governor-aware**:
+only when 5-hour and 7-day usage are both well under threshold.
+
+Executor fan-out is cheaper than it looks (Sonnet draws from the ~9× bucket), but the review burst
+still lands on Opus.
+
+**Measure, don't argue:** compare cost-per-completed-todo for a sequential batch vs a fanned-out one
+once the loop runs. Raise the cap if duplication is smaller than estimated.

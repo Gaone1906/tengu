@@ -124,7 +124,33 @@ The sensor is **already built and running**. This is the single most important f
 
 ## Approach
 
-Fork `hristo2612/jinn`, implement in-tree in seven steps. Steps 1–3 deliver the GUI on their own and are worth landing first.
+Fork `hristo2612/jinn`, implement in-tree in nine steps, after a config-only step 0. Steps 1–3 deliver the GUI on their own and are worth landing first.
+
+### 0. Org and model configuration (no fork required)
+
+Four employees in `~/.jinn/employees/`, per [05-org-structure.md](05-org-structure.md):
+
+| Employee | Rank | Engine / model | Effort | Responsibility |
+|---|---|---|---|---|
+| `planner` | executive | Claude / Opus 5 | `high` | Decompose project roots into independently assignable, department-tagged sub-tasks in the ledger |
+| `engineer` | employee | Claude / **Sonnet 5** | `medium` | The recursive code/test loop, across all departments |
+| `reviewer` | manager | Claude / Opus 5 | `high` | Approve/reject at **parent-todo gates only** |
+| `security` | executive | — (`system: true`) | — | Command policy, path confinement, restore points; zero tokens |
+
+Reporting line `planner → reviewer → engineer`; `security` sits outside the delegation chain.
+
+**Departments are labels on `work_items`, not agents** — one executor covers backend, frontend, and
+database in a single warm session. Promote a department to its own employee only when the context it
+needs genuinely differs (different repo/stack/credentials).
+
+Personas carry the efficiency instructions from [04-efficiency.md](04-efficiency.md): `engineer` gets
+scope discipline, **no** verification scaffolding, a subagent cap, and ledger-before-filesystem on
+resume; `reviewer` gets report-everything-filter-downstream.
+
+Add a `scribe` (Haiku / Sonnet `low`) when step 9 ships — stand-up narration is a fixed recurring
+cost and must not sit on the work's engine.
+
+Confirm the YAML field names against `packages/jinn/template/` before writing these.
 
 ### 1. Per-session telemetry aggregation (backend)
 
