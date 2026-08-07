@@ -289,6 +289,44 @@ what was learned — without that they're stale in a month and routing silently 
 sub-sub-task is four levels. Check `work-items/relations.ts`; may need the cap raised or the project
 root modelled outside the tree.
 
+### 11. Checkpointing & idempotency
+
+Full design in [10-checkpointing.md](10-checkpointing.md). **Interruption is the primary control flow,
+not an error path** — the governor halts several times a day, so this is execution model, not recovery
+tooling.
+
+**Granularity:** one **sub-task per session**; **sub-sub-tasks** (depth 3, ~10–20 min each) are the
+atomic checkpoint. Size them so losing one to a hard cut is cheap.
+
+**A checkpoint is a pair, written together, commit first:** git commit (`JIN-42.3: <what>`) **and**
+ledger status transition. Status without a commit claims work that isn't durable; a commit without
+status gets redone.
+
+**Idempotency via verify-before-act.** Every sub-sub-task carries a machine-checkable `verify` (a
+command that exits 0). Execution: run `verify` → pass means mark done and skip → otherwise do the work
+→ commit → re-run `verify` → mark done. Decomposition rule for planner/council personas: *a
+sub-sub-task without a machine-checkable done-criterion isn't decomposed enough.* Route `verify`
+commands through `evaluateCommandPolicy` — they're model-generated shell.
+
+**Reconciliation on resume** (extend `work-items/reconcile.ts`): for each not-done sub-sub-task in the
+current sub-task, run `verify`; passing means the crash landed between work and status, so mark done.
+Costs no model tokens. Order: reconcile → ledger → handoff → work. **Ledger is authoritative; handoff
+is narrative.**
+
+**Soft ceiling** (amends step 7c): `softCeiling = hard − estCostOfOneUnit` (~75%). At each unit
+boundary, don't start a unit that would cross the hard line. A clean stop at 78% beats a hard cut at
+80%, because the cut discards in-flight work.
+
+**WIP rescue:** on a hard cut, commit on-disk edits to `refs/jinn/wip/<sessionId>`, record the ref in
+the handoff, restore and re-`verify` on resume.
+
+**Consequence — step 5's handoff shrinks** to in-flight state only (interrupted unit, what was tried,
+WIP ref, surprises). The ledger already records what was done.
+
+**Check first:** is `depth` 0-indexed in `work-items/relations.ts`? Root/task/sub-task/sub-sub-task is
+0/1/2/3 and fits `depth ≤ 3` if so — otherwise it needs a migration, or the fallback (a structured
+`verify`-per-item checklist in the sub-task body).
+
 ## Files
 
 **New:** `shared/session-telemetry.ts`, `shared/fanout-policy.ts`, `shared/pacing-controller.ts`, `work-items/progress.ts`, `work-items/standup.ts`, `sessions/handoff.ts`, `security/restore-points.ts`, `web/src/hooks/use-session-telemetry.ts`, `web/src/components/TelemetryBar.tsx`, `web/src/routes/standup/page.tsx`
@@ -315,8 +353,9 @@ Assuming comfort with TypeScript and React, and no major upstream churn mid-buil
 | 8. Security officer | 1.5–2.5 days | Deny-list extension is hours; per-tool + path evaluators and restore points are the bulk |
 | 9. Stand-up | 2–3 days | `workspacePath` migration, aggregation, cached narration, new route |
 | 10. Work profile & council | 4–6 days | Service registry, skills bootstrap, council workflow, interactive-session handling, depth fix |
+| 11. Checkpointing & idempotency | 2–3 days | `verify` field, commit+status pairing, reconcile pass, soft ceiling, WIP rescue |
 
-**Total: roughly 18–29 working days — ~4 weeks for the personal profile, ~6 with the work profile and council**, with steps 5 and 9 carrying most of the risk.
+**Total: roughly 20–32 working days — ~4–5 weeks for the personal profile, ~6–7 with the work profile and council**, with steps 5 and 9 carrying most of the risk.
 
 Two natural stopping points, both of which stand alone:
 

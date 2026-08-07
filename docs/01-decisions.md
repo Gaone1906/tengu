@@ -277,3 +277,37 @@ bootstrapped once, appended to after each completed todo or it rots.
 **Unresolved and important:** two instances share one Claude account and therefore one set of limits, but
 each would run its own governor believing it owns the whole budget. **The pacing controller must read
 account-level state shared across instances** before both run concurrently.
+
+---
+
+## D12 — Sub-sub-task checkpoints; verify-before-act idempotency
+
+*(see [10-checkpointing.md](10-checkpointing.md))*
+
+**Reframe:** the governor halts several times a day, so **interruption is the primary control flow, not
+an error path.** Checkpointing is the execution model.
+
+- **One sub-task per session** (clean boundary, review gate); **sub-sub-tasks** (depth 3, ~10–20 min)
+  are the atomic checkpoint. Size so losing one to a hard cut is cheap.
+- **A checkpoint is a pair:** git commit (`JIN-42.3: <what>`) **and** ledger status, written together,
+  **commit first**. Status-without-commit is the only unrecoverable ordering.
+- **Idempotency = verify-before-act.** Every sub-sub-task carries a machine-checkable `verify` command.
+  Run it first; if it passes, mark done and skip. Decomposition rule: *no machine-checkable
+  done-criterion means it isn't decomposed enough.* `verify` commands route through
+  `evaluateCommandPolicy` — they're model-generated shell.
+- **Reconcile on resume** (extend `work-items/reconcile.ts`): run `verify` on each not-done unit;
+  passing means the crash landed between work and status. Zero model tokens. Order: reconcile → ledger
+  → handoff → work; **ledger authoritative, handoff narrative**.
+- **Soft ceiling** (~75%) — don't start a unit that would cross the hard 80%. A clean stop at 78% beats
+  a hard cut at 80%.
+- **WIP rescue** — hard cut commits on-disk edits to `refs/jinn/wip/<sessionId>`.
+
+**Consequence:** the D5 handoff shrinks to in-flight state only, since the ledger records what was done.
+
+**Tension accepted:** upstream's one-root-per-outcome doctrine says procedural steps stay in the parent
+body, not as todos. Sub-sub-tasks push against that — justified because they need durable, queryable
+status, which body text can't give. Fallback if `depth ≤ 3` blocks it: a structured `verify`-per-item
+checklist inside the sub-task body (weaker — no transitions, not countable in the stand-up).
+
+**Correction to D11's open question:** root/task/sub-task/sub-sub-task is 0/1/2/3, which *fits*
+`depth ≤ 3` if depth is 0-indexed. Verify in `work-items/relations.ts` before assuming a migration.
