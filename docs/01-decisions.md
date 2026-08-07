@@ -101,3 +101,28 @@ These are different events with different correct responses, and the original pl
 - **Usage at 80%** → halt + handoff + wait for reset. Expensive and unavoidable.
 
 Only the second should ever end a session.
+
+---
+
+## D6 — Departments are labels, not agents
+
+*(see [05-org-structure.md](05-org-structure.md))*
+
+Starting roster is **4 employees**: `planner` (Opus, executive), `engineer` (Sonnet, employee),
+`reviewer` (Opus, manager), `security` (system, executive, zero tokens). One executor handles backend,
+frontend, and database work in a single warm session.
+
+**Reasoning:** in a continuous single-threaded model, every employee switch is a session switch and
+therefore a cold start (~20–30% of spend). One-agent-per-department pays that tax on every handoff for
+no benefit. Departments already exist as a **column on `work_items`** — the planner tags sub-tasks,
+the stand-up groups by the column, and the departmental report works with one executor.
+
+Promote a department to its own employee only when the context it needs genuinely differs (different
+repo/stack/credentials), not merely when the subject matter differs. The ledger doesn't change when
+you do.
+
+**Rejected:** a QA/tester employee (testing is inside the engineer's loop); a coordinator/dispatcher
+(assignment is a `SELECT`, not an LLM call); one agent per department up front.
+
+**Add early:** a `scribe` on Haiku/Sonnet-`low` for stand-up narration — it's a fixed recurring
+background cost and must not sit on the work's engine.

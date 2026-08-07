@@ -22,6 +22,7 @@ destroying work.
 | [02-findings.md](docs/02-findings.md) | Verified findings about the upstream codebase (with file paths) |
 | [03-implementation-plan.md](docs/03-implementation-plan.md) | The full build plan — nine steps, files, effort, verification |
 | [04-efficiency.md](docs/04-efficiency.md) | Ongoing discussion: making continuous execution affordable |
+| [05-org-structure.md](docs/05-org-structure.md) | Recommended roster, responsibilities, and when to add more |
 
 ## Quick orientation
 
