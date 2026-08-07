@@ -30,6 +30,7 @@ destroying work.
 | [08-pacing-controller.md](docs/08-pacing-controller.md) | Spend the window, protect the week — effort before concurrency |
 | [09-work-profile-and-council.md](docs/09-work-profile-and-council.md) | Personal vs work profiles; per-service agents; the council flow |
 | [10-checkpointing.md](docs/10-checkpointing.md) | Sub-sub-task checkpoints, verify-before-act idempotency, graceful stops |
+| [11-deviation-assessment.md](docs/11-deviation-assessment.md) | How far this is from stock Jinn, and where the fork risk concentrates |
 
 ## Quick orientation
 
