@@ -37,6 +37,7 @@ destroying work.
 | [11-deviation-assessment.md](docs/11-deviation-assessment.md) | How far this is from stock Jinn, and where the fork risk concentrates |
 | [12-deployment-and-ux.md](docs/12-deployment-and-ux.md) | Web app vs desktop app — why it's already decided, and what keeps the daemon alive |
 | [13-costs.md](docs/13-costs.md) | Desktop-wrapper effort as a multiplier, and real 2026 hosting prices across 5 providers |
+| [14-lid-close-mode.md](docs/14-lid-close-mode.md) | **Correction:** `caffeinate` does not survive lid-close. What actually does, on macOS |
 
 ## Naming note
 

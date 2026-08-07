@@ -55,13 +55,19 @@ Solve (1) first; (2) is optional polish layered on top, not a redesign.
 |---|---|---|
 | **A. Do nothing — run `jinn start` in a terminal** | Works today | Dies the moment you close the terminal, log out, or the machine sleeps. Not viable for overnight. |
 | **B. OS-level service supervision** — `launchd` (macOS) `.plist` or a systemd user unit (Linux), with `KeepAlive`/`Restart=on-failure` | Survives crashes and login. Standard, boring, well-understood | ~0.5 day. Ours to write — upstream has nothing to build on |
-| **C. Keep the host awake while there's queued work** — `caffeinate` (macOS) / `systemd-inhibit` (Linux), asserted only while the pacing controller says there's something to do | Solves the sleep problem specifically | Must be **gated on governor state** — asserting it unconditionally defeats the pacing controller's own decision to idle overnight for weekly-budget reasons. Cheap once B exists to hook into |
-| **D. Run the daemon on a machine that's already always-on** — a spare Mac mini, an old desktop, a small cloud VM — and treat your laptop as just a browser client | Makes B and C moot; the daemon's uptime stops being coupled to whether you're using your laptop | Needs a second machine, or ongoing cloud cost |
+| **C. Keep the host from idle-sleeping while there's queued work** — `caffeinate` (macOS) / `systemd-inhibit` (Linux), asserted only while the pacing controller says there's something to do | Solves idle sleep **with the lid open** | Must be **gated on governor state**. ⚠️ **Does not cover lid-close** — see correction below |
+| **C2. Lid-closed operation (macOS)** — clamshell mode via a dummy display adapter (~$10–15), see [14-lid-close-mode.md](14-lid-close-mode.md) | Actually solves the lid-closed case | A different mechanism entirely from C — `caffeinate` never sees the lid-close signal |
+| **D. Run the daemon on a machine that's already always-on** — a spare Mac mini, an old desktop, a small cloud VM — and treat your laptop as just a browser client | Makes B, C, and C2 moot; the daemon's uptime stops being coupled to whether you're using your laptop | Needs a second machine, or ongoing cloud cost — priced in [13-costs.md](13-costs.md): $40–48/mo |
 
-**B is required regardless of everything else.** C is the pragmatic zero-extra-hardware answer and
-composes directly with the pacing controller we already designed — it should assert "stay awake" only
-when the controller isn't intentionally idling, which is a small addition to
-[08-pacing-controller.md](08-pacing-controller.md), not a new subsystem. D is the durable answer if
+**B is required regardless of everything else.** C is the pragmatic zero-extra-hardware answer for
+idle-sleep and composes directly with the pacing controller we already designed — it should assert
+"stay awake" only when the controller isn't intentionally idling, which is a small addition to
+[08-pacing-controller.md](08-pacing-controller.md), not a new subsystem.
+
+⚠️ **Correction:** an earlier version of this doc implied C also covers closing the lid. It doesn't —
+`caffeinate`/`systemd-inhibit` only ever block *idle* sleep; lid-close is a separate kernel-level event
+they never see. If the daemon runs on a laptop you'll actually close, **C2 is required too** — see
+[14-lid-close-mode.md](14-lid-close-mode.md) for the real mechanism and its caveats. D is the durable answer if
 this becomes a serious daily driver — genuinely worth it once you're tired of remembering to leave the
 laptop plugged in and open.
 
@@ -135,7 +141,9 @@ Then: open `http://localhost:7777` (or the LAN/Tailscale address if using D) in 
 bookmark it. That's the whole "run" step, once. From then on:
 
 - The service restarts itself on crash and on login, per B.
-- `caffeinate`/`systemd-inhibit` keeps the host awake exactly while there's governed work to do, per C.
+- `caffeinate`/`systemd-inhibit` keeps the host from idle-sleeping while there's governed work to do,
+  per C — with the lid **open**. If running on a laptop with the lid closed, C2
+  ([14-lid-close-mode.md](14-lid-close-mode.md)) is what actually matters.
 - The dashboard is a page you check, not an app you open — same posture as checking a Grafana board.
 
 No separate install for "the app." The web UI *is* the app; the only thing genuinely missing from
@@ -150,7 +158,9 @@ New **step 13 — process supervision**, small and mechanical:
 - `launchd` `.plist` (macOS) / systemd user unit (Linux) with restart-on-failure. ~0.5 day.
 - `caffeinate`/`systemd-inhibit` wrapper, gated on pacing-controller state (don't keep the machine
   awake through an intentional idle stretch). ~0.5 day, and it's a small addition to
-  `shared/pacing-controller.ts`, not a new module.
+  `shared/pacing-controller.ts`, not a new module. **Covers idle-sleep with the lid open only** —
+  lid-closed operation on macOS needs clamshell mode separately, see
+  [14-lid-close-mode.md](14-lid-close-mode.md).
 - `tengu service install/start/stop/status` CLI subcommands wrapping the above.
 
 **Deferred, not scoped yet:** the tray/menu-bar status glancer. Real value, but it's additive polish

@@ -334,10 +334,13 @@ Concretely: closing a laptop lid suspends the `node-pty` sessions mid-unit — b
 governor can recover from.
 
 **Chosen:** OS-level service supervision (`launchd`/systemd, restart-on-failure) — required regardless
-of anything else. Plus `caffeinate`/`systemd-inhibit`, **gated on pacing-controller state** so it never
-overrides the controller's own decision to idle overnight for weekly-budget reasons. A dedicated
-always-on host is the durable long-term answer but a config decision, not new code — don't build it
-speculatively.
+of anything else. Plus `caffeinate`/`systemd-inhibit`, **gated on pacing-controller state**, for
+idle-sleep while the lid stays open. **Correction (see [14-lid-close-mode.md](14-lid-close-mode.md)):
+this does not cover the lid-closed case at all** — closing the lid fires a signal straight to the
+kernel's power controller that `caffeinate` never sees. Lid-closed operation needs macOS clamshell mode
+(a dummy display adapter, ~$10–15) — a separate, additional mechanism, not a consequence of gating
+`caffeinate` correctly. A dedicated always-on host is the durable long-term answer but a config
+decision, not new code — don't build it speculatively.
 
 **Rejected: an Electron/Tauri desktop wrapper.** Doesn't address the actual gap (the daemon still has
 to run somewhere), and it's the single most against-the-grain addition available — a permanently
@@ -364,8 +367,10 @@ in rather than left as "if needed":
 
 - `launchd` `.plist` (macOS) / systemd user unit (Linux) with **`RunAtLoad`/`WantedBy=default.target`**
   (start on login/boot) **and** `KeepAlive`/`Restart=on-failure` (survive crashes).
-- `caffeinate`/`systemd-inhibit`, gated on pacing-controller state, so the host doesn't sleep through
-  queued work but isn't held awake pointlessly during an intentional idle stretch.
+- `caffeinate`/`systemd-inhibit`, gated on pacing-controller state — covers **idle sleep with the lid
+  open** only. **Lid-closed operation on macOS is a separate mechanism** (clamshell mode via a dummy
+  display adapter, not `caffeinate`) — see [14-lid-close-mode.md](14-lid-close-mode.md), added after
+  this decision to correct an earlier wrong assumption that gating `caffeinate` was sufficient.
 - `tengu service install/start/stop/status` CLI subcommands wrapping the above.
 
 **Not decided yet, deliberately deferred:** whether this runs on the daily laptop or a rented always-on

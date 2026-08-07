@@ -311,11 +311,18 @@ only survives container crashes, not a laptop going to sleep).
 - `launchd` `.plist` (macOS, `RunAtLoad: true`) / systemd user unit (Linux, `WantedBy=default.target`
   + `systemctl --user enable`), **starts on boot/login and restarts on failure** (D14 — locked, not
   optional). Required regardless of everything else — closing the laptop lid suspends the `node-pty`
-  child processes mid-unit, below any
-  layer the governor can recover from.
+  child processes mid-unit, below any layer the governor can recover from.
 - `caffeinate` / `systemd-inhibit` wrapper, **gated on pacing-controller state** — assert only while
   there's queued work, or it defeats the controller's own decision to idle overnight for weekly-budget
-  reasons. Small addition to `shared/pacing-controller.ts`, not a new module.
+  reasons. Small addition to `shared/pacing-controller.ts`, not a new module. **Covers idle-sleep with
+  the lid open only — does not prevent lid-close sleep on macOS at all** (`caffeinate` never sees the
+  lid-close signal; corrected in [14-lid-close-mode.md](14-lid-close-mode.md) after an earlier wrong
+  assumption here).
+- **If this runs on a laptop with the lid actually closed:** macOS clamshell mode via a dummy display
+  adapter (~$10–15) is the real mechanism — see [14-lid-close-mode.md](14-lid-close-mode.md) for setup,
+  the Bluetooth-unpairing gotcha, and the `pmset disablesleep` footgun if layered on top. Verify with an
+  actual overnight run before trusting it — reported behavior varies by macOS version. Not needed at
+  all if running on a rented always-on box instead ([13-costs.md](13-costs.md)).
 - `tengu service install/start/stop/status` CLI subcommands.
 
 **Explicitly not building:** an Electron/Tauri wrapper. It doesn't address the actual gap (the daemon
