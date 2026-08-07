@@ -221,3 +221,26 @@ the budget it exists to protect; 30-minute resolution is far too coarse for the 
 statusline recorder already emits free, token-free telemetry on every assistant message. Evaluate
 `shared/pacing-controller.ts` on each telemetry write plus a 60s idle tick. **It's a thermostat, not
 an employee.**
+
+---
+
+## D10 — Locked to `balanced` mode; overnight is the primary workload
+
+Confirmed: pacing mode is **`balanced`**, not `eager`. `eager` stays available in config but is not
+the default. Revisit only after a week of real telemetry.
+
+**Overnight continuous execution is the main use case** — the value is time saved while asleep, not
+latency. That has two consequences worth holding onto:
+
+1. **Latency is worthless overnight**, so there is no reason to accelerate beyond fair-share. The
+   controller's only job between midnight and morning is to avoid *wasting* window capacity, not to
+   finish sooner. `balanced` is exactly right for this shape.
+2. **Overnight running is what makes the weekly cap bind.** ~8h/night × 7 nights is a lot of windows,
+   before any daytime use. Expect the controller to throttle and expect idle stretches late in the
+   week — that's the design working, not a failure. The stand-up should make it visible so it never
+   looks like a stall.
+
+**Pull forward before the first unattended overnight run:** the step 8 deny-list extension
+(git-/data-destructive patterns) and restore points. Unattended is exactly when nobody is watching an
+agent do something irreversible, and the deny-list extension is a few hours against an existing,
+already-enforced function.
