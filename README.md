@@ -3,7 +3,9 @@
 Planning workspace for a fork of [hristo2612/jinn](https://github.com/hristo2612/jinn): an autonomous,
 usage-governed AI agent org running on a Claude Max 5x ($100) subscription.
 
-**Status:** design discussion. No code yet. Nothing installed (`~/.jinn` does not exist).
+**Status:** design complete, no code yet. Nothing installed (`~/.jinn` does not exist).
+[03-implementation-plan.md](docs/03-implementation-plan.md) is consolidated and ready to execute;
+twelve decisions (D1–D12) are recorded with reasoning in [01-decisions.md](docs/01-decisions.md).
 
 ## Goal
 
@@ -20,7 +22,7 @@ destroying work.
 | [00-context.md](docs/00-context.md) | The eight requirements, and the constraints they run into |
 | [01-decisions.md](docs/01-decisions.md) | Decision log — what we chose, why, and what we rejected |
 | [02-findings.md](docs/02-findings.md) | Verified findings about the upstream codebase (with file paths) |
-| [03-implementation-plan.md](docs/03-implementation-plan.md) | The full build plan — nine steps, files, effort, verification |
+| **[03-implementation-plan.md](docs/03-implementation-plan.md)** | **The consolidated build plan — 13 steps, files, effort, verification. Start here to build.** |
 | [04-efficiency.md](docs/04-efficiency.md) | Ongoing discussion: making continuous execution affordable |
 | [05-org-structure.md](docs/05-org-structure.md) | Recommended roster, responsibilities, and when to add more |
 | [06-concurrency.md](docs/06-concurrency.md) | Sequential vs parallel — why throughput doesn't scale with agents |
@@ -37,4 +39,9 @@ destroying work.
 - **The sensor already exists.** Jinn pipes Claude Code's statusline JSON — 5-hour and 7-day usage
   percentages, reset timestamps, context-window usage — to `~/.jinn/tmp/engine-limits/claude/<sessionId>.json`.
   Verified against the installed binary. Nothing surfaces it to the UI and nothing enforces a threshold.
-- **The biggest win needs no fork at all**: Opus planner → Sonnet executor → Opus reviewer (see 01-decisions).
+- **The biggest win needs no fork at all**: Opus planner → Sonnet executor → Opus reviewer — step 0,
+  about an hour of config, and it moves the economics more than everything else combined.
+- **Interruption is the normal case**, not an error path. The governor halts several times a day, so
+  sub-sub-task checkpoints (commit + ledger status, `verify`-before-act) are the execution model.
+- **Two profiles**: personal (one executor, departments as labels) and work (one agent per service,
+  plus a council that plans across them). `JINN_INSTANCE` makes this free.
