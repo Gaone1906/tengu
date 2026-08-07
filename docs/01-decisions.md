@@ -346,3 +346,29 @@ divergent parallel codebase with its own packaging/signing/auto-update, nothing 
 **Deferred, not rejected:** a menu-bar status glancer — a small poller against the existing telemetry
 API showing state and firing OS notifications on halt/resume/council-input. Real value, genuinely
 cheap, but additive polish that can land any time after the core loop works.
+
+---
+
+## D14 — No desktop app; daemon runs always-on via OS service, starts on boot
+
+*(closes the open questions in [12-deployment-and-ux.md](12-deployment-and-ux.md) and [13-costs.md](13-costs.md))*
+
+**Confirmed: same deployment shape as upstream Jinn** — local Node gateway + browser dashboard, no
+native wrapper. The desktop-app option was priced (~155 on the 100-scale for a real one, dominated by
+code-signing/notarization + native-module rebuilds + a recurring $99/yr Apple Developer cost) and
+explicitly declined — it doesn't address the actual gap (the daemon still has to run somewhere) and is
+the single most against-the-grain, permanently-diverging addition available.
+
+**Chosen instead:** step 13's OS-level service supervision, with the boot-start requirement now locked
+in rather than left as "if needed":
+
+- `launchd` `.plist` (macOS) / systemd user unit (Linux) with **`RunAtLoad`/`WantedBy=default.target`**
+  (start on login/boot) **and** `KeepAlive`/`Restart=on-failure` (survive crashes).
+- `caffeinate`/`systemd-inhibit`, gated on pacing-controller state, so the host doesn't sleep through
+  queued work but isn't held awake pointlessly during an intentional idle stretch.
+- `tengu service install/start/stop/status` CLI subcommands wrapping the above.
+
+**Not decided yet, deliberately deferred:** whether this runs on the daily laptop or a rented always-on
+box ([13-costs.md](13-costs.md) has real 2026 pricing — $40–48/mo personal, $96–126/mo work profile,
+if that's ever wanted). Step 13's boot-start config is identical either way — a laptop just needs to
+actually be on for "on boot" to mean anything.
