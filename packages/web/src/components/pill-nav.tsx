@@ -10,6 +10,7 @@ import { cn } from "@/lib/utils"
 import { useFeatures } from "@/hooks/use-features"
 import { WorkspaceSwitcher } from "@/components/workspaces/workspace-menu"
 import { prefetchRoute } from "@/lib/route-prefetch"
+import { deriveGovernorTone, useSessionTelemetry, type GovernorTone } from "@/hooks/use-session-telemetry"
 
 // ---------------------------------------------------------------------------
 // Frosted pill primitives (mockup _shared.css `.pill` recipe)
@@ -173,12 +174,22 @@ const RIBBON_LABEL_PILL =
 /** One ribbon entry — a fixed 44px icon square. It never resizes; the label is a
  *  floating pill that escapes to the right on hover/focus (the piano reveal), and
  *  the icon lifts/scales a touch like a pressed Dock key. */
+// Governor status-dot tone → color (Tengu steps 1–3), same three-color
+// language the Limits page's engine cards and the Cron page use for their own
+// status dots. Green <60% / amber 60–80% / red ≥80% of either usage window.
+const GOVERNOR_TONE_COLOR: Record<GovernorTone, string> = {
+  green: "var(--system-green)",
+  amber: "var(--system-orange)",
+  red: "var(--system-red)",
+}
+
 function RibbonRow({
   Icon,
   label,
   isActive,
   href,
   onClick,
+  dotColor,
 }: {
   Icon: ComponentType<{ size?: number | string; className?: string }>
   label: string
@@ -187,6 +198,9 @@ function RibbonRow({
   // Receives the click event so a link row can preventDefault a no-op
   // same-route navigation (used by the Chat icon to reveal the list instead).
   onClick?: (e: ReactMouseEvent) => void
+  /** Ambient status dot (e.g. the Limits icon's governor state). Absent by
+   *  default — most rows carry no dot. */
+  dotColor?: string
 }) {
   const cls = cn(
     "group/row relative flex size-11 shrink-0 items-center justify-center rounded-[12px] transition-colors duration-150 [transition-timing-function:var(--ease-smooth)]",
@@ -199,6 +213,13 @@ function RibbonRow({
       <span className="flex items-center justify-center transition-transform duration-150 [transition-timing-function:var(--ease-snappy)] motion-safe:group-hover/row:-translate-y-px motion-safe:group-hover/row:scale-110 motion-safe:group-active/row:scale-95 motion-reduce:transform-none">
         <Icon size={20} className="shrink-0" />
       </span>
+      {dotColor && (
+        <span
+          aria-hidden
+          className="absolute right-1.5 top-1.5 size-2 rounded-full ring-2 ring-[var(--ribbon-bg)]"
+          style={{ background: dotColor }}
+        />
+      )}
       {/* Piano reveal — floats past the rail edge; flex-centers vertically so the
           inner pill is free to animate on the X axis. */}
       <span aria-hidden className="pointer-events-none absolute inset-y-0 left-full z-50 ml-2 flex items-center">
@@ -245,6 +266,10 @@ export function NavRibbon({
   const { theme, setTheme } = useTheme()
   const { settings } = useSettings()
   const portalName = settings.portalName ?? "Jinn"
+  // Ambient governor awareness (Tengu steps 1–3): a status dot on the Limits
+  // icon, glanceable from any screen without new chrome.
+  const { data: telemetry } = useSessionTelemetry()
+  const governorTone = deriveGovernorTone(telemetry?.account)
   // Default brand mark carries U+FE0F so the genie always renders as a COLOR
   // emoji (never a text-presentation glyph that would inherit the slot's text
   // color and look faded — see the brand-mark color note below).
@@ -340,6 +365,7 @@ export function NavRibbon({
             href={item.href}
             isActive={isNavItemActive(item.href, pathname)}
             onClick={item.href === "/" ? onChatIconClick : undefined}
+            dotColor={item.href === "/limits" && governorTone ? GOVERNOR_TONE_COLOR[governorTone] : undefined}
           />
         ))}
 

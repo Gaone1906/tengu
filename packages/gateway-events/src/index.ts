@@ -16,6 +16,54 @@ export type CompanyChangedEvent =
   | { entity: "workflow-definition"; id: string; revision: number }
   | { entity: "workflow-run"; workflowId: string; runId: string }
 
+/** One live session's Claude usage snapshot (Tengu step 1), joined to its
+ *  session/employee/todo identity. Mirrors `shared/session-telemetry.ts`'s
+ *  `SessionTelemetry`, kept independent here since this package owns no
+ *  gateway or UI domain types. */
+export interface SessionTelemetryWire {
+  sessionId: string
+  employee: string | null
+  employeeDisplayName?: string
+  model: string | null
+  workItemId: string | null
+  status: string
+  currentTodoTitle?: string | null
+  contextUsedPct?: number
+  fiveHourUsedPct?: number
+  fiveHourResetsAt?: string
+  sevenDayUsedPct?: number
+  sevenDayResetsAt?: string
+  costUsd?: number
+  capturedAt?: string
+  stale: boolean
+}
+
+/** Account-wide usage, MAX across live sessions in the window (see
+ *  `rollupAccountLimits`) — never the freshest-file heuristic. */
+export interface AccountLimitsRollupWire {
+  fiveHourUsedPct?: number
+  fiveHourResetsAt?: string
+  sevenDayUsedPct?: number
+  sevenDayResetsAt?: string
+}
+
+/** Completed/total descendants of one Todo root (Tengu step 3). */
+export interface RootProgressWire {
+  rootId: string
+  total: number
+  completed: number
+  inFlight: number
+  completedPct: number
+}
+
+/** Completed/total/in-flight Todos for one assignee. */
+export interface EmployeeProgressWire {
+  assignee: string
+  total: number
+  completed: number
+  inFlight: number
+}
+
 export interface GatewayEventMap {
   "session:started": { sessionId: string }
   "session:created": { sessionId: string }
@@ -54,6 +102,17 @@ export interface GatewayEventMap {
       activeMonitors?: number
       lastActivityAt: string
     } | null
+  }
+  /** Tengu steps 1–3: per-session Claude usage + Todo progress rollups, one
+   *  event feeding both the Limits page and the nav-rail status dot.
+   *  Broadcast on the same live-events channel as `company:changed`,
+   *  debounced ~1s server-side. */
+  "session:telemetry": {
+    sessions: SessionTelemetryWire[]
+    account: AccountLimitsRollupWire
+    rootProgress: RootProgressWire[]
+    employeeProgress: EmployeeProgressWire[]
+    capturedAt: string
   }
   "queue:updated": { sessionId: string; sessionKey: string; depth?: number; paused?: boolean }
   "company:changed": CompanyChangedEvent
@@ -98,6 +157,7 @@ export const GATEWAY_EVENTS = {
   sessionNotification: "session:notification",
   sessionAttachment: "session:attachment",
   sessionBackground: "session:background",
+  sessionTelemetry: "session:telemetry",
   queueUpdated: "queue:updated",
   companyChanged: "company:changed",
   pinsChanged: "pins:changed",
@@ -203,6 +263,50 @@ function isCompanyChangedEvent(value: unknown): value is CompanyChangedEvent {
   return false
 }
 
+function isSessionTelemetryEntry(value: unknown): value is SessionTelemetryWire {
+  return isRecord(value)
+    && isString(value.sessionId)
+    && (value.employee === null || isString(value.employee))
+    && isOptionalString(value.employeeDisplayName)
+    && (value.model === null || isString(value.model))
+    && (value.workItemId === null || isString(value.workItemId))
+    && isString(value.status)
+    && (value.currentTodoTitle === undefined || value.currentTodoTitle === null || isString(value.currentTodoTitle))
+    && isOptionalNumber(value.contextUsedPct)
+    && isOptionalNumber(value.fiveHourUsedPct)
+    && isOptionalString(value.fiveHourResetsAt)
+    && isOptionalNumber(value.sevenDayUsedPct)
+    && isOptionalString(value.sevenDayResetsAt)
+    && isOptionalNumber(value.costUsd)
+    && isOptionalString(value.capturedAt)
+    && typeof value.stale === "boolean"
+}
+
+function isAccountLimitsRollup(value: unknown): value is AccountLimitsRollupWire {
+  return isRecord(value)
+    && isOptionalNumber(value.fiveHourUsedPct)
+    && isOptionalString(value.fiveHourResetsAt)
+    && isOptionalNumber(value.sevenDayUsedPct)
+    && isOptionalString(value.sevenDayResetsAt)
+}
+
+function isRootProgressEntry(value: unknown): value is RootProgressWire {
+  return isRecord(value)
+    && isString(value.rootId)
+    && isNumber(value.total)
+    && isNumber(value.completed)
+    && isNumber(value.inFlight)
+    && isNumber(value.completedPct)
+}
+
+function isEmployeeProgressEntry(value: unknown): value is EmployeeProgressWire {
+  return isRecord(value)
+    && isString(value.assignee)
+    && isNumber(value.total)
+    && isNumber(value.completed)
+    && isNumber(value.inFlight)
+}
+
 function isGatewayEventPayload(event: GatewayEventName, value: unknown): boolean {
   switch (event) {
     case "session:started":
@@ -257,6 +361,13 @@ function isGatewayEventPayload(event: GatewayEventName, value: unknown): boolean
         && isOptionalNumber(value.backgroundActivity.activeMonitors)
         && isString(value.backgroundActivity.lastActivityAt)
     }
+    case "session:telemetry":
+      return isRecord(value)
+        && Array.isArray(value.sessions) && value.sessions.every(isSessionTelemetryEntry)
+        && isAccountLimitsRollup(value.account)
+        && Array.isArray(value.rootProgress) && value.rootProgress.every(isRootProgressEntry)
+        && Array.isArray(value.employeeProgress) && value.employeeProgress.every(isEmployeeProgressEntry)
+        && isString(value.capturedAt)
     case "queue:updated":
       return isRecord(value)
         && isString(value.sessionId)

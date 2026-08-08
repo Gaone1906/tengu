@@ -55,6 +55,7 @@ import { resolveCallerIdentity, sessionCommGuards, LATERAL_MAX_HOPS, type Caller
 import { UNIDENTIFIED_TOOL_CALL_ERROR, verifySessionCapability } from "../mcp/identity.js";
 import { cleanupMcpConfigFile, sweepOrphanMcpConfigFiles } from "../mcp/resolver.js";
 import { startStatusReconciler } from "./status-reconciler.js";
+import { startSessionTelemetryBroadcaster } from "./session-telemetry-broadcaster.js";
 import { armJinnAttachGate } from "../mcp/attachment.js";
 import { syncExternalTurn } from "./external-turns.js";
 import { pickEncoding, isCompressibleExt, compressBuffer, compressStream, type Encoding } from "./compress.js";
@@ -1028,6 +1029,13 @@ export async function startGateway(
   // live turn). 15s sweep; logs one line per fix.
   const stopStatusReconciler = startStatusReconciler({ engines, emit });
 
+  // Tengu steps 1–3: per-session Claude usage + Todo progress, broadcast to
+  // the Limits page and the nav-rail status dot on every statusline write.
+  const stopSessionTelemetryBroadcaster = startSessionTelemetryBroadcaster({
+    emit,
+    employees: () => employeeRegistry,
+  });
+
   // Todos ledger truth-keeping (GRS-021a): periodically re-derive work-item
   // status from linked-session evidence, so a session settling mid-process moves
   // its item to in_review/done (trust) without waiting for the next boot.
@@ -1373,6 +1381,7 @@ export async function startGateway(
     // interrupted below — a mid-shutdown sweep must not race the teardown.
     stopStatusReconciler();
     stopWorkItemReconciler();
+    await stopSessionTelemetryBroadcaster();
     clearInterval(modelRefreshTimer);
     workflowService.dispose(); workflowDatabase.close();
 

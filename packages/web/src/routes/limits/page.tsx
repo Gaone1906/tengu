@@ -7,6 +7,13 @@ import { PageLayout } from "@/components/page-layout"
 import { useBreadcrumbs } from "@/context/breadcrumb-context"
 import { Skeleton } from "@/components/ui/skeleton"
 import { deriveFreshness, useEngineLimits, type FreshnessKind } from "./use-engine-limits"
+import {
+  deriveGovernorTone,
+  useSessionTelemetry,
+  type GovernorTone,
+  type SessionTelemetryEvent,
+  type SessionTelemetryRow,
+} from "@/hooks/use-session-telemetry"
 
 const DANGER = 90
 
@@ -186,9 +193,150 @@ function EngineCard({ engine, now }: { engine: EngineLimitEngineSnapshot; now: n
   )
 }
 
+// Governor tone → badge tone + label, same fixed-copy convention as `badge()`
+// above — never render raw server text, only allowlisted phrases.
+function governorBadge(tone: GovernorTone) {
+  switch (tone) {
+    case "red":
+      return { color: "var(--system-red)", label: "Near limit" }
+    case "amber":
+      return { color: "var(--system-orange)", label: "Elevated" }
+    default:
+      return { color: "var(--system-green)", label: "Nominal" }
+  }
+}
+
+// Pacing/fan-out state strip (Tengu step 2 of the design; steps 4 and 9 — the
+// governor and pacing controller themselves — aren't built yet). Shows the
+// real account-wide usage tone honestly rather than fabricating a pacing
+// decision the backend doesn't make yet.
+function PacingStrip({ account, now }: { account: SessionTelemetryEvent["account"] | undefined; now: number }) {
+  const tone = deriveGovernorTone(account)
+  const badgeTone = tone ? governorBadge(tone) : { color: "var(--text-quaternary)", label: "No live sessions" }
+  const fiveHourReset = resetLabel(account?.fiveHourResetsAt, now)
+
+  return (
+    <section className="mb-4 rounded-[var(--radius-lg)] bg-[var(--bg-secondary)] px-[var(--space-5)] py-[var(--space-4)] shadow-[var(--shadow-card)]">
+      <div className="flex flex-wrap items-center justify-between gap-[var(--space-3)]">
+        <div className="flex items-center gap-[var(--space-2)] text-[length:var(--text-footnote)] text-[var(--text-secondary)]">
+          <span className="w-2 h-2 rounded-full" style={{ background: badgeTone.color }} />
+          <span className="font-[var(--weight-semibold)] text-[var(--text-primary)]">{badgeTone.label}</span>
+          {account?.fiveHourUsedPct !== undefined && (
+            <span className="tabular-nums">· 5h {account.fiveHourUsedPct}%{fiveHourReset ? ` · ${fiveHourReset}` : ""}</span>
+          )}
+          {account?.sevenDayUsedPct !== undefined && (
+            <span className="tabular-nums">· 7d {account.sevenDayUsedPct}%</span>
+          )}
+        </div>
+        <div className="text-[length:var(--text-caption1)] text-[var(--text-tertiary)]">
+          Pacing: balanced · Fan-out: sequential
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function contextRemainingColor(remainingPct: number) {
+  return remainingPct <= 10 ? "var(--system-red)" : "var(--accent)"
+}
+
+function SessionCard({
+  session,
+  now,
+  employeeProgress,
+}: {
+  session: SessionTelemetryRow
+  now: number
+  employeeProgress: SessionTelemetryEvent["employeeProgress"]
+}) {
+  const contextRemainingPct = session.contextUsedPct !== undefined
+    ? clampPercent(100 - session.contextUsedPct)
+    : undefined
+  const tone = session.stale
+    ? { color: "var(--system-orange)", label: `Stale · ${agoLabel(session.capturedAt, now)}` }
+    : { color: "var(--system-green)", label: "Live" }
+  const progress = session.employee
+    ? employeeProgress.find((p) => p.assignee === session.employee)
+    : undefined
+
+  return (
+    <section className="rounded-[var(--radius-xl)] bg-[var(--bg-secondary)] p-[var(--space-6)] shadow-[var(--shadow-card)]">
+      <div className="flex items-center justify-between gap-[var(--space-3)]">
+        <div className="flex items-baseline gap-[var(--space-3)] min-w-0">
+          <h2 className="text-[length:var(--text-body)] font-[var(--weight-semibold)] text-[var(--text-primary)] truncate">
+            {session.employeeDisplayName ?? session.employee ?? "Unassigned"}
+          </h2>
+          {session.model && (
+            <span className="text-[length:var(--text-caption1)] text-[var(--text-tertiary)] truncate">
+              {session.model}
+            </span>
+          )}
+        </div>
+        <span className="flex items-center gap-[var(--space-2)] text-[length:var(--text-caption1)] text-[var(--text-secondary)] whitespace-nowrap">
+          <span className="w-2 h-2 rounded-full" style={{ background: tone.color }} />
+          {tone.label}
+        </span>
+      </div>
+
+      <div className="mt-[var(--space-5)] text-[length:var(--text-footnote)] text-[var(--text-secondary)] truncate">
+        {session.currentTodoTitle ?? "No active todo"}
+      </div>
+
+      {contextRemainingPct !== undefined && (
+        <div className="mt-[var(--space-5)] min-w-0">
+          <div className="flex items-baseline justify-between gap-[var(--space-3)]">
+            <span className="text-[length:var(--text-footnote)] text-[var(--text-secondary)]">
+              Context remaining
+            </span>
+            <span className="text-[length:var(--text-body)] font-[var(--weight-bold)] text-[var(--text-primary)] tabular-nums">
+              {contextRemainingPct}%
+            </span>
+          </div>
+          <div className="mt-[var(--space-2)] h-2 rounded-full bg-[var(--fill-tertiary)] overflow-hidden">
+            <div
+              className="h-full rounded-full transition-[width] duration-500 ease-[var(--ease-smooth)]"
+              style={{ width: `${contextRemainingPct}%`, background: contextRemainingColor(contextRemainingPct) }}
+            />
+          </div>
+        </div>
+      )}
+
+      {progress && progress.total > 0 && (
+        <div className="mt-[var(--space-5)] text-[length:var(--text-footnote)] text-[var(--text-secondary)]">
+          {progress.completed}/{progress.total} todos done
+        </div>
+      )}
+    </section>
+  )
+}
+
+function SessionsSection({ telemetry, now }: { telemetry: SessionTelemetryEvent | null; now: number }) {
+  const sessions = telemetry?.sessions ?? []
+  if (sessions.length === 0) return null
+
+  return (
+    <div className="mb-6">
+      <h2 className="mb-3 text-[length:var(--text-headline)] font-[var(--weight-semibold)] text-[var(--text-primary)]">
+        Sessions
+      </h2>
+      <div className="grid items-start gap-4 md:grid-cols-2">
+        {sessions.map((session) => (
+          <SessionCard
+            key={session.sessionId}
+            session={session}
+            now={now}
+            employeeProgress={telemetry?.employeeProgress ?? []}
+          />
+        ))}
+      </div>
+    </div>
+  )
+}
+
 export default function LimitsPage() {
   useBreadcrumbs([{ label: 'Limits' }])
   const { data, phase, refreshing, error, now, refresh } = useEngineLimits()
+  const { data: telemetry } = useSessionTelemetry()
 
   return (
     <PageLayout>
@@ -223,6 +371,10 @@ export default function LimitsPage() {
               {data ? `Couldn’t refresh — showing last-known values. (${error})` : error}
             </div>
           )}
+
+          <PacingStrip account={telemetry?.account} now={now} />
+
+          <SessionsSection telemetry={telemetry} now={now} />
 
           {phase === "loading" ? (
             <div className="grid gap-4 md:grid-cols-2">
