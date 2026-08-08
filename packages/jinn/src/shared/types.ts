@@ -230,6 +230,12 @@ export interface EngineResult {
    * `resetsAt` is a Unix timestamp in seconds.
    */
   rateLimit?: EngineRateLimitInfo;
+  /** Claude Code's SessionStart `source` for this turn ("startup" | "resume" |
+   *  "clear" | "compact"), when the engine surfaces one. `"compact"` means the
+   *  turn just replaced the conversation with a compaction summary — the
+   *  signal sessions/compaction.ts uses to decide whether the handoff note
+   *  needs re-injecting (step 7). Undefined for engines that don't surface it. */
+  sessionStartSource?: string;
 }
 
 export interface EngineRateLimitInfo {

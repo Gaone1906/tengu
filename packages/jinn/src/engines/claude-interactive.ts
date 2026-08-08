@@ -482,6 +482,12 @@ export class TurnResolver {
   private settled = false;
   private claudeSessionId: string | undefined;
   private gotSessionStart = false;
+  /** `source` off the SessionStart hook payload ("startup" | "resume" |
+   *  "clear" | "compact"). Kept as the LATEST value seen — a turn ordinarily
+   *  gets exactly one SessionStart, but a native /compact turn can settle
+   *  after Claude Code fires it, and this is what tells the caller compaction
+   *  actually happened (see sessions/compaction.ts). */
+  private sessionStartSourceValue: string | undefined;
   private stopPayload: HookPayload | undefined;
   private stopFailurePayload: HookPayload | undefined;
   private graceTimer: NodeJS.Timeout | undefined;
@@ -499,6 +505,7 @@ export class TurnResolver {
     if (h.hook_event_name === "SessionStart") {
       this.gotSessionStart = true;
       if (typeof h.session_id === "string") this.claudeSessionId = h.session_id;
+      if (typeof h.source === "string") this.sessionStartSourceValue = h.source;
       this.maybeComplete();
     } else if (h.hook_event_name === "Stop") {
       // A Stop supersedes any pending StopFailure — the CLI retried and finished.
@@ -529,6 +536,8 @@ export class TurnResolver {
 
   /** Claude session id learned so far (for engineSessionId persistence on warm-PTY turns). */
   get sessionId(): string | undefined { return this.claudeSessionId; }
+  /** The `source` off the most recent SessionStart hook seen this turn, if any. */
+  get sessionStartSource(): string | undefined { return this.sessionStartSourceValue; }
   get isSettled(): boolean { return this.settled; }
   /** The StopFailure payload, if the turn ended in an API error (Task 5.3 maps it to rateLimit). */
   get stopFailure(): HookPayload | undefined { return this.stopFailurePayload; }
@@ -612,7 +621,7 @@ export class TurnResolver {
     if (this.settled) return;
     this.settled = true;
     this.clearGrace();
-    this.resolve(r);
+    this.resolve(this.sessionStartSourceValue ? { ...r, sessionStartSource: this.sessionStartSourceValue } : r);
   }
 }
 
