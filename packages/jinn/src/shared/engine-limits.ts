@@ -76,6 +76,60 @@ function windowFromClaude(name: string, value: unknown, durationMins: number): E
   };
 }
 
+/** A statusline snapshot older than this is shown as stale rather than live —
+ *  the statusline only writes on assistant messages, so an idle session's file
+ *  stops advancing. Shared with shared/session-telemetry.ts so both surfaces
+ *  agree on when a session dropped off. */
+export const CLAUDE_SNAPSHOT_STALE_MS = 30 * 60_000;
+
+export function isClaudeSnapshotStale(mtimeMs: number, now: number = Date.now()): boolean {
+  return now - mtimeMs > CLAUDE_SNAPSHOT_STALE_MS;
+}
+
+export interface ParsedClaudeSnapshot {
+  capturedAtIso: string;
+  windows: EngineLimitWindow[];
+  context?: EngineLimitEngineSnapshot["context"];
+  costUsd?: number;
+  mtimeMs: number;
+  stale: boolean;
+}
+
+/**
+ * Parse one `<sessionId>.json` statusline snapshot file. Shared by the
+ * account-level collector below (freshest file only) and
+ * shared/session-telemetry.ts (every live session's file), so the two never
+ * drift on field mapping or the staleness rule. Throws on a missing or
+ * malformed file — callers decide how to degrade.
+ */
+export function parseClaudeStatuslineSnapshot(file: string): ParsedClaudeSnapshot {
+  const parsed = JSON.parse(fs.readFileSync(file, "utf-8")) as unknown;
+  if (!isRecord(parsed)) throw new Error("Snapshot is not a JSON object");
+  const rateLimits = isRecord(parsed.rate_limits) ? parsed.rate_limits : {};
+  const windows = [
+    windowFromClaude("5h", rateLimits.five_hour, 300),
+    windowFromClaude("7d", rateLimits.seven_day, 10_080),
+  ].filter(Boolean) as EngineLimitWindow[];
+  const ctx = isRecord(parsed.context_window) ? parsed.context_window : undefined;
+  const stat = fs.statSync(file);
+  return {
+    capturedAtIso: str(parsed.captured_at) ?? new Date(stat.mtimeMs).toISOString(),
+    windows,
+    context: ctx
+      ? {
+          usedPercent: num(ctx.used_percentage),
+          remainingPercent: num(ctx.remaining_percentage),
+          contextWindowSize: num(ctx.context_window_size),
+          totalInputTokens: num(ctx.total_input_tokens),
+          totalOutputTokens: num(ctx.total_output_tokens),
+        }
+      : undefined,
+    costUsd: isRecord(parsed.cost) ? num(parsed.cost.total_cost_usd) : undefined,
+    mtimeMs: stat.mtimeMs,
+    stale: isClaudeSnapshotStale(stat.mtimeMs),
+  };
+}
+
 function claudeSnapshotFile(dir: string): string | null {
   try {
     const files = fs.readdirSync(dir)
@@ -234,20 +288,9 @@ async function collectClaudeLimits(config: JinnConfig): Promise<EngineLimitEngin
     if (latest) {
       // Context/cost still come from the statusline snapshot (best effort).
       try {
-        const parsed = JSON.parse(fs.readFileSync(latest, "utf-8")) as unknown;
-        if (isRecord(parsed)) {
-          const ctx = isRecord(parsed.context_window) ? parsed.context_window : undefined;
-          if (ctx) {
-            context = {
-              usedPercent: num(ctx.used_percentage),
-              remainingPercent: num(ctx.remaining_percentage),
-              contextWindowSize: num(ctx.context_window_size),
-              totalInputTokens: num(ctx.total_input_tokens),
-              totalOutputTokens: num(ctx.total_output_tokens),
-            };
-          }
-          costUsd = isRecord(parsed.cost) ? num(parsed.cost.total_cost_usd) : undefined;
-        }
+        const snapshot = parseClaudeStatuslineSnapshot(latest);
+        context = snapshot.context;
+        costUsd = snapshot.costUsd;
       } catch { /* snapshot unreadable — live windows still stand on their own */ }
     }
     return {
@@ -273,35 +316,17 @@ async function collectClaudeLimits(config: JinnConfig): Promise<EngineLimitEngin
   }
 
   try {
-    const parsed = JSON.parse(fs.readFileSync(latest, "utf-8")) as unknown;
-    if (!isRecord(parsed)) throw new Error("Snapshot is not a JSON object");
-    const rateLimits = isRecord(parsed.rate_limits) ? parsed.rate_limits : {};
-    const windows = [
-      windowFromClaude("5h", rateLimits.five_hour, 300),
-      windowFromClaude("7d", rateLimits.seven_day, 10_080),
-    ].filter(Boolean) as EngineLimitWindow[];
-    const ctx = isRecord(parsed.context_window) ? parsed.context_window : undefined;
-    const cost = isRecord(parsed.cost) ? num(parsed.cost.total_cost_usd) : undefined;
-    const stat = fs.statSync(latest);
-    const stale = Date.now() - stat.mtimeMs > 30 * 60_000;
+    const snapshot = parseClaudeStatuslineSnapshot(latest);
     return {
       ...snap,
-      status: windows.length > 0 ? "snapshot" : "static",
+      status: snapshot.windows.length > 0 ? "snapshot" : "static",
       source: "claude-statusline",
-      refreshedAt: str(parsed.captured_at) ?? new Date(stat.mtimeMs).toISOString(),
+      refreshedAt: snapshot.capturedAtIso,
       accountPlan,
-      windows,
-      context: ctx
-        ? {
-            usedPercent: num(ctx.used_percentage),
-            remainingPercent: num(ctx.remaining_percentage),
-            contextWindowSize: num(ctx.context_window_size),
-            totalInputTokens: num(ctx.total_input_tokens),
-            totalOutputTokens: num(ctx.total_output_tokens),
-          }
-        : undefined,
-      costUsd: cost,
-      stale,
+      windows: snapshot.windows,
+      context: snapshot.context,
+      costUsd: snapshot.costUsd,
+      stale: snapshot.stale,
     };
   } catch {
     // Never surface the raw parse/exception text: it can echo snapshot payload
