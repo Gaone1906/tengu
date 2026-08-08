@@ -30,6 +30,10 @@ const TEXT_EXTENSIONS = new Set([
 
 const SKIP_DIRS = new Set(["coverage", "dist", "node_modules"]);
 
+// Tengu's own fork design docs, not upstream's shipped template/src surface this guard
+// protects. They legitimately credit the upstream project by its real org/repo name.
+const SKIP_PATHS = new Set([join(REPO, "docs", "tengu")]);
+
 const BLOCKED_TERMS = [
   ["hris", "to"].join(""),
   ["jim", "my"].join(""),
@@ -47,6 +51,7 @@ const BLOCKED_TERMS = [
 ];
 
 function listTextFiles(path: string): string[] {
+  if (SKIP_PATHS.has(path)) return [];
   if (!existsSync(path)) return [];
   const rootStat = statSync(path);
   if (rootStat.isFile()) return TEXT_EXTENSIONS.has(extname(path)) ? [path] : [];
