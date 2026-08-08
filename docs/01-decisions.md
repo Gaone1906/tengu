@@ -492,3 +492,24 @@ whether `depth` is 0-indexed (decides if the sub-sub-task level needs a schema c
 existing `WorkspaceSwitcher` already does what profile-switching needs, and the real Opus/Sonnet token
 split and reviewer share once genuine work is flowing. None of these block starting the build — they're
 the first things the system will tell us, not open design questions.
+
+---
+
+## D18 — DaisyUI: port palettes into Jinn's own theme system, don't install the plugin
+
+*(see [17-daisyui.md](17-daisyui.md))*
+
+**Real, concrete collision, not a vague worry:** DaisyUI switches themes via `data-theme` on `<html>`
+with built-in theme names including `"light"`/`"dark"` — the exact attribute, element, *and* two of the
+exact names Jinn's own `ThemeProvider` already uses for Ledger Dark/Light. Installing both means two
+unrelated CSS-variable systems firing on the same selector, with load order silently deciding the
+winner.
+
+**Chosen:** take the actual ask (good-looking color themes) without the conflicting mechanism — port
+specific daisyUI palettes into Jinn's own token structure (`--bg`/`--accent`/etc.), added as new
+`data-theme` values through Jinn's *existing* switcher, extended from a two-way toggle into a small
+registry. Same pattern D16 already established: extend what's there, don't import a parallel system.
+
+**Deliberately not done here:** typing out specific hex values for named themes without verifying them
+first. The mechanism is decided; porting 2–3 real palettes with checked values is bounded follow-up
+work, not something to guess at in a decisions doc.
