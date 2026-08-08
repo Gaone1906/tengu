@@ -385,6 +385,22 @@ CREATE TABLE IF NOT EXISTS work_item_fanout (
 
 export const WORK_ITEM_FANOUT_DDL = `${WORK_ITEM_FANOUT_TABLE_DDL};`;
 
+/** Project identity (docs/tengu/03-implementation-plan.md step 11, stand-up):
+ *  a root work item (depth 0) IS a project, matching the existing one-root-
+ *  per-outcome convention. `workspacePath` is the project's checkout path on
+ *  disk — what the stand-up groups by and what a project card names itself
+ *  after. Root-only is enforced at the write path (`work-items/store.ts`),
+ *  re-proven at boot below. Same additive-table reasoning as verify/fanout:
+ *  `work_items` is frozen exact-shape. */
+export const WORK_ITEM_WORKSPACE_TABLE_DDL = `
+CREATE TABLE IF NOT EXISTS work_item_workspace (
+  work_item_id   TEXT PRIMARY KEY REFERENCES work_items(id),
+  workspace_path TEXT NOT NULL,
+  updated_at     TEXT NOT NULL
+)`;
+
+export const WORK_ITEM_WORKSPACE_DDL = `${WORK_ITEM_WORKSPACE_TABLE_DDL};`;
+
 export const WORK_ITEM_EDIT_RECEIPTS_DDL = `
 CREATE TABLE IF NOT EXISTS work_item_edit_receipts (
   key_digest          TEXT PRIMARY KEY CHECK (length(key_digest) = 64),
@@ -724,6 +740,7 @@ const REQUIRED_TABLE_SQL = new Map<string, string>([
   ["work_item_attachments", WORK_ITEM_ATTACHMENTS_TABLE_DDL],
   ["work_item_verify", WORK_ITEM_VERIFY_TABLE_DDL],
   ["work_item_fanout", WORK_ITEM_FANOUT_TABLE_DDL],
+  ["work_item_workspace", WORK_ITEM_WORKSPACE_TABLE_DDL],
   ["work_item_edit_receipts", WORK_ITEM_EDIT_RECEIPTS_DDL],
   ["work_item_id_allocator", WORK_ITEM_ID_ALLOCATOR_TABLE_DDL],
   ["work_item_id_burns", WORK_ITEM_ID_BURNS_TABLE_DDL],
@@ -749,6 +766,7 @@ const V2_ADDITIVE_TABLES: ReadonlyArray<{ name: string; ddl: string }> = [
   { name: "work_item_attachments", ddl: WORK_ITEM_ATTACHMENTS_DDL },
   { name: "work_item_verify", ddl: WORK_ITEM_VERIFY_DDL },
   { name: "work_item_fanout", ddl: WORK_ITEM_FANOUT_DDL },
+  { name: "work_item_workspace", ddl: WORK_ITEM_WORKSPACE_DDL },
 ];
 
 /**
@@ -1046,6 +1064,18 @@ export function verifyCurrentWorkItemSchema(db: DatabaseType): void {
   const fanoutRows = db.prepare("SELECT work_item_id FROM work_item_fanout").pluck().all() as string[];
   for (const workItemId of fanoutRows) {
     if (!byId.has(workItemId)) refusal();
+  }
+  // Project identity: every row references a live item, and (design invariant,
+  // docs/tengu/03-implementation-plan.md step 11) only a root (depth 0) item —
+  // a project — may carry one. The write path enforces this; re-proven here.
+  const workspaceRows = db.prepare("SELECT work_item_id, workspace_path FROM work_item_workspace").all() as Array<{
+    work_item_id: string;
+    workspace_path: string;
+  }>;
+  for (const row of workspaceRows) {
+    const owner = byId.get(row.work_item_id);
+    if (!owner || owner.depth !== 0) refusal();
+    if (!row.workspace_path.trim()) refusal();
   }
 }
 

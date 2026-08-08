@@ -9,6 +9,7 @@ import { allocateWorkItemId, useWorkItemAllocationClaim } from './migrate.js';
 import { currentApproval, currentApprovalsByItem, type WorkItemApproval } from './approval-rows.js';
 import { currentVerifyCommand, currentVerifyCommandsByItem, upsertVerifyCommand } from './verify-rows.js';
 import { currentFanout, currentFanoutsByItem, upsertFanout, type WorkItemFanout } from './fanout-rows.js';
+import { currentWorkspace, currentWorkspacesByItem, upsertWorkspacePath, type WorkItemWorkspace } from './workspace-rows.js';
 
 /**
  * Work-item store — the substrate of the Todos ledger (GRS-002, elevated by
@@ -143,6 +144,12 @@ export interface WorkItem {
    *  the same way verify/approval fields are. */
   parallelSafe: boolean;
   parallelGroup: string | null;
+  /** Project identity (docs/tengu/03-implementation-plan.md step 11): root =
+   *  project, matching the one-root-per-outcome convention. Set only on a
+   *  depth-0 item; always null on any deeper Todo. Stored in
+   *  `work_item_workspace` (additive table), overlaid the same way
+   *  verify/fanout are. */
+  workspacePath: string | null;
   approvalState: ApprovalState | null;
   approvalRequest: string | null;
   approvalRef: string | null;
@@ -195,6 +202,10 @@ export interface CreateWorkItemInput {
    *  false when omitted — must be affirmatively set true by the planner. */
   parallelSafe?: boolean;
   parallelGroup?: string | null;
+  /** Project identity (docs/tengu/03-implementation-plan.md step 11). Only
+   *  valid on a root create (no `parentId`) — throws otherwise, same shape as
+   *  `verifyCommand`'s depth-3 guard. */
+  workspacePath?: string | null;
   // Deliberately NO approval fields (design §1.3, anti-bottleneck principle):
   // a fresh Todo's approval is always none; approval is attached only by the
   // 021b decision/mirror machinery where a human decision is genuinely required.
@@ -261,7 +272,7 @@ function parseVerifyPolicy(raw: unknown): VerifyPolicy | null {
 type WorkItemRowBase = Omit<WorkItem,
   | 'approvalState' | 'approvalRequest' | 'approvalRef' | 'approvalOptions' | 'approvalChoice' | 'approvalOperatorOnly'
   | 'approvalTarget' | 'approvalTargetKind' | 'approvalEscalatedAt' | 'approvalDecidedBy' | 'approvalDecidedAt'
-  | 'verifyCommand' | 'parallelSafe' | 'parallelGroup'>;
+  | 'verifyCommand' | 'parallelSafe' | 'parallelGroup' | 'workspacePath'>;
 
 function rowToWorkItem(row: Record<string, unknown>): WorkItemRowBase {
   return {
@@ -306,12 +317,14 @@ function overlayApproval(
   approval: WorkItemApproval | undefined,
   verifyCommand: string | undefined,
   fanout: WorkItemFanout | undefined,
+  workspace: WorkItemWorkspace | undefined,
 ): WorkItem {
   return {
     ...base,
     verifyCommand: verifyCommand ?? null,
     parallelSafe: fanout?.parallelSafe ?? false,
     parallelGroup: fanout?.parallelGroup ?? null,
+    workspacePath: workspace?.workspacePath ?? null,
     approvalState: approval?.state ?? null,
     approvalRequest: approval?.request ?? null,
     approvalRef: approval?.ref ?? null,
@@ -332,7 +345,14 @@ function hydrateApprovals(items: WorkItemRowBase[]): WorkItem[] {
   const currentByItem = currentApprovalsByItem(ids);
   const verifyByItem = currentVerifyCommandsByItem(ids);
   const fanoutByItem = currentFanoutsByItem(ids);
-  return items.map((item) => overlayApproval(item, currentByItem.get(item.id), verifyByItem.get(item.id), fanoutByItem.get(item.id)));
+  const workspaceByItem = currentWorkspacesByItem(ids);
+  return items.map((item) => overlayApproval(
+    item,
+    currentByItem.get(item.id),
+    verifyByItem.get(item.id),
+    fanoutByItem.get(item.id),
+    workspaceByItem.get(item.id),
+  ));
 }
 
 /** True only for a UNIQUE-constraint violation — NOT a CHECK violation (those must
@@ -573,6 +593,12 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
   if (input.verifyCommand !== undefined && input.verifyCommand !== null && depth !== 3) {
     throw new Error(`verifyCommand can only be set on a depth-3 sub-sub-task (this item would be depth ${depth})`);
   }
+  // Project identity (docs/tengu/03-implementation-plan.md step 11): root =
+  // project, matching the one-root-per-outcome convention — only a depth-0
+  // create may carry a workspacePath.
+  if (input.workspacePath !== undefined && input.workspacePath !== null && depth !== 0) {
+    throw new Error(`workspacePath can only be set on a root Todo (this item would be depth ${depth})`);
+  }
   const companyPrefix = resolveCompanyPrefix();
   const department = input.department !== undefined ? input.department : parent?.department ?? null;
   const prefix = department ? resolveDepartmentPrefix(db, department, companyPrefix) : companyPrefix;
@@ -591,7 +617,7 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
       .get(source, sourceRef) as Record<string, unknown> | undefined;
     // Overlay like every other WorkItem-producing read: a retried machine mint
     // can hit an item that has since gained an approval.
-    return row ? overlayApproval(rowToWorkItem(row), currentApproval(row.id as string), currentVerifyCommand(row.id as string), currentFanout(row.id as string)) : undefined;
+    return row ? overlayApproval(rowToWorkItem(row), currentApproval(row.id as string), currentVerifyCommand(row.id as string), currentFanout(row.id as string), currentWorkspace(row.id as string)) : undefined;
   };
 
   const txn = db.transaction((): WorkItem => {
@@ -646,6 +672,9 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
     if (input.parallelSafe || input.parallelGroup != null) {
       upsertFanout(id, { parallelSafe: input.parallelSafe ?? false, parallelGroup: input.parallelGroup ?? null });
     }
+    if (input.workspacePath) {
+      upsertWorkspacePath(id, input.workspacePath);
+    }
     if (parent) {
       // Re-verify the parent under the write lock before auditing the link.
       const liveParent = db.prepare('SELECT depth FROM work_items WHERE id = ?').get(parent.id) as { depth: number } | undefined;
@@ -683,7 +712,7 @@ export function getWorkItem(id: string): WorkItem | undefined {
   const db = initDb();
   const todoId = parseTodoId(id);
   const row = db.prepare('SELECT * FROM work_items WHERE id = ?').get(todoId) as Record<string, unknown> | undefined;
-  return row ? overlayApproval(rowToWorkItem(row), currentApproval(todoId), currentVerifyCommand(todoId), currentFanout(todoId)) : undefined;
+  return row ? overlayApproval(rowToWorkItem(row), currentApproval(todoId), currentVerifyCommand(todoId), currentFanout(todoId), currentWorkspace(todoId)) : undefined;
 }
 
 /**
@@ -702,6 +731,28 @@ export function setWorkItemFanout(workItemId: string, input: { parallelSafe: boo
     kind: 'metadata_edited',
     actor,
     detail: { parallelSafe: stored.parallelSafe, parallelGroup: stored.parallelGroup },
+    versionEffect: 'companion',
+  });
+  return stored;
+}
+
+/**
+ * Set (insert or replace) a root Todo's project workspace path, auditing the
+ * change (docs/tengu/03-implementation-plan.md step 11). Throws for a
+ * non-root item — a project is a root, and giving a deeper Todo its own
+ * workspace identity would break the one-root-per-outcome convention the
+ * stand-up groups by.
+ */
+export function setWorkItemWorkspace(workItemId: string, workspacePath: string, actor: string): WorkItemWorkspace {
+  const item = getWorkItem(workItemId);
+  if (!item) throw new Error(`work item ${workItemId} not found`);
+  if (item.depth !== 0) throw new Error(`workspacePath can only be set on a root Todo (${item.id} is depth ${item.depth})`);
+  const stored = upsertWorkspacePath(item.id, workspacePath);
+  appendWorkItemEvent({
+    workItemId: item.id,
+    kind: 'metadata_edited',
+    actor,
+    detail: { workspacePath: stored.workspacePath },
     versionEffect: 'companion',
   });
   return stored;
@@ -731,7 +782,7 @@ export function getWorkItemBySourceRef(source: WorkItemSource, sourceRef: string
   const row = db
     .prepare('SELECT * FROM work_items WHERE source = ? AND source_ref = ?')
     .get(source, sourceRef) as Record<string, unknown> | undefined;
-  return row ? overlayApproval(rowToWorkItem(row), currentApproval(row.id as string), currentVerifyCommand(row.id as string), currentFanout(row.id as string)) : undefined;
+  return row ? overlayApproval(rowToWorkItem(row), currentApproval(row.id as string), currentVerifyCommand(row.id as string), currentFanout(row.id as string), currentWorkspace(row.id as string)) : undefined;
 }
 
 const WORK_ITEM_STATUS_VALUES: readonly WorkItemStatus[] = [
