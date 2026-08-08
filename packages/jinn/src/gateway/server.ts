@@ -56,6 +56,7 @@ import { UNIDENTIFIED_TOOL_CALL_ERROR, verifySessionCapability } from "../mcp/id
 import { cleanupMcpConfigFile, sweepOrphanMcpConfigFiles } from "../mcp/resolver.js";
 import { startStatusReconciler } from "./status-reconciler.js";
 import { startSessionTelemetryBroadcaster } from "./session-telemetry-broadcaster.js";
+import { startContextCompactionWatcher } from "./context-compaction-watcher.js";
 import { armJinnAttachGate } from "../mcp/attachment.js";
 import { syncExternalTurn } from "./external-turns.js";
 import { pickEncoding, isCompressibleExt, compressBuffer, compressStream, type Encoding } from "./compress.js";
@@ -1036,6 +1037,16 @@ export async function startGateway(
     employees: () => employeeRegistry,
   });
 
+  // Step 7: context compaction. Same free per-write cadence as the telemetry
+  // broadcaster above, but acts on evaluateGovernor()'s "handoff" decision —
+  // compacts an idle session's engine transcript IN PLACE at 80% context
+  // usage rather than waiting on Claude Code's own (undocumented-threshold)
+  // auto-compact. Never halts; see sessions/compaction.ts.
+  const stopContextCompactionWatcher = startContextCompactionWatcher({
+    getEngine: (name) => engines.get(name),
+    governorConfig: () => currentConfig.governor,
+  });
+
   // Todos ledger truth-keeping (GRS-021a): periodically re-derive work-item
   // status from linked-session evidence, so a session settling mid-process moves
   // its item to in_review/done (trust) without waiting for the next boot.
@@ -1385,6 +1396,7 @@ export async function startGateway(
     stopStatusReconciler();
     stopWorkItemReconciler();
     await stopSessionTelemetryBroadcaster();
+    await stopContextCompactionWatcher();
     clearInterval(modelRefreshTimer);
     workflowService.dispose(); workflowDatabase.close();
 
