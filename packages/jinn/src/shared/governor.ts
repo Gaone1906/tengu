@@ -34,7 +34,9 @@ function resolveThreshold(configured: number | undefined): number {
     : DEFAULT_GOVERNOR_STOP_PCT;
 }
 
-export function resolveGovernorConfig(config: GovernorConfig | undefined): Required<GovernorConfig> {
+export type ResolvedGovernorStopThresholds = Required<Pick<GovernorConfig, "fiveHourStopPct" | "sevenDayStopPct" | "contextCompactPct">>;
+
+export function resolveGovernorConfig(config: GovernorConfig | undefined): ResolvedGovernorStopThresholds {
   return {
     fiveHourStopPct: resolveThreshold(config?.fiveHourStopPct),
     sevenDayStopPct: resolveThreshold(config?.sevenDayStopPct),

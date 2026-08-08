@@ -906,6 +906,33 @@ export interface EngineLimitsResponse {
   engines: Record<string, EngineLimitEngineSnapshot>;
 }
 
+/** Pacing controller thresholds (docs/tengu/08-pacing-controller.md, D9): pure
+ *  arithmetic over telemetry, moving the effort ladder before fan-out. `mode`
+ *  is locked to `balanced` by default (D10). */
+export interface PacingConfig {
+  mode?: "even" | "balanced" | "eager";
+  accelerateBelowPace?: number;
+  throttleAbovePace?: number;
+  accelerateAfterWindowElapsed?: number;
+  noFanoutAfterWindowElapsed?: number;
+  effortLadder?: string[];
+  eagerModeWeeklyBrake?: number;
+}
+
+/** Runtime fan-out budget gate (docs/tengu/07-fanout-policy.md, D8) — the
+ *  planner's `parallelSafe`/`parallelGroup` (work-items/store.ts) is Gate 1;
+ *  this config resolves Gate 2, evaluated by shared/fanout-policy.ts. */
+export interface FanoutConfig {
+  enabled?: boolean;
+  maxDegree?: number;
+  fiveHourMaxPct?: number;
+  sevenDayMaxPct?: number;
+  pacingRatioMax?: number;
+  projectedCeilingPct?: number;
+  minWindowMinutesRemaining?: number;
+  requireHistorySamples?: number;
+}
+
 /** Deterministic usage governor thresholds, as percentages of each Claude usage
  *  window. All three default to 80 when unset or non-positive. The 5-hour and
  *  7-day thresholds gate session spawns (evaluateGovernor's "halt"); the context
@@ -914,6 +941,8 @@ export interface GovernorConfig {
   fiveHourStopPct?: number;
   sevenDayStopPct?: number;
   contextCompactPct?: number;
+  pacing?: PacingConfig;
+  fanout?: FanoutConfig;
 }
 
 // --- config.yaml `models:` block shapes (all fields optional/forgiving) ---
