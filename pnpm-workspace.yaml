@@ -5,3 +5,6 @@ onlyBuiltDependencies:
   - "@swc/core"
   - better-sqlite3
   - classic-level
+  - "@whiskeysockets/baileys"
+  - esbuild
+  - protobufjs
