@@ -808,6 +808,34 @@ export function queryWorkItems(filter: ListWorkItemsFilter = {}): WorkItemPage {
   };
 }
 
+/** Statuses that mean "ready to pick up" for the continuous loop (step 8,
+ *  D19): created but not yet actively worked. `executing` already has a live
+ *  session; `in_review`/`blocked`/`escalated` need a human or a reviewer;
+ *  `done`/`cancelled` are terminal. */
+const OPEN_ASSIGNABLE_STATUSES: readonly WorkItemStatus[] = ['backlog', 'assigned'];
+
+/**
+ * Continuous loop's assignment query (docs/tengu/03-implementation-plan.md
+ * step 8, D19): the next open work item for `assignee`, highest priority
+ * first, ties broken exactly the way the ledger already orders work
+ * (`queryWorkItems`'s own ORDER BY). Zero-token, deterministic `SELECT` —
+ * never a dispatcher employee, never a model call (D6).
+ */
+export function nextOpenWorkItemForAssignee(assignee: string): WorkItem | undefined {
+  const db = initDb();
+  const placeholders = OPEN_ASSIGNABLE_STATUSES.map(() => '?').join(', ');
+  const row = db
+    .prepare(
+      `SELECT * FROM work_items WHERE assignee = ? AND status IN (${placeholders})
+       ORDER BY priority DESC, (rank IS NULL) ASC, rank ASC, updated_at DESC, created_at DESC, id ASC
+       LIMIT 1`,
+    )
+    .get(assignee, ...OPEN_ASSIGNABLE_STATUSES) as Record<string, unknown> | undefined;
+  if (!row) return undefined;
+  const [item] = hydrateApprovals([rowToWorkItem(row)]);
+  return item;
+}
+
 /** List work items, recently-updated first, optionally filtered. Compatibility
  * wrapper: an omitted limit still means the full matching set. */
 export function listWorkItems(filter?: ListWorkItemsFilter): WorkItem[] {

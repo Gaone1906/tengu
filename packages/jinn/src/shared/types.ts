@@ -600,6 +600,12 @@ export interface Employee {
   reportsTo?: string | string[];
   /** Services this employee provides to the org */
   provides?: ServiceDeclaration[];
+  /** Asks clarifying questions in chat and idles for a reply (the council
+   *  employee, D11) rather than working a ticket end to end. Continuous-loop
+   *  auto-continuation (docs/tengu/03-implementation-plan.md step 8) must
+   *  exclude these — dispatching the next unit for one would let it answer
+   *  its own questions. Default false/unset. */
+  interactive?: boolean;
 }
 
 /** A service that an employee can provide to other employees/departments. */

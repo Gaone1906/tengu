@@ -198,6 +198,7 @@ import {
   listWorkItemEvents,
   listWorkItemEventsForItems,
   listWorkItems,
+  nextOpenWorkItemForAssignee,
   queryWorkItems,
   STICKY_STATUSES,
   updateWorkItemConditional,
@@ -786,6 +787,71 @@ export function resumeGovernorHaltedSession(sessionKeyOrId: string, context: Api
     context,
   );
   return true;
+}
+
+function continuationPrompt(item: WorkItem): string {
+  return [
+    `Continue with the next unit: ${item.id}.`,
+    `Title: ${item.title}`,
+    item.body ? `Body:\n${item.body}` : "Body: (none)",
+    item.acceptance ? `Acceptance criteria:\n${item.acceptance}` : "Acceptance criteria: (none)",
+  ].join("\n\n");
+}
+
+/**
+ * Continuous loop (docs/tengu/03-implementation-plan.md step 8, D19): instead
+ * of letting a session idle after an ordinary Stop, dispatch the next open
+ * unit for the same employee on the SAME session (D4 — resume, don't spawn).
+ * Assignment is `nextOpenWorkItemForAssignee`, a deterministic zero-token
+ * `SELECT` — never the upstream todo-dispatcher, never a model call.
+ *
+ * Called from the `/api/internal/hook` relay right after every Stop is
+ * delivered to `HookRegistry`. Runs enqueued on the session's OWN queue key,
+ * so it always executes strictly after the turn that just Stopped has fully
+ * settled (`runWebSession`'s status write included) — regardless of exactly
+ * when the Stop hook lands relative to that cleanup. That settled status is
+ * what `session.status === "idle"` below is checking: anything else (error,
+ * waiting on a governor halt, interrupted) means this turn did NOT end
+ * cleanly and must not be auto-continued.
+ */
+export async function dispatchContinuousLoop(jinnSessionId: string, context: ApiContext): Promise<boolean> {
+  const startingSession = getSession(jinnSessionId);
+  if (!startingSession) return false;
+  const sessionKey = startingSession.sessionKey || startingSession.sourceRef || startingSession.id;
+
+  let dispatched = false;
+  await context.sessionManager.getQueue().enqueue(sessionKey, async () => {
+    const session = getSession(jinnSessionId);
+    if (!session || session.status !== "idle" || !session.employee) return;
+
+    const config = context.getConfig();
+    const employee = scanOrg(config).get(session.employee);
+    // Unknown employee (deleted since the turn started) or the council-style
+    // interactive employee (D11) — an interactive employee auto-continuing
+    // would answer its own clarifying questions instead of waiting for chat.
+    if (!employee || employee.interactive) return;
+
+    const governorDecision = evaluateGovernor(readLocalGovernorTelemetry(), config.governor);
+    if (governorDecision.action !== "run") return;
+
+    const nextUnit = nextOpenWorkItemForAssignee(session.employee);
+    if (!nextUnit) return;
+
+    const engine = context.sessionManager.getEngine(session.engine);
+    if (!engine) return;
+
+    try {
+      linkSession(nextUnit.id, session.id);
+    } catch (err) {
+      logger.warn(`Continuous loop: failed to link ${nextUnit.id} to session ${session.id}: ${err instanceof Error ? err.message : err}`);
+      return;
+    }
+
+    logger.info(`Continuous loop: dispatching ${nextUnit.id} to session ${session.id} (${session.employee})`);
+    dispatchWebSessionRun(session, continuationPrompt(nextUnit), engine, config, context);
+    dispatched = true;
+  });
+  return dispatched;
 }
 
 /**
@@ -6824,6 +6890,16 @@ export async function handleApiRequest(
         if (existing && getEngineSessionRef(existing, "claude").id !== hook.session_id) {
           recordEngineSessionId(jinnSessionId, "claude", hook.session_id);
         }
+      }
+      // Continuous loop (step 8, D19): every Stop is a candidate to keep the
+      // employee working instead of idling. Fire-and-forget — the hook POST
+      // must not wait on a whole extra turn — and enqueued on the session's
+      // own queue key inside dispatchContinuousLoop, so it only acts once
+      // this Stop's turn has actually settled.
+      if (hook.hook_event_name === "Stop") {
+        dispatchContinuousLoop(jinnSessionId, context).catch((err) => {
+          logger.warn(`Continuous loop dispatch failed for session ${jinnSessionId}: ${err instanceof Error ? err.message : err}`);
+        });
       }
       return json(res, { message: "ok" });
     }

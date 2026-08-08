@@ -95,6 +95,7 @@ export function scanOrg(config?: JinnConfig): Map<string, Employee> {
           cliFlags: Array.isArray(data.cliFlags) ? data.cliFlags : undefined,
           effortLevel: typeof data.effortLevel === "string" ? data.effortLevel : undefined,
           alwaysNotify: typeof data.alwaysNotify === "boolean" ? data.alwaysNotify : true,
+          interactive: typeof data.interactive === "boolean" ? data.interactive : undefined,
           reportsTo: data.reportsTo ?? undefined,
           mcp: data.mcp ?? undefined,
           // GRS-017e: per-employee jinn-toolset override (force-on pilot /
