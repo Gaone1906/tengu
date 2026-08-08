@@ -8,6 +8,7 @@ import { resolveDepartmentPrefix } from './departments.js';
 import { allocateWorkItemId, useWorkItemAllocationClaim } from './migrate.js';
 import { currentApproval, currentApprovalsByItem, type WorkItemApproval } from './approval-rows.js';
 import { currentVerifyCommand, currentVerifyCommandsByItem, upsertVerifyCommand } from './verify-rows.js';
+import { currentFanout, currentFanoutsByItem, upsertFanout, type WorkItemFanout } from './fanout-rows.js';
 
 /**
  * Work-item store — the substrate of the Todos ledger (GRS-002, elevated by
@@ -135,6 +136,13 @@ export interface WorkItem {
    *  `work_item_verify` (additive table), not a `work_items` column — overlaid
    *  onto every read the same way approval fields are. */
   verifyCommand: string | null;
+  /** Fan-out planning gate (docs/tengu/07-fanout-policy.md, D8): the planner's
+   *  call, justified in the body. Defaults false/null for every item that has
+   *  never had one set — sequential is always the safe reading. Stored in
+   *  `work_item_fanout` (additive table), not a `work_items` column — overlaid
+   *  the same way verify/approval fields are. */
+  parallelSafe: boolean;
+  parallelGroup: string | null;
   approvalState: ApprovalState | null;
   approvalRequest: string | null;
   approvalRef: string | null;
@@ -183,6 +191,10 @@ export interface CreateWorkItemInput {
    *  `WorkItem.verifyCommand`. Throws at create time if the item being created
    *  will not land at depth 3. */
   verifyCommand?: string | null;
+  /** Fan-out planning gate (docs/tengu/07-fanout-policy.md Gate 1). Defaults
+   *  false when omitted — must be affirmatively set true by the planner. */
+  parallelSafe?: boolean;
+  parallelGroup?: string | null;
   // Deliberately NO approval fields (design §1.3, anti-bottleneck principle):
   // a fresh Todo's approval is always none; approval is attached only by the
   // 021b decision/mirror machinery where a human decision is genuinely required.
@@ -249,7 +261,7 @@ function parseVerifyPolicy(raw: unknown): VerifyPolicy | null {
 type WorkItemRowBase = Omit<WorkItem,
   | 'approvalState' | 'approvalRequest' | 'approvalRef' | 'approvalOptions' | 'approvalChoice' | 'approvalOperatorOnly'
   | 'approvalTarget' | 'approvalTargetKind' | 'approvalEscalatedAt' | 'approvalDecidedBy' | 'approvalDecidedAt'
-  | 'verifyCommand'>;
+  | 'verifyCommand' | 'parallelSafe' | 'parallelGroup'>;
 
 function rowToWorkItem(row: Record<string, unknown>): WorkItemRowBase {
   return {
@@ -280,17 +292,26 @@ function rowToWorkItem(row: Record<string, unknown>): WorkItemRowBase {
 }
 
 /**
- * The ONLY producer of a WorkItem's approval + verify fields: the item's
- * current `work_item_approvals` row (or "no approval" when it has none) and its
- * current `work_item_verify` command (or null). Applied explicitly at every
- * read function (single reads hydrate per item; page/tree reads batch), which
- * keeps EVERY consumer — payloads, authority checks, activity cards,
- * transitions' returns — sourcing both from one place.
+ * The ONLY producer of a WorkItem's approval + verify + fan-out fields: the
+ * item's current `work_item_approvals` row (or "no approval" when it has
+ * none), its current `work_item_verify` command (or null), and its current
+ * `work_item_fanout` annotation (or the false/null default when the planner
+ * never set one). Applied explicitly at every read function (single reads
+ * hydrate per item; page/tree reads batch), which keeps EVERY consumer —
+ * payloads, authority checks, activity cards, transitions' returns — sourcing
+ * all three from one place.
  */
-function overlayApproval(base: WorkItemRowBase, approval: WorkItemApproval | undefined, verifyCommand: string | undefined): WorkItem {
+function overlayApproval(
+  base: WorkItemRowBase,
+  approval: WorkItemApproval | undefined,
+  verifyCommand: string | undefined,
+  fanout: WorkItemFanout | undefined,
+): WorkItem {
   return {
     ...base,
     verifyCommand: verifyCommand ?? null,
+    parallelSafe: fanout?.parallelSafe ?? false,
+    parallelGroup: fanout?.parallelGroup ?? null,
     approvalState: approval?.state ?? null,
     approvalRequest: approval?.request ?? null,
     approvalRef: approval?.ref ?? null,
@@ -310,7 +331,8 @@ function hydrateApprovals(items: WorkItemRowBase[]): WorkItem[] {
   const ids = items.map((item) => item.id);
   const currentByItem = currentApprovalsByItem(ids);
   const verifyByItem = currentVerifyCommandsByItem(ids);
-  return items.map((item) => overlayApproval(item, currentByItem.get(item.id), verifyByItem.get(item.id)));
+  const fanoutByItem = currentFanoutsByItem(ids);
+  return items.map((item) => overlayApproval(item, currentByItem.get(item.id), verifyByItem.get(item.id), fanoutByItem.get(item.id)));
 }
 
 /** True only for a UNIQUE-constraint violation — NOT a CHECK violation (those must
@@ -569,7 +591,7 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
       .get(source, sourceRef) as Record<string, unknown> | undefined;
     // Overlay like every other WorkItem-producing read: a retried machine mint
     // can hit an item that has since gained an approval.
-    return row ? overlayApproval(rowToWorkItem(row), currentApproval(row.id as string), currentVerifyCommand(row.id as string)) : undefined;
+    return row ? overlayApproval(rowToWorkItem(row), currentApproval(row.id as string), currentVerifyCommand(row.id as string), currentFanout(row.id as string)) : undefined;
   };
 
   const txn = db.transaction((): WorkItem => {
@@ -619,6 +641,11 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
     if (input.verifyCommand) {
       upsertVerifyCommand(id, input.verifyCommand);
     }
+    // A row is only worth writing when it says something other than the
+    // false/null default overlayApproval already returns for an absent one.
+    if (input.parallelSafe || input.parallelGroup != null) {
+      upsertFanout(id, { parallelSafe: input.parallelSafe ?? false, parallelGroup: input.parallelGroup ?? null });
+    }
     if (parent) {
       // Re-verify the parent under the write lock before auditing the link.
       const liveParent = db.prepare('SELECT depth FROM work_items WHERE id = ?').get(parent.id) as { depth: number } | undefined;
@@ -656,7 +683,28 @@ export function getWorkItem(id: string): WorkItem | undefined {
   const db = initDb();
   const todoId = parseTodoId(id);
   const row = db.prepare('SELECT * FROM work_items WHERE id = ?').get(todoId) as Record<string, unknown> | undefined;
-  return row ? overlayApproval(rowToWorkItem(row), currentApproval(todoId), currentVerifyCommand(todoId)) : undefined;
+  return row ? overlayApproval(rowToWorkItem(row), currentApproval(todoId), currentVerifyCommand(todoId), currentFanout(todoId)) : undefined;
+}
+
+/**
+ * Set (insert or replace) a Todo's fan-out planning annotation, auditing the
+ * change (docs/tengu/07-fanout-policy.md Gate 1). `parallelSafe: true`
+ * without a justification in the caller's own todo-body edit is a planner
+ * discipline issue, not something this function can enforce — it only
+ * records the decision and the audit trail for it.
+ */
+export function setWorkItemFanout(workItemId: string, input: { parallelSafe: boolean; parallelGroup?: string | null }, actor: string): WorkItemFanout {
+  const item = getWorkItem(workItemId);
+  if (!item) throw new Error(`work item ${workItemId} not found`);
+  const stored = upsertFanout(item.id, input);
+  appendWorkItemEvent({
+    workItemId: item.id,
+    kind: 'metadata_edited',
+    actor,
+    detail: { parallelSafe: stored.parallelSafe, parallelGroup: stored.parallelGroup },
+    versionEffect: 'companion',
+  });
+  return stored;
 }
 
 /** Read a bounded set of Todos in caller order with one row query and one
@@ -683,7 +731,7 @@ export function getWorkItemBySourceRef(source: WorkItemSource, sourceRef: string
   const row = db
     .prepare('SELECT * FROM work_items WHERE source = ? AND source_ref = ?')
     .get(source, sourceRef) as Record<string, unknown> | undefined;
-  return row ? overlayApproval(rowToWorkItem(row), currentApproval(row.id as string), currentVerifyCommand(row.id as string)) : undefined;
+  return row ? overlayApproval(rowToWorkItem(row), currentApproval(row.id as string), currentVerifyCommand(row.id as string), currentFanout(row.id as string)) : undefined;
 }
 
 const WORK_ITEM_STATUS_VALUES: readonly WorkItemStatus[] = [

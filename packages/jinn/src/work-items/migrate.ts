@@ -369,6 +369,22 @@ CREATE TABLE IF NOT EXISTS work_item_verify (
 
 export const WORK_ITEM_VERIFY_DDL = `${WORK_ITEM_VERIFY_TABLE_DDL};`;
 
+/** Fan-out planning gate (docs/tengu/07-fanout-policy.md, D8, Gate 1): the
+ *  planner's `parallelSafe`/`parallelGroup` call on a sub-task. `parallelSafe`
+ *  defaults to 0 (false) at the DB level too — an item with no row here is
+ *  indistinguishable from one explicitly marked not-safe, matching the "must
+ *  be affirmatively justified" design. Same additive-table reasoning as
+ *  `work_item_verify`: `work_items` is frozen exact-shape. */
+export const WORK_ITEM_FANOUT_TABLE_DDL = `
+CREATE TABLE IF NOT EXISTS work_item_fanout (
+  work_item_id   TEXT PRIMARY KEY REFERENCES work_items(id),
+  parallel_safe  INTEGER NOT NULL DEFAULT 0 CHECK (parallel_safe IN (0, 1)),
+  parallel_group TEXT,
+  updated_at     TEXT NOT NULL
+)`;
+
+export const WORK_ITEM_FANOUT_DDL = `${WORK_ITEM_FANOUT_TABLE_DDL};`;
+
 export const WORK_ITEM_EDIT_RECEIPTS_DDL = `
 CREATE TABLE IF NOT EXISTS work_item_edit_receipts (
   key_digest          TEXT PRIMARY KEY CHECK (length(key_digest) = 64),
@@ -707,6 +723,7 @@ const REQUIRED_TABLE_SQL = new Map<string, string>([
   ["work_item_approval_operator_only", WORK_ITEM_APPROVAL_OPERATOR_ONLY_DDL],
   ["work_item_attachments", WORK_ITEM_ATTACHMENTS_TABLE_DDL],
   ["work_item_verify", WORK_ITEM_VERIFY_TABLE_DDL],
+  ["work_item_fanout", WORK_ITEM_FANOUT_TABLE_DDL],
   ["work_item_edit_receipts", WORK_ITEM_EDIT_RECEIPTS_DDL],
   ["work_item_id_allocator", WORK_ITEM_ID_ALLOCATOR_TABLE_DDL],
   ["work_item_id_burns", WORK_ITEM_ID_BURNS_TABLE_DDL],
@@ -731,6 +748,7 @@ const V2_ADDITIVE_TABLES: ReadonlyArray<{ name: string; ddl: string }> = [
   { name: "work_item_approval_operator_only", ddl: WORK_ITEM_APPROVAL_OPERATOR_ONLY_DDL },
   { name: "work_item_attachments", ddl: WORK_ITEM_ATTACHMENTS_DDL },
   { name: "work_item_verify", ddl: WORK_ITEM_VERIFY_DDL },
+  { name: "work_item_fanout", ddl: WORK_ITEM_FANOUT_DDL },
 ];
 
 /**
@@ -1021,6 +1039,13 @@ export function verifyCurrentWorkItemSchema(db: DatabaseType): void {
     const owner = byId.get(row.work_item_id);
     if (!owner || owner.depth !== 3) refusal();
     if (!row.command.trim()) refusal();
+  }
+  // Fan-out planning gate: every row references a live item. No depth
+  // restriction (unlike verify) — parallelSafe is a planner call on any
+  // sub-task, not sub-sub-task-only.
+  const fanoutRows = db.prepare("SELECT work_item_id FROM work_item_fanout").pluck().all() as string[];
+  for (const workItemId of fanoutRows) {
+    if (!byId.has(workItemId)) refusal();
   }
 }
 
