@@ -333,6 +333,7 @@ import {
 import { updateSkillContent } from "./skills.js";
 import type { WorkflowService } from "../workflows/service.js";
 import { handleWorkflowApi } from "./workflow-api.js";
+import { handleStandupApi } from "./standup-api.js";
 
 /** Max bytes accepted on /api/internal/hook (loopback-only relay payloads are tiny). */
 const HOOK_BODY_MAX_BYTES = 64 * 1024;
@@ -2449,6 +2450,7 @@ export async function handleApiRequest(
     }
     if (context.workflowService && await handleWorkflowApi(req, res, { service: context.workflowService,
       authenticated: authenticateGatewayRequest(req, context.gatewayAuthToken, jinnHome).ok })) return;
+    if (await handleStandupApi(req, res)) return;
     if (!identifiedCaller && rejectUnverifiedIdentifiedApiCaller(req, res, method, pathname, context)) return;
 
     if (method === "GET" && pathname === "/api/features") {
