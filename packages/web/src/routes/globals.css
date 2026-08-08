@@ -265,6 +265,185 @@
   --ease-snappy: cubic-bezier(0.2,0,0,1);
 }
 
+/* DRACULA — ported from daisyUI's real, currently-shipping "dracula" theme
+   (packages/daisyui/src/themes/dracula.css @ saadeghi/daisyui master), mapped
+   into Jinn's own token names per D18 (docs/tengu/17-daisyui.md): base-100/200/300
+   -> bg/bg-secondary/bg-tertiary, base-content -> text-primary, primary/primary-content
+   -> accent/accent-contrast, info/success/warning/error -> system-blue/green/yellow/red,
+   daisyUI's own accent/secondary slots -> system-orange/system-purple. Structural
+   tokens (font, radius, ease, shadows) reuse Ledger Dark's — this ports the palette,
+   not the geometry. No daisyUI plugin installed; this is a plain data-theme value. */
+[data-theme="dracula"] {
+  --font-ui: "Hanken Grotesk", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --font-display: "Hanken Grotesk", -apple-system, system-ui, sans-serif;
+  --font-code: "IBM Plex Mono", "SF Mono", Monaco, Menlo, monospace;
+  --bg: #282A36;
+  --bg-secondary: #232530;
+  --bg-tertiary: #1F202A;
+  --material-regular: rgba(35,37,48,0.92);
+  --material-thick: rgba(40,42,54,0.96);
+  --material-thin: rgba(255,255,255,0.05);
+  --material-ultra-thin: rgba(255,255,255,0.03);
+  --fill-primary: rgba(255,255,255,0.10);
+  --fill-secondary: rgba(255,255,255,0.07);
+  --fill-tertiary: rgba(255,255,255,0.05);
+  --fill-quaternary: rgba(255,255,255,0.035);
+  --separator: rgba(255,255,255,0.09);
+  --separator-opaque: #3A3B44;
+  --scrim: rgba(0,0,0,0.32);
+  --text-primary: #F8F8F3;
+  --text-secondary: rgba(248,248,243,0.62);
+  --text-tertiary: rgba(248,248,243,0.38);
+  --text-quaternary: rgba(248,248,243,0.22);
+  --accent: #FF79C6;
+  --accent-fill: rgba(255,121,198,0.14);
+  --accent-contrast: #16050E;
+  --system-blue: #8BE9FD;
+  --system-green: #51FA7B;
+  --system-red: #FF5555;
+  --system-orange: #FFB86C;
+  --system-yellow: #F1FA8C;
+  --system-purple: #BD93F9;
+  --inset-shine: inset 0 1px 0 rgba(255,255,255,0.06);
+  --shadow-subtle: 0 1px 2px rgba(0,0,0,0.30);
+  --shadow-ambient: 0 0 0 0.5px rgba(0,0,0,0.30);
+  --shadow-key: 0 4px 16px rgba(0,0,0,0.50);
+  --shadow-card: 0 0 0 0.5px rgba(0,0,0,0.30), 0 4px 16px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.05);
+  --shadow-overlay: 0 0 0 0.5px rgba(0,0,0,0.40), 0 16px 48px rgba(0,0,0,0.65), inset 0 1px 0 rgba(255,255,255,0.05);
+  --pill-bg: rgba(35,37,48,0.64);
+  --pill-border: rgba(255,255,255,0.14);
+  --code-bg: rgba(255,255,255,0.05);
+  --code-border: rgba(255,255,255,0.09);
+  --code-text: #F8F8F3;
+  --ribbon-bg: #1F202A;
+  --sidebar-bg: #232530;
+  --sidebar-backdrop: blur(40px) saturate(160%);
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  --radius-2xl: 24px;
+  --ease-spring: cubic-bezier(0.34,1.56,0.64,1);
+  --ease-smooth: cubic-bezier(0.4,0,0.2,1);
+  --ease-snappy: cubic-bezier(0.2,0,0,1);
+}
+
+/* SYNTHWAVE — ported from daisyUI's real, currently-shipping "synthwave" theme
+   (packages/daisyui/src/themes/synthwave.css @ saadeghi/daisyui master), same
+   token mapping and structural reuse as Dracula above. */
+[data-theme="synthwave"] {
+  --font-ui: "Hanken Grotesk", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --font-display: "Hanken Grotesk", -apple-system, system-ui, sans-serif;
+  --font-code: "IBM Plex Mono", "SF Mono", Monaco, Menlo, monospace;
+  --bg: #09002F;
+  --bg-secondary: #120B3D;
+  --bg-tertiary: #1C184B;
+  --material-regular: rgba(18,11,61,0.92);
+  --material-thick: rgba(9,0,47,0.96);
+  --material-thin: rgba(255,255,255,0.05);
+  --material-ultra-thin: rgba(255,255,255,0.03);
+  --fill-primary: rgba(255,255,255,0.10);
+  --fill-secondary: rgba(255,255,255,0.07);
+  --fill-tertiary: rgba(255,255,255,0.05);
+  --fill-quaternary: rgba(255,255,255,0.035);
+  --separator: rgba(255,255,255,0.09);
+  --separator-opaque: #373461;
+  --scrim: rgba(0,0,0,0.32);
+  --text-primary: #A1B1FF;
+  --text-secondary: rgba(161,177,255,0.62);
+  --text-tertiary: rgba(161,177,255,0.38);
+  --text-quaternary: rgba(161,177,255,0.22);
+  --accent: #F861B4;
+  --accent-fill: rgba(248,97,180,0.14);
+  --accent-contrast: #500323;
+  --system-blue: #00BAFE;
+  --system-green: #00D3BB;
+  --system-red: #EC8C78;
+  --system-orange: #FF8904;
+  --system-yellow: #FEDE1C;
+  --system-purple: #71D1FE;
+  --inset-shine: inset 0 1px 0 rgba(255,255,255,0.06);
+  --shadow-subtle: 0 1px 2px rgba(0,0,0,0.30);
+  --shadow-ambient: 0 0 0 0.5px rgba(0,0,0,0.30);
+  --shadow-key: 0 4px 16px rgba(0,0,0,0.50);
+  --shadow-card: 0 0 0 0.5px rgba(0,0,0,0.30), 0 4px 16px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.05);
+  --shadow-overlay: 0 0 0 0.5px rgba(0,0,0,0.40), 0 16px 48px rgba(0,0,0,0.65), inset 0 1px 0 rgba(255,255,255,0.05);
+  --pill-bg: rgba(18,11,61,0.64);
+  --pill-border: rgba(255,255,255,0.14);
+  --code-bg: rgba(255,255,255,0.05);
+  --code-border: rgba(255,255,255,0.09);
+  --code-text: #A1B1FF;
+  --ribbon-bg: #1C184B;
+  --sidebar-bg: #120B3D;
+  --sidebar-backdrop: blur(40px) saturate(160%);
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  --radius-2xl: 24px;
+  --ease-spring: cubic-bezier(0.34,1.56,0.64,1);
+  --ease-smooth: cubic-bezier(0.4,0,0.2,1);
+  --ease-snappy: cubic-bezier(0.2,0,0,1);
+}
+
+/* NORD — ported from daisyUI's real, currently-shipping "nord" theme
+   (packages/daisyui/src/themes/nord.css @ saadeghi/daisyui master). A light
+   palette, so structural tokens reuse Ledger Light's rather than Dark's. */
+[data-theme="nord"] {
+  --font-ui: "Hanken Grotesk", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --font-display: "Hanken Grotesk", -apple-system, system-ui, sans-serif;
+  --font-code: "IBM Plex Mono", "SF Mono", Monaco, Menlo, monospace;
+  --bg: #ECEFF4;
+  --bg-secondary: #E5E9F0;
+  --bg-tertiary: #D8DEE9;
+  --material-regular: rgba(229,233,240,0.94);
+  --material-thick: rgba(236,239,244,0.97);
+  --material-thin: rgba(46,52,64,0.04);
+  --material-ultra-thin: rgba(46,52,64,0.02);
+  --fill-primary: rgba(46,52,64,0.08);
+  --fill-secondary: rgba(46,52,64,0.06);
+  --fill-tertiary: rgba(46,52,64,0.045);
+  --fill-quaternary: rgba(46,52,64,0.028);
+  --separator: rgba(46,52,64,0.14);
+  --separator-opaque: #C4CAD5;
+  --scrim: rgba(46,52,64,0.18);
+  --text-primary: #2E3440;
+  --text-secondary: rgba(46,52,64,0.66);
+  --text-tertiary: rgba(46,52,64,0.56);
+  --text-quaternary: rgba(46,52,64,0.30);
+  --accent: #5E81AC;
+  --accent-fill: rgba(94,129,172,0.14);
+  --accent-contrast: #03060B;
+  --system-blue: #B48EAD;
+  --system-green: #A3BE8D;
+  --system-red: #BF616A;
+  --system-orange: #88C0D0;
+  --system-yellow: #EBCB8B;
+  --system-purple: #81A1C1;
+  --inset-shine: inset 0 1px 0 rgba(255,255,255,0.70);
+  --shadow-subtle: 0 1px 2px rgba(46,52,64,0.06);
+  --shadow-ambient: 0 0 0 0.5px rgba(46,52,64,0.10);
+  --shadow-key: 0 2px 8px rgba(46,52,64,0.10), 0 8px 24px rgba(46,52,64,0.08);
+  --shadow-card: 0 0 0 0.5px rgba(46,52,64,0.08), 0 1px 3px rgba(46,52,64,0.07), 0 4px 12px rgba(46,52,64,0.06), inset 0 1px 0 rgba(255,255,255,0.70);
+  --shadow-overlay: 0 0 0 0.5px rgba(46,52,64,0.10), 0 4px 16px rgba(46,52,64,0.10), 0 16px 48px rgba(46,52,64,0.14), inset 0 1px 0 rgba(255,255,255,0.80);
+  --pill-bg: rgba(229,233,240,0.72);
+  --pill-border: rgba(46,52,64,0.10);
+  --code-bg: rgba(46,52,64,0.05);
+  --code-border: rgba(46,52,64,0.10);
+  --code-text: #6F747D;
+  --ribbon-bg: #D8DEE9;
+  --sidebar-bg: #E5E9F0;
+  --sidebar-backdrop: blur(20px) saturate(150%);
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  --radius-2xl: 24px;
+  --ease-spring: cubic-bezier(0.34,1.56,0.64,1);
+  --ease-smooth: cubic-bezier(0.4,0,0.2,1);
+  --ease-snappy: cubic-bezier(0.2,0,0,1);
+}
+
 /* SYSTEM: media-query fallback before JS hydration */
 @media (prefers-color-scheme: light) {
   [data-theme="system"] {
