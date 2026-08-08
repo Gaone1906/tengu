@@ -28,6 +28,11 @@ vi.mock("../use-engine-limits", async (importOriginal) => {
   return { ...actual, useEngineLimits: () => state }
 })
 
+vi.mock("@/hooks/use-session-telemetry", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/hooks/use-session-telemetry")>()
+  return { ...actual, useSessionTelemetry: () => ({ data: null, phase: "ready" as const, now: Date.now() }) }
+})
+
 import LimitsPage from "../page"
 
 const MARKER = "SENSITIVE-SNAPSHOT-MARKER-a1b2c3"

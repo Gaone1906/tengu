@@ -12,6 +12,11 @@ vi.mock("@/hooks/use-workspaces", () => ({
   useStartWorkspace: () => ({ mutateAsync: vi.fn(), isPending: false, variables: undefined }),
 }))
 
+vi.mock("@/hooks/use-session-telemetry", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/hooks/use-session-telemetry")>()
+  return { ...actual, useSessionTelemetry: () => ({ data: null, phase: "ready" as const, now: Date.now() }) }
+})
+
 function renderRibbon(props: { listOpen: boolean; path?: string }) {
   return render(
     <MemoryRouter initialEntries={[props.path ?? "/"]}>
