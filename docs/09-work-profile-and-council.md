@@ -44,8 +44,8 @@ because per-department agents duplicate orientation when they share a repo. It n
 > Promote a department to its own employee only when the context it needs genuinely differs
 > (different repo/stack/credentials), not merely when the subject matter differs.
 
-**The work profile is that exception.** `onboarding`, `kyc`, `mobile-backend`, `app`,
-`address-service` are separate repos with separate domain models and separate integration contracts.
+**The work profile is that exception.** `identity`, `billing`, `mobile-api`, `web`,
+`notifications` are separate repos with separate domain models and separate integration contracts.
 There is no shared orientation to duplicate — each agent's context is genuinely its own. Same test,
 opposite answer.
 
@@ -62,7 +62,7 @@ One per service. Each carries:
 
 | | |
 |---|---|
-| `department` | the service slug (`kyc`, `onboarding`, …) |
+| `department` | the service slug (`billing`, `identity`, …) |
 | `cwd` | that service's repo |
 | **skill** | its knowledge base — see below |
 | `engine` / `model` | Sonnet 5 for both consultation and execution |
@@ -157,7 +157,7 @@ here: the service is reading its own docs and reporting, not doing novel reasoni
 **Phase 4 — Synthesis.** The council reconciles N breakdowns into one plan. This is the genuinely hard
 reasoning and the reason the council is Opus:
 
-- Match contract *requests* against contract *provisions* — if `kyc` needs a field `onboarding`
+- Match contract *requests* against contract *provisions* — if `billing` needs a field `identity`
   doesn't yet emit, that's an ordering constraint and a missing task
 - Flag unmatched requests (someone needs something nobody is providing) — the most valuable output of
   the whole flow
@@ -188,7 +188,7 @@ is:
 ```
 council (executive, Opus, interactive)
    └── reviewer (manager, Opus)
-          └── onboarding | kyc | mobile-backend | app | address-service   (senior, Sonnet)
+          └── identity | billing | mobile-api | web | notifications   (senior, Sonnet)
 
 security (executive, system)
 scribe   (Haiku/Sonnet-low, stand-up narration)

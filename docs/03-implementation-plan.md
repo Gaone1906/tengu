@@ -349,7 +349,7 @@ whether the sleep-prevention piece matters at all.
 DB, port.
 
 **Roster:** `council` (executive, Opus, `interactive: true`) replaces `planner`; one senior Sonnet
-employee per service (`onboarding`, `kyc`, `mobile-backend`, `app`, `address-service`), each with
+employee per service (`identity`, `billing`, `mobile-api`, `web`, `notifications`), each with
 `cwd` = its repo and a Jinn **skill** as knowledge base.
 
 **Council flow:** intake (interactive Opus, asks in chat) → impact triage against a service registry
