@@ -36,6 +36,7 @@ describe('OVERFLOW_ITEMS (the More screen)', () => {
       '/experiments',
       '/org',
       '/cron',
+      '/standup',
       '/limits',
       '/logs',
       '/skills',

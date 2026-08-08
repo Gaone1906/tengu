@@ -18,6 +18,7 @@ const ExperimentsPage = lazyRoute(() => import('./routes/experiments/page'), 'ex
 const ExperimentDetailPage = lazyRoute(() => import('./routes/experiments/detail'), 'experiment-detail')
 const LogsPage = lazyRoute(() => import('./routes/logs/page'), 'logs')
 const LimitsPage = lazyRoute(() => import('./routes/limits/page'), 'limits')
+const StandupPage = lazyRoute(() => import('./routes/standup/page'), 'standup')
 const OrgPage = lazyRoute(() => import('./routes/org/page'), 'org')
 const SettingsPage = lazyRoute(() => import('./routes/settings/page'), 'settings')
 const SkillsPage = lazyRoute(() => import('./routes/skills/page'), 'skills')
@@ -36,6 +37,7 @@ registerRoutePrefetch('/notes', NotesPage.prefetch)
 registerRoutePrefetch('/experiments', ExperimentsPage.prefetch)
 registerRoutePrefetch('/logs', LogsPage.prefetch)
 registerRoutePrefetch('/limits', LimitsPage.prefetch)
+registerRoutePrefetch('/standup', StandupPage.prefetch)
 registerRoutePrefetch('/org', OrgPage.prefetch)
 registerRoutePrefetch('/settings', SettingsPage.prefetch)
 registerRoutePrefetch('/skills', SkillsPage.prefetch)
@@ -123,6 +125,7 @@ const router = createBrowserRouter([
       { path: '/kanban', element: <Navigate to="/todos" replace /> },
       { path: '/logs', element: <LogsPage /> },
       { path: '/limits', element: <LimitsPage /> },
+      { path: '/standup', element: <StandupPage /> },
       { path: '/org', element: <OrgPage /> },
       { path: '/settings', element: <SettingsPage /> },
       { path: '/skills', element: <SkillsPage /> },
