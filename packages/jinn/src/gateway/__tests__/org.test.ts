@@ -150,7 +150,9 @@ describe("scanOrg — reserved author identities", () => {
 
     const registry = scanOrg();
     expect(registry.get("dev")).toBeDefined();
-    expect(registry.size).toBe(2);
+    // 1 org employee ("dev") + the hardcoded system employees (`security`,
+    // `todo-dispatcher`) — bumps whenever SYSTEM_EMPLOYEES grows.
+    expect(registry.size).toBe(3);
     expect(registry.has("Operator")).toBe(false);
     expect(registry.has("system")).toBe(false);
     expect(registry.has("session:0a1b2c3d")).toBe(false);

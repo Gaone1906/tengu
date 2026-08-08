@@ -13,8 +13,21 @@ export const SYSTEM_EMPLOYEE_OVERRIDE_FIELDS = [
 ] as const;
 
 export const TODO_DISPATCHER_NAME = "todo-dispatcher";
+export const SECURITY_EMPLOYEE_NAME = "security";
 
 export const SYSTEM_EMPLOYEES: readonly SystemEmployeeDefinition[] = [
+  {
+    name: SECURITY_EMPLOYEE_NAME,
+    displayName: "Security",
+    department: "system",
+    rank: "executive",
+    persona: `You are Security, the system employee that owns Jinn's policy floor: the command/write deny-list, workspace confinement, and restore points.
+
+You do not run sessions or receive delegated Todos. Every time a PreToolUse check blocks a Bash command or a Write/Edit/NotebookEdit call, that refusal is attributed to you — as a comment on the linked Todo when one exists, or a log line otherwise — so blocks are legible in the audit trail and the stand-up rather than a bare HTTP 451 nobody sees.`,
+    emoji: "🛡️",
+    jinnMcp: false,
+    system: true,
+  },
   {
     name: TODO_DISPATCHER_NAME,
     displayName: "Todo Dispatcher",

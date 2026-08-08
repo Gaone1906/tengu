@@ -1,4 +1,6 @@
 import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 
 export type CommandPolicyAction = "allow" | "block";
 
@@ -60,6 +62,60 @@ function findTrackedFileTruncation(text: string, cwd: string): string | undefine
     if (isTrackedFile(cwd, target)) return target;
   }
   return undefined;
+}
+
+// A target file may not exist yet (Write creates it). Walk up to the nearest
+// existing ancestor, realpath THAT (resolving any symlink in the existing part
+// of the tree), then re-append the not-yet-created tail so a symlinked parent
+// directory can't be used to smuggle the write outside the workspace.
+function realpathNearestAncestor(target: string): string {
+  let current = target;
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      const real = fs.realpathSync(current);
+      return tail.length > 0 ? path.join(real, ...tail) : real;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+      const parent = path.dirname(current);
+      if (parent === current) throw err;
+      tail.unshift(path.basename(current));
+      current = parent;
+    }
+  }
+}
+
+/**
+ * Workspace confinement for Write/Edit/NotebookEdit: resolve `filePath` (relative
+ * to `cwd` when not absolute) to its canonical form and reject anything that
+ * escapes `cwd` via `..`, a symlink, or an absolute path outside the mount.
+ */
+export function evaluateWritePolicy(filePath: string, cwd: string = process.cwd()): CommandPolicyDecision {
+  const target = String(filePath ?? "").trim();
+  if (!target) return { action: "allow" };
+  const absoluteTarget = path.isAbsolute(target) ? target : path.resolve(cwd, target);
+
+  let resolvedCwd: string;
+  let resolvedTarget: string;
+  try {
+    resolvedCwd = fs.realpathSync(cwd);
+    resolvedTarget = realpathNearestAncestor(absoluteTarget);
+  } catch (err) {
+    return {
+      action: "block",
+      reason: `Refusing write: could not resolve workspace path for ${target} (${(err as Error).message})`,
+    };
+  }
+
+  const rel = path.relative(resolvedCwd, resolvedTarget);
+  const escapes = rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel);
+  if (escapes) {
+    return {
+      action: "block",
+      reason: `Refusing write outside workspace: ${target} resolves to ${resolvedTarget}, which escapes ${resolvedCwd}`,
+    };
+  }
+  return { action: "allow" };
 }
 
 export function evaluateCommandPolicy(command: string, cwd: string = process.cwd()): CommandPolicyDecision {

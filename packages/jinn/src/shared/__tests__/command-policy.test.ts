@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
-import { evaluateCommandPolicy } from "../command-policy.js";
+import { evaluateCommandPolicy, evaluateWritePolicy } from "../command-policy.js";
 
 describe("dangerous command policy", () => {
   it("hard-blocks destructive root removals and obvious secret exfiltration", () => {
@@ -102,6 +102,55 @@ describe("dangerous command policy", () => {
       expect(evaluateCommandPolicy("echo hi > untracked.txt", root).action).toBe("allow");
       expect(evaluateCommandPolicy("echo hi >> tracked.txt", root).action).toBe("allow");
       expect(evaluateCommandPolicy("some-command > /dev/null", root).action).toBe("allow");
+    });
+  });
+
+  describe("evaluateWritePolicy — workspace confinement for Write/Edit/NotebookEdit", () => {
+    const roots: string[] = [];
+    afterEach(() => {
+      while (roots.length > 0) fs.rmSync(roots.pop()!, { recursive: true, force: true });
+    });
+
+    function workspaceFixture() {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-write-policy-"));
+      roots.push(root);
+      fs.mkdirSync(path.join(root, "nested"), { recursive: true });
+      return root;
+    }
+
+    it("allows a legitimate write inside the cwd, new file or existing, nested or not", () => {
+      const root = workspaceFixture();
+      expect(evaluateWritePolicy("notes.md", root).action).toBe("allow");
+      expect(evaluateWritePolicy("nested/deep/new-file.ts", root).action).toBe("allow");
+      expect(evaluateWritePolicy(path.join(root, "abs-in-tree.txt"), root).action).toBe("allow");
+    });
+
+    it("blocks a relative path that escapes via ..", () => {
+      const root = workspaceFixture();
+      const decision = evaluateWritePolicy("../outside-cwd/file.txt", root);
+      expect(decision.action).toBe("block");
+      expect(decision.reason).toMatch(/escapes/);
+    });
+
+    it("blocks an absolute path outside the cwd", () => {
+      const root = workspaceFixture();
+      const outside = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-write-policy-outside-"));
+      roots.push(outside);
+      expect(evaluateWritePolicy(path.join(outside, "file.txt"), root).action).toBe("block");
+    });
+
+    it("blocks a symlinked directory inside the cwd that resolves outside it", () => {
+      const root = workspaceFixture();
+      const outside = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-write-policy-outside-"));
+      roots.push(outside);
+      fs.symlinkSync(outside, path.join(root, "escape-link"));
+      const decision = evaluateWritePolicy("escape-link/file.txt", root);
+      expect(decision.action).toBe("block");
+    });
+
+    it("allows an empty/missing file path (nothing to confine)", () => {
+      const root = workspaceFixture();
+      expect(evaluateWritePolicy("", root).action).toBe("allow");
     });
   });
 

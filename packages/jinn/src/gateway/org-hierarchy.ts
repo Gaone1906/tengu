@@ -46,9 +46,13 @@ export function resolveOrgHierarchy(
     return { root: null, nodes: {}, sorted: [], warnings: [] };
   }
 
-  // Step 1: Find root
+  // Step 1: Find root. System employees (e.g. `security`, an executive-rank
+  // attribution identity with no real reports) never compete for COO/root
+  // authority — they're bolted onto the roster for policy attribution, not
+  // hierarchy membership, so an org with no real executive still falls
+  // through to the virtual portal root exactly as before one existed.
   const executives = [...registry.values()]
-    .filter((e) => e.rank === "executive")
+    .filter((e) => e.rank === "executive" && !e.system)
     .sort((a, b) => a.name.localeCompare(b.name));
 
   let rootName: string | null = null;

@@ -1,7 +1,17 @@
 import { timingSafeEqual } from "node:crypto";
 import type { HookRegistry, HookPayload } from "./hook-registry.js";
-import { evaluateCommandPolicy } from "../shared/command-policy.js";
+import { evaluateCommandPolicy, evaluateWritePolicy } from "../shared/command-policy.js";
 import { ensureRestorePoint } from "../security/restore-points.js";
+import { recordSecurityBlock } from "../security/audit.js";
+
+const WRITE_TOOL_NAMES = new Set(["Write", "Edit", "NotebookEdit"]);
+
+function writeTargetPath(toolName: string, input: unknown): string | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const key = toolName === "NotebookEdit" ? "notebook_path" : "file_path";
+  const value = (input as Record<string, unknown>)[key];
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
 
 export interface HookEndpointCtx {
   reg: HookRegistry;
@@ -60,11 +70,9 @@ export function validateHookPost(
   if (!body.jinnSessionId || !body.hook?.hook_event_name) {
     return { status: 400, body: "bad request" };
   }
-  if (body.hook.hook_event_name === "PreToolUse" && body.hook.tool_name === "Bash") {
+  const toolName = body.hook.tool_name;
+  if (body.hook.hook_event_name === "PreToolUse" && toolName && (toolName === "Bash" || WRITE_TOOL_NAMES.has(toolName))) {
     const input = body.hook.tool_input;
-    const command = input && typeof input === "object" && "command" in input
-      ? String((input as { command?: unknown }).command ?? "")
-      : "";
     const cwd = body.hook.cwd;
     if (cwd) {
       try {
@@ -73,8 +81,24 @@ export function validateHookPost(
         // Best-effort: a restore point is recovery insurance, not a gate — never block on its failure.
       }
     }
-    const decision = evaluateCommandPolicy(command, cwd);
+    const decision = toolName === "Bash"
+      ? evaluateCommandPolicy(
+          input && typeof input === "object" && "command" in input
+            ? String((input as { command?: unknown }).command ?? "")
+            : "",
+          cwd,
+        )
+      : (() => {
+          const filePath = writeTargetPath(toolName, input);
+          return filePath ? evaluateWritePolicy(filePath, cwd) : { action: "allow" as const };
+        })();
     if (decision.action === "block") {
+      recordSecurityBlock({
+        jinnSessionId: body.jinnSessionId!,
+        toolName,
+        reason: decision.reason || "Blocked by Jinn security policy",
+        cwd,
+      });
       return { status: 451, body: decision.reason || "Command blocked by Jinn security policy" };
     }
   }

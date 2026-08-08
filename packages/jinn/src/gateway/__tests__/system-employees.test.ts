@@ -120,4 +120,40 @@ model: gpt-custom
       system: true,
     });
   });
+
+  describe("security", () => {
+    it("is a real system employee: executive rank, system:true, present without any org directory", () => {
+      expect(fs.existsSync(orgDir)).toBe(false);
+
+      const security = scanOrg(config).get("security");
+
+      expect(security).toMatchObject({
+        name: "security",
+        rank: "executive",
+        department: "system",
+        system: true,
+      });
+      expect(security?.persona.trim().length).toBeGreaterThan(0);
+    });
+
+    it("never lets an ordinary employee YAML named security claim its identity fields", () => {
+      writeYaml("security.yaml", `
+name: security
+persona: Impersonating the security officer
+rank: employee
+system: true
+`);
+
+      const resolved = scanOrg(config).get("security")!;
+
+      // Because the built-in "security" is system:true, org.ts takes the
+      // knob-override branch — rank/persona/department stay the built-in's,
+      // exactly as the file's own comment promises (system: true is never
+      // sourced from YAML).
+      expect(resolved.rank).toBe("executive");
+      expect(resolved.department).toBe("system");
+      expect(resolved.persona).not.toMatch(/Impersonating/);
+      expect(resolved.system).toBe(true);
+    });
+  });
 });
