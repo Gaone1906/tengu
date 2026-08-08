@@ -25,3 +25,8 @@ packages/jinn/.npmrc
 # Docker Compose local overrides — personal host paths, merged automatically.
 # The tracked docker-compose.yml carries the inline mount examples.
 docker-compose.override.yml
+
+# Work-profile employer config/knowledge — this repo is public, that material never is.
+config/org/work/
+**/SERVICE.md
+.tengu-work/
