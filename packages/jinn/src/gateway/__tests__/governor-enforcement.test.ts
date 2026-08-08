@@ -54,6 +54,11 @@ async function spawn(): Promise<string> {
   await api.handleApiRequest(req as never, res, apiCtx);
   const id = JSON.parse(body).id as string;
   for (let i = 0; i < 300 && !engineRuns.includes(id) && !blocked(id); i++) await new Promise((r) => setTimeout(r, 10));
+  // blocked(id) only means the ⛔ message landed — the halt/handoff work (step
+  // 6, sessions/handoff.ts) runs BETWEEN that message and the terminal status
+  // write, so keep polling until the attempt actually settles (status leaves
+  // "running") before a caller reads it.
+  for (let i = 0; i < 300 && reg.getSession(id)?.status === "running"; i++) await new Promise((r) => setTimeout(r, 10));
   return id;
 }
 
@@ -63,7 +68,10 @@ describe("usage governor enforcement", () => {
     const id = await spawn();
     expect(engineRuns).not.toContain(id);
     expect(blocked(id)).toBe(true);
-    expect(reg.getSession(id)?.status).toBe("error");
+    // A resumable halt (resumeAt known) settles "waiting" — same state a
+    // provider rate limit leaves a session in — not a terminal "error",
+    // because sessions/handoff.ts has scheduled a resume for it.
+    expect(reg.getSession(id)?.status).toBe("waiting");
     expect(reg.getMessages(id).find((m) => m.content.startsWith("⛔"))?.content).toMatch(/governor/i);
   });
 

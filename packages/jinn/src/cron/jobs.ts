@@ -44,6 +44,18 @@ export function saveJobs(jobs: CronJob[]): void {
   fs.renameSync(tmpPath, CRON_JOBS);
 }
 
+/** Insert-or-replace a single job by canonical id and persist. Used by callers
+ *  that mint one job programmatically (e.g. the governor's one-shot resume
+ *  job, sessions/handoff.ts) rather than editing the whole list. */
+export function upsertJob(job: CronJob): CronJob {
+  const jobs = loadJobs();
+  const index = jobs.findIndex((existing) => canonicalCronJobId(existing.id) === canonicalCronJobId(job.id));
+  if (index === -1) jobs.push(job);
+  else jobs[index] = job;
+  saveJobs(jobs);
+  return job;
+}
+
 /**
  * Canonical cron-job identity for collision checks. Run-log files are
  * `<id>.jsonl` under CRON_RUNS and the default

@@ -143,6 +143,8 @@ import { selectClaudeModelFallback } from "../shared/model-fallback.js";
 import { detectRateLimit, rateLimitEngineLabel } from "../shared/rateLimit.js";
 import { collectEngineLimits } from "../shared/engine-limits.js";
 import { handleRateLimit } from "../sessions/rate-limit-handler.js";
+import { clearWaitingState } from "./rate-limit-waiting-resume.js";
+import { performGovernorHalt } from "../sessions/handoff.js";
 import { resolveEngineRunMcp } from "../sessions/engine-run-mcp.js";
 import { decideJinnAttachment } from "../mcp/attachment.js";
 import { getPendingInstanceMigration, reconcileServiceOwnedRemovals, type PendingInstanceMigration } from "../migrations/service.js";
@@ -747,6 +749,43 @@ function dispatchWebSessionRun(
   } else {
     launch();
   }
+}
+
+/**
+ * The governor's scheduled resume (sessions/handoff.ts, fired by a one-shot
+ * "runAt" cron job via gateway/server.ts) lands here. Unlike the message
+ * handler above, this call has no user attached to it — it exists BECAUSE the
+ * critical fix was needed: `waiting` used to clear only on a genuine user
+ * message, which meant an unattended resume could never actually unstick a
+ * governor-halted session. clearWaitingState is called unconditionally (no
+ * `isNotification`-style gate) for exactly that reason.
+ *
+ * Resumes the SAME session — found by sessionKey, never minted fresh — so the
+ * dispatched turn carries `engineSessionId` through to `--resume` (D4).
+ */
+export function resumeGovernorHaltedSession(sessionKeyOrId: string, context: ApiContext): boolean {
+  const session = getSessionBySessionKey(sessionKeyOrId) ?? getSession(sessionKeyOrId);
+  if (!session) {
+    logger.warn(`Governor resume: no session found for "${sessionKeyOrId}"`);
+    return false;
+  }
+  const { cleared } = clearWaitingState(session.id, { reason: "governor scheduled resume" });
+  logger.info(`Governor resume: session ${session.id} waiting=${cleared ? "cleared" : "already clear"}`);
+
+  const engine = context.sessionManager.getEngine(session.engine);
+  if (!engine) {
+    logger.error(`Governor resume: engine "${session.engine}" not available for session ${session.id}`);
+    return false;
+  }
+  const liveSession = getSession(session.id) ?? session;
+  dispatchWebSessionRun(
+    liveSession,
+    "Resume from handoff — read the ledger and the handoff note, then continue the interrupted unit.",
+    engine,
+    context.getConfig(),
+    context,
+  );
+  return true;
 }
 
 /**
@@ -5806,11 +5845,7 @@ export async function handleApiRequest(
         // status guard unwinds it as cancelled and frees the queue; the message
         // enqueued below then runs immediately against the — now available —
         // engine. Notifications (child callbacks) never trigger this.
-        updateSession(session.id, {
-          status: "idle",
-          lastActivity: new Date().toISOString(),
-          lastError: null,
-        });
+        clearWaitingState(session.id, { reason: "new user message" });
         session = getSession(session.id) ?? session;
       }
 
@@ -7115,7 +7150,28 @@ async function runWebSession(
     }`;
     logger.warn(`Web session ${currentSession.id} blocked by governor: ${governorDecision.reason}`);
     insertMessage(currentSession.id, "assistant", `⛔ ${errMsg}`);
-    const erroredSession = completeSessionAttempt(currentSession.id, attemptToken, { status: "error", lastActivity: new Date().toISOString(), lastError: errMsg });
+    // Halt/handoff/resume (step 6): a resumable decision (resumeAt known) gets
+    // a handoff note, a best-effort in-place /compact, and a one-shot resume
+    // job — the session settles "waiting", the same state a provider rate
+    // limit leaves it in, rather than a terminal "error". A resumeAt-less
+    // decision (or a handoff failure) has nothing to resume from and falls
+    // back to the original terminal "error".
+    let haltStatus: Session["status"] = "error";
+    if (governorDecision.resumeAt) {
+      try {
+        await performGovernorHalt({
+          session: currentSession,
+          employee: employee?.name ?? currentSession.employee ?? "unassigned",
+          engine,
+          engineModel: currentSession.model ?? undefined,
+          decision: governorDecision,
+        });
+        haltStatus = "waiting";
+      } catch (err) {
+        logger.error(`Governor halt handoff failed for session ${currentSession.id}: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+    const erroredSession = completeSessionAttempt(currentSession.id, attemptToken, { status: haltStatus, lastActivity: new Date().toISOString(), lastError: errMsg });
     context.emit("session:completed", { sessionId: currentSession.id, result: null, error: errMsg });
     if (erroredSession) notifyParentSession(erroredSession, { error: errMsg }, { alwaysNotify: employee?.alwaysNotify });
     return;

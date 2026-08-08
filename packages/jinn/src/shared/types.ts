@@ -526,11 +526,26 @@ export type ExperimentStoreResult<T> =
   | { ok: true; value: T }
   | { ok: false; reason: ExperimentStoreFailureReason; detail: string };
 
+export type CronJobKind = "schedule" | "runAt";
+
 export interface CronJob {
   id: string;
   name: string;
   enabled: boolean;
+  /** Defaults to "schedule" (recurring cron expression) when absent — every
+   *  pre-existing job on disk is that kind. "runAt" fires exactly once at
+   *  `runAt` and is used by the usage governor's halt/resume flow
+   *  (docs/tengu/10-checkpointing.md). */
+  kind?: CronJobKind;
+  /** Required (and a valid cron expression) for kind "schedule"; ignored for
+   *  "runAt", where it is conventionally the empty string. */
   schedule: string;
+  /** Required ISO-8601 timestamp for kind "runAt"; absent otherwise. */
+  runAt?: string;
+  /** When set, this fire resumes the given session (by `sessionKey`, via
+   *  --resume on the same engine session) instead of minting a new
+   *  `cron:<jobId>:<fireIso>` session. Set by the governor's halt/resume flow. */
+  resumeSessionKey?: string;
   timezone?: string;
   engine?: string;
   model?: string;

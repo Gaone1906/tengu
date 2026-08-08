@@ -50,7 +50,7 @@ import { seedTrust, cleanupSessionSettings } from "../shared/claude-settings.js"
 import { claudeJsonPath } from "../shared/home.js";
 import { GATEWAY_INFO_FILE, HOOK_RELAY_SCRIPT, JINN_HOME, CLAUDE_SETTINGS_DIR } from "../shared/paths.js";
 import { enforceOwnerOnlyDirectory, pathIsOwnerOnly } from "../shared/owner-only.js";
-import { handleApiRequest, isSameOriginBrowserRequest, resumePendingWebQueueItems, type ApiContext } from "./api.js";
+import { handleApiRequest, isSameOriginBrowserRequest, resumePendingWebQueueItems, resumeGovernorHaltedSession, type ApiContext } from "./api.js";
 import { resolveCallerIdentity, sessionCommGuards, LATERAL_MAX_HOPS, type CallerIdentityOptions } from "./session-comm-guards.js";
 import { UNIDENTIFIED_TOOL_CALL_ERROR, verifySessionCapability } from "../mcp/identity.js";
 import { cleanupMcpConfigFile, sweepOrphanMcpConfigFiles } from "../mcp/resolver.js";
@@ -1062,7 +1062,10 @@ export async function startGateway(
   });
 
   const cronJobs = loadJobs();
-  startScheduler(cronJobs, sessionManager, config, connectorMap, emit);
+  // The last arg resumes a governor-halted session in place ("runAt" one-shot
+  // jobs with resumeSessionKey — sessions/handoff.ts) rather than minting a
+  // fresh one; apiContext is fully built by this point in boot.
+  startScheduler(cronJobs, sessionManager, config, connectorMap, emit, (sessionKey) => { resumeGovernorHaltedSession(sessionKey, apiContext); });
   logger.info(`Loaded ${cronJobs.length} cron job(s)`);
 
   // Resolve web UI directory — bundled into dist/web/ by postbuild script

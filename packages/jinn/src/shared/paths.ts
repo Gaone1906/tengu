@@ -81,6 +81,10 @@ export const WORKFLOWS_DIR = path.join(JINN_HOME, "workflows");
 export const WORKFLOWS_DB_PATH = path.join(WORKFLOWS_DIR, "workflows.db");
 export const CRON_JOBS = path.join(JINN_HOME, "cron", "jobs.json");
 export const CRON_RUNS = path.join(JINN_HOME, "cron", "runs");
+/** Governor halt/resume in-flight-state notes (docs/tengu/10-checkpointing.md),
+ *  one file per `<employee>-<todoId>`. The ledger is authoritative; these are
+ *  narrative only. */
+export const HANDOFFS_DIR = path.join(JINN_HOME, "handoffs");
 export const ORG_DIR = path.join(JINN_HOME, "org");
 export const SKILLS_DIR = path.join(JINN_HOME, "skills");
 export const DOCS_DIR = path.join(JINN_HOME, "docs");

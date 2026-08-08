@@ -1,6 +1,6 @@
 import cron from 'node-cron';
 
-export type CronScheduleField = 'schedule' | 'timezone' | 'until';
+export type CronScheduleField = 'schedule' | 'runAt' | 'timezone' | 'until';
 
 export interface CronScheduleValidationError {
   field: CronScheduleField;
@@ -9,6 +9,11 @@ export interface CronScheduleValidationError {
 
 export interface CronScheduleInput {
   schedule: unknown;
+  /** "runAt" validates `runAt` instead of `schedule`. Absent (or any other
+   *  value) validates the recurring-expression `schedule` field, preserving
+   *  every existing caller's behavior unchanged. */
+  kind?: unknown;
+  runAt?: unknown;
   timezone?: unknown;
   until?: unknown;
 }
@@ -17,7 +22,12 @@ export interface CronScheduleInput {
  * IANA timezone implementation. This is safe to call before any persistence. */
 export function validateCronSchedule(input: CronScheduleInput): CronScheduleValidationError[] {
   const errors: CronScheduleValidationError[] = [];
-  if (typeof input.schedule !== 'string' || !input.schedule.trim() || !cron.validate(input.schedule.trim())) {
+  if (input.kind === 'runAt') {
+    const parsed = typeof input.runAt === 'string' && input.runAt.trim() ? Date.parse(input.runAt.trim()) : Number.NaN;
+    if (!Number.isFinite(parsed)) {
+      errors.push({ field: 'runAt', message: 'runAt must be a finite ISO-8601 timestamp' });
+    }
+  } else if (typeof input.schedule !== 'string' || !input.schedule.trim() || !cron.validate(input.schedule.trim())) {
     errors.push({ field: 'schedule', message: 'schedule must be a valid cron expression' });
   }
   if (input.timezone !== undefined) {
