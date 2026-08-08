@@ -45,6 +45,12 @@ const EDGES: Readonly<Record<WorkItemStatus, ReadonlySet<WorkItemStatus>>> = {
   cancelled: new Set(['backlog']),
 };
 
+/** Statuses that close a Todo — the same set `transition()` uses to decide
+ *  `closing` below. Exported so read-side rollups (work-items/progress.ts)
+ *  share one definition of "terminal" with the write path instead of a second,
+ *  driftable copy. */
+export const TERMINAL_STATUSES: ReadonlySet<WorkItemStatus> = new Set(['done', 'cancelled']);
+
 export type TransitionErrorCode =
   | 'not-found'
   | 'illegal-edge'
@@ -232,7 +238,7 @@ export function transition(id: string, to: WorkItemStatus, actor: string, opts: 
     // Optimistic write: 0 rows changed = someone moved it between our read and
     // this write (cross-process only — better-sqlite3 calls are synchronous).
     const now = new Date().toISOString();
-    const closing = target === 'done' || target === 'cancelled';
+    const closing = TERMINAL_STATUSES.has(target);
     const result = db
       .prepare(`UPDATE work_items SET status = ?, rounds = ?, updated_at = ?, version = version + 1${
         closing ? ', closed_at = COALESCE(closed_at, ?)' : ', closed_at = NULL'
