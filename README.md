@@ -1,4 +1,21 @@
-<h1 align="center">🧞 Jinn</h1>
+<h1 align="center">🐉 Tengu</h1>
+
+<p align="center"><b>An autonomous, usage-governed AI agent org for Claude Max — a fork of Jinn.</b></p>
+
+<p align="center">
+  <a href="https://github.com/hristo2612/jinn">Jinn</a> turns agent CLIs into a persistent AI company.
+  <b>Tengu</b> takes that and adds a governor: decompose work into tasks and sub-tasks, run
+  continuously and unattended, stop itself before it burns through a usage window, hand off and
+  resume automatically at the next reset, and checkpoint so an interruption never redoes work.<br/>
+  Start with <a href="docs/tengu/16-features.md">the feature list</a> or the
+  <a href="docs/tengu/01-decisions.md">full decision log</a>.
+</p>
+
+<p align="center"><i>Everything below this point documents the underlying Jinn platform Tengu is
+built on — install steps, environment variables (<code>JINN_HOME</code>, <code>jinn</code> CLI, etc.)
+stay as-is since they describe the real, running software.</i></p>
+
+---
 
 <p align="center"><b>Run your AI agents as a company.</b></p>
 
