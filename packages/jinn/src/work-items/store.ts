@@ -7,6 +7,7 @@ import { parseTodoId, resolveTodoIdPrefix } from './id.js';
 import { resolveDepartmentPrefix } from './departments.js';
 import { allocateWorkItemId, useWorkItemAllocationClaim } from './migrate.js';
 import { currentApproval, currentApprovalsByItem, type WorkItemApproval } from './approval-rows.js';
+import { currentVerifyCommand, currentVerifyCommandsByItem, upsertVerifyCommand } from './verify-rows.js';
 
 /**
  * Work-item store — the substrate of the Todos ledger (GRS-002, elevated by
@@ -127,6 +128,13 @@ export interface WorkItem {
   verifyPolicy: VerifyPolicy | null;
   rounds: number;
   budgetUsd: number | null;
+  /** Checkpointing (docs/tengu/10-checkpointing.md): the machine-checkable
+   *  done-criterion for a depth-3 sub-sub-task — a shell command that exits 0
+   *  when the unit is verifiably complete. Null for any item that is not a
+   *  depth-3 leaf, or a depth-3 leaf that has not been given one yet. Stored in
+   *  `work_item_verify` (additive table), not a `work_items` column — overlaid
+   *  onto every read the same way approval fields are. */
+  verifyCommand: string | null;
   approvalState: ApprovalState | null;
   approvalRequest: string | null;
   approvalRef: string | null;
@@ -171,6 +179,10 @@ export interface CreateWorkItemInput {
   acceptance?: string | null;
   verifyPolicy?: VerifyPolicy | null;
   budgetUsd?: number | null;
+  /** Depth-3 sub-sub-tasks only — a machine-checkable shell command; see
+   *  `WorkItem.verifyCommand`. Throws at create time if the item being created
+   *  will not land at depth 3. */
+  verifyCommand?: string | null;
   // Deliberately NO approval fields (design §1.3, anti-bottleneck principle):
   // a fresh Todo's approval is always none; approval is attached only by the
   // 021b decision/mirror machinery where a human decision is genuinely required.
@@ -236,7 +248,8 @@ function parseVerifyPolicy(raw: unknown): VerifyPolicy | null {
  *  cannot silently serve all-null approvals, because it will not typecheck. */
 type WorkItemRowBase = Omit<WorkItem,
   | 'approvalState' | 'approvalRequest' | 'approvalRef' | 'approvalOptions' | 'approvalChoice' | 'approvalOperatorOnly'
-  | 'approvalTarget' | 'approvalTargetKind' | 'approvalEscalatedAt' | 'approvalDecidedBy' | 'approvalDecidedAt'>;
+  | 'approvalTarget' | 'approvalTargetKind' | 'approvalEscalatedAt' | 'approvalDecidedBy' | 'approvalDecidedAt'
+  | 'verifyCommand'>;
 
 function rowToWorkItem(row: Record<string, unknown>): WorkItemRowBase {
   return {
@@ -267,33 +280,37 @@ function rowToWorkItem(row: Record<string, unknown>): WorkItemRowBase {
 }
 
 /**
- * The ONLY producer of a WorkItem's approval fields: the item's current
- * `work_item_approvals` row, or "no approval" when it has none. Applied
- * explicitly at every read function (single reads hydrate per item; page/tree
- * reads batch), which keeps EVERY consumer — payloads, authority checks,
- * activity cards, transitions' returns — sourcing approvals from one place.
+ * The ONLY producer of a WorkItem's approval + verify fields: the item's
+ * current `work_item_approvals` row (or "no approval" when it has none) and its
+ * current `work_item_verify` command (or null). Applied explicitly at every
+ * read function (single reads hydrate per item; page/tree reads batch), which
+ * keeps EVERY consumer — payloads, authority checks, activity cards,
+ * transitions' returns — sourcing both from one place.
  */
-function overlayApproval(base: WorkItemRowBase, row: WorkItemApproval | undefined): WorkItem {
+function overlayApproval(base: WorkItemRowBase, approval: WorkItemApproval | undefined, verifyCommand: string | undefined): WorkItem {
   return {
     ...base,
-    approvalState: row?.state ?? null,
-    approvalRequest: row?.request ?? null,
-    approvalRef: row?.ref ?? null,
-    approvalOptions: row?.options ?? null,
-    approvalChoice: row?.choice ?? null,
-    approvalOperatorOnly: row?.operatorOnly ?? false,
-    approvalTarget: row?.target ?? null,
-    approvalTargetKind: row?.targetKind ?? null,
-    approvalEscalatedAt: row?.escalatedAt ?? null,
-    approvalDecidedBy: row?.decidedBy ?? null,
-    approvalDecidedAt: row?.decidedAt ?? null,
+    verifyCommand: verifyCommand ?? null,
+    approvalState: approval?.state ?? null,
+    approvalRequest: approval?.request ?? null,
+    approvalRef: approval?.ref ?? null,
+    approvalOptions: approval?.options ?? null,
+    approvalChoice: approval?.choice ?? null,
+    approvalOperatorOnly: approval?.operatorOnly ?? false,
+    approvalTarget: approval?.target ?? null,
+    approvalTargetKind: approval?.targetKind ?? null,
+    approvalEscalatedAt: approval?.escalatedAt ?? null,
+    approvalDecidedBy: approval?.decidedBy ?? null,
+    approvalDecidedAt: approval?.decidedAt ?? null,
   };
 }
 
 function hydrateApprovals(items: WorkItemRowBase[]): WorkItem[] {
   if (items.length === 0) return [];
-  const currentByItem = currentApprovalsByItem(items.map((item) => item.id));
-  return items.map((item) => overlayApproval(item, currentByItem.get(item.id)));
+  const ids = items.map((item) => item.id);
+  const currentByItem = currentApprovalsByItem(ids);
+  const verifyByItem = currentVerifyCommandsByItem(ids);
+  return items.map((item) => overlayApproval(item, currentByItem.get(item.id), verifyByItem.get(item.id)));
 }
 
 /** True only for a UNIQUE-constraint violation — NOT a CHECK violation (those must
@@ -526,6 +543,14 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
       throw new Error(`parent Todo ${parent.id} is at depth ${parent.depth} — the sub-task tree is capped at depth 3`);
     }
   }
+  const depth = parent ? parent.depth + 1 : 0;
+  // Checkpointing (docs/tengu/10-checkpointing.md): `verify` is a sub-sub-task
+  // (depth 3) concept only — depth is 0-indexed here (root/task/sub-task/
+  // sub-sub-task = 0/1/2/3), confirmed against the CHECK constraint in
+  // migrate.ts rather than assumed.
+  if (input.verifyCommand !== undefined && input.verifyCommand !== null && depth !== 3) {
+    throw new Error(`verifyCommand can only be set on a depth-3 sub-sub-task (this item would be depth ${depth})`);
+  }
   const companyPrefix = resolveCompanyPrefix();
   const department = input.department !== undefined ? input.department : parent?.department ?? null;
   const prefix = department ? resolveDepartmentPrefix(db, department, companyPrefix) : companyPrefix;
@@ -544,7 +569,7 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
       .get(source, sourceRef) as Record<string, unknown> | undefined;
     // Overlay like every other WorkItem-producing read: a retried machine mint
     // can hit an item that has since gained an approval.
-    return row ? overlayApproval(rowToWorkItem(row), currentApproval(row.id as string)) : undefined;
+    return row ? overlayApproval(rowToWorkItem(row), currentApproval(row.id as string), currentVerifyCommand(row.id as string)) : undefined;
   };
 
   const txn = db.transaction((): WorkItem => {
@@ -568,7 +593,7 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
         input.createdBy ?? (source === 'human' ? 'operator' : 'system'),
         parent?.id ?? null,                       // parent_id
         parent ? parent.rootId : id,              // root_id
-        parent ? parent.depth + 1 : 0,            // depth
+        depth,
         input.dueAt ?? null,
         priority,
         source,
@@ -591,6 +616,9 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
       throw err;
     }
     appendWorkItemEvent({ workItemId: id, kind: 'created', toStatus: status, actor: source, detail: sourceRef ? { sourceRef } : null });
+    if (input.verifyCommand) {
+      upsertVerifyCommand(id, input.verifyCommand);
+    }
     if (parent) {
       // Re-verify the parent under the write lock before auditing the link.
       const liveParent = db.prepare('SELECT depth FROM work_items WHERE id = ?').get(parent.id) as { depth: number } | undefined;
@@ -628,7 +656,7 @@ export function getWorkItem(id: string): WorkItem | undefined {
   const db = initDb();
   const todoId = parseTodoId(id);
   const row = db.prepare('SELECT * FROM work_items WHERE id = ?').get(todoId) as Record<string, unknown> | undefined;
-  return row ? overlayApproval(rowToWorkItem(row), currentApproval(todoId)) : undefined;
+  return row ? overlayApproval(rowToWorkItem(row), currentApproval(todoId), currentVerifyCommand(todoId)) : undefined;
 }
 
 /** Read a bounded set of Todos in caller order with one row query and one
@@ -655,7 +683,7 @@ export function getWorkItemBySourceRef(source: WorkItemSource, sourceRef: string
   const row = db
     .prepare('SELECT * FROM work_items WHERE source = ? AND source_ref = ?')
     .get(source, sourceRef) as Record<string, unknown> | undefined;
-  return row ? overlayApproval(rowToWorkItem(row), currentApproval(row.id as string)) : undefined;
+  return row ? overlayApproval(rowToWorkItem(row), currentApproval(row.id as string), currentVerifyCommand(row.id as string)) : undefined;
 }
 
 const WORK_ITEM_STATUS_VALUES: readonly WorkItemStatus[] = [

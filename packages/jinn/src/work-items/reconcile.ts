@@ -12,6 +12,7 @@ import {
 } from './store.js';
 import { transitionDerived } from './transitions.js';
 import { currentApproval } from './approval-rows.js';
+import { runVerifyForWorkItem } from './checkpoint.js';
 import { notifyTodoChanged } from './live-events.js';
 import { listSessionsByWorkItem } from '../sessions/registry.js';
 import { logger } from '../shared/logger.js';
@@ -245,4 +246,52 @@ export function startWorkItemReconciler(intervalMs: number = DEFAULT_RECONCILE_I
   }, intervalMs);
   timer.unref?.();
   return () => clearInterval(timer);
+}
+
+export interface CheckpointReconcileResult {
+  checked: number;
+  recovered: number;
+}
+
+/** The non-sticky statuses eligible for checkpoint recovery — same reasoning
+ *  as `deriveWorkItemStatus`'s STICKY_STATUSES guard: `escalated` is a
+ *  deliberate routing to the operator, so a passing `verify` must not silently
+ *  close over it. */
+function checkpointEligible(item: WorkItem): boolean {
+  return item.depth === 3 && !!item.verifyCommand && !STICKY_STATUSES.has(item.status);
+}
+
+/**
+ * Checkpointing on resume (docs/tengu/10-checkpointing.md, D12): before any
+ * model tokens are spent, re-run `verify` for every not-done depth-3
+ * sub-sub-task that carries one. A PASS means the crash landed in the window
+ * between the commit (`work-items/checkpoint.ts#landCheckpoint`) and the
+ * ledger write — the work is durably committed, so mark it done WITHOUT
+ * redoing it. A fail (or an item with no `verify`) is untouched — that unit is
+ * where the resumed session actually restarts.
+ *
+ * Scoped by `rootId` when given (the sub-task family the crashed session
+ * owned) — an unscoped resume sweep would re-run `verify` for the whole
+ * ledger, most of which has nothing to do with the session that halted.
+ * Resume order per the design doc: reconcile → ledger → handoff → work — this
+ * function IS the reconcile step, and it costs zero model tokens by
+ * construction (shell commands only).
+ */
+export function reconcileCheckpointsOnResume(cwd: string, opts?: { rootId?: string }): CheckpointReconcileResult {
+  const candidates = (opts?.rootId ? listWorkItems({ rootId: opts.rootId }) : listWorkItems())
+    .filter(checkpointEligible);
+  let recovered = 0;
+  for (const item of candidates) {
+    const result = runVerifyForWorkItem(item, cwd);
+    if (result?.outcome !== 'passed') continue;
+    const updated = transitionDerived(item.id, 'done', RECONCILER_ACTOR, {
+      reason: 'verify-recovered',
+      note: 'verify passed on resume — work was already committed, only the ledger status was missing',
+    });
+    if (updated) {
+      recovered++;
+      notifyTodoChanged(updated, 'reconciled');
+    }
+  }
+  return { checked: candidates.length, recovered };
 }

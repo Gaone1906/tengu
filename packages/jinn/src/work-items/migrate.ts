@@ -353,6 +353,22 @@ CREATE TABLE IF NOT EXISTS work_item_approval_operator_only (
   approval_id TEXT PRIMARY KEY REFERENCES work_item_approvals(id) ON DELETE CASCADE
 )`;
 
+/** Checkpointing (docs/tengu/10-checkpointing.md): the machine-checkable `verify`
+ *  command for a depth-3 sub-sub-task checkpoint. A single current row per item
+ *  (not append-only history like approvals/comments — a verify command is edited
+ *  in place, and only its latest value is ever meaningful). Additive table, same
+ *  reasoning as attachments/approvals: `work_items` is frozen exact-shape, so a
+ *  new capability is a new table, not a new column. Depth-3-only is enforced at
+ *  the write path (`work-items/store.ts`, `work-items/checkpoint.ts`), not here. */
+export const WORK_ITEM_VERIFY_TABLE_DDL = `
+CREATE TABLE IF NOT EXISTS work_item_verify (
+  work_item_id TEXT PRIMARY KEY REFERENCES work_items(id),
+  command      TEXT NOT NULL,
+  updated_at   TEXT NOT NULL
+)`;
+
+export const WORK_ITEM_VERIFY_DDL = `${WORK_ITEM_VERIFY_TABLE_DDL};`;
+
 export const WORK_ITEM_EDIT_RECEIPTS_DDL = `
 CREATE TABLE IF NOT EXISTS work_item_edit_receipts (
   key_digest          TEXT PRIMARY KEY CHECK (length(key_digest) = 64),
@@ -690,6 +706,7 @@ const REQUIRED_TABLE_SQL = new Map<string, string>([
   ["work_item_approval_choices", WORK_ITEM_APPROVAL_CHOICES_DDL],
   ["work_item_approval_operator_only", WORK_ITEM_APPROVAL_OPERATOR_ONLY_DDL],
   ["work_item_attachments", WORK_ITEM_ATTACHMENTS_TABLE_DDL],
+  ["work_item_verify", WORK_ITEM_VERIFY_TABLE_DDL],
   ["work_item_edit_receipts", WORK_ITEM_EDIT_RECEIPTS_DDL],
   ["work_item_id_allocator", WORK_ITEM_ID_ALLOCATOR_TABLE_DDL],
   ["work_item_id_burns", WORK_ITEM_ID_BURNS_TABLE_DDL],
@@ -713,6 +730,7 @@ const V2_ADDITIVE_TABLES: ReadonlyArray<{ name: string; ddl: string }> = [
   { name: "work_item_approval_choices", ddl: WORK_ITEM_APPROVAL_CHOICES_DDL },
   { name: "work_item_approval_operator_only", ddl: WORK_ITEM_APPROVAL_OPERATOR_ONLY_DDL },
   { name: "work_item_attachments", ddl: WORK_ITEM_ATTACHMENTS_DDL },
+  { name: "work_item_verify", ddl: WORK_ITEM_VERIFY_DDL },
 ];
 
 /**
@@ -991,6 +1009,18 @@ export function verifyCurrentWorkItemSchema(db: DatabaseType): void {
       const comment = commentById.get(row.comment_id);
       if (!comment || comment.work_item_id !== row.work_item_id) refusal();
     }
+  }
+  // Checkpoint verify commands: every row references a live item, and (design
+  // invariant, docs/tengu/10-checkpointing.md) only a depth-3 sub-sub-task may
+  // carry one — the write path enforces this, re-proven here at boot.
+  const verifyRows = db.prepare("SELECT work_item_id, command FROM work_item_verify").all() as Array<{
+    work_item_id: string;
+    command: string;
+  }>;
+  for (const row of verifyRows) {
+    const owner = byId.get(row.work_item_id);
+    if (!owner || owner.depth !== 3) refusal();
+    if (!row.command.trim()) refusal();
   }
 }
 
