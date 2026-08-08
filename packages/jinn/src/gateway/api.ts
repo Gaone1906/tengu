@@ -110,6 +110,7 @@ export {
   normalizeBlockDeltaForTurn,
 } from "../sessions/partial-stream.js";
 import { isBudgetExhausted } from "./budgets.js";
+import { evaluateGovernor, readLocalGovernorTelemetry } from "../shared/governor.js";
 import { forkEngineSession } from "../sessions/fork.js";
 import { removeCodexSessionHome } from "../engines/codex.js";
 import { ptySnapshotStore } from "../engines/pty-snapshot.js";
@@ -7096,6 +7097,23 @@ async function runWebSession(
   if (currentSession.employee && isBudgetExhausted(currentSession.employee, config.budgets?.employees)) {
     const errMsg = `Budget limit exceeded for employee "${currentSession.employee}". Session blocked.`;
     logger.warn(`Web session ${currentSession.id} blocked: ${errMsg}`);
+    insertMessage(currentSession.id, "assistant", `⛔ ${errMsg}`);
+    const erroredSession = completeSessionAttempt(currentSession.id, attemptToken, { status: "error", lastActivity: new Date().toISOString(), lastError: errMsg });
+    context.emit("session:completed", { sessionId: currentSession.id, result: null, error: errMsg });
+    if (erroredSession) notifyParentSession(erroredSession, { error: errMsg }, { alwaysNotify: employee?.alwaysNotify });
+    return;
+  }
+
+  // Usage governor — block before the engine runs, same seam as the budget check above.
+  // Only a "halt" (5-hour or 7-day usage at/over threshold) blocks the spawn; "handoff"
+  // (context usage over threshold) is a compaction signal, not a stop (D5) — it doesn't
+  // apply here since a not-yet-spawned session has no context to compact.
+  const governorDecision = evaluateGovernor(readLocalGovernorTelemetry(), config.governor);
+  if (governorDecision.action === "halt") {
+    const errMsg = `Usage governor halted this session: ${governorDecision.reason}.${
+      governorDecision.resumeAt ? ` Resumes around ${governorDecision.resumeAt}.` : ""
+    }`;
+    logger.warn(`Web session ${currentSession.id} blocked by governor: ${governorDecision.reason}`);
     insertMessage(currentSession.id, "assistant", `⛔ ${errMsg}`);
     const erroredSession = completeSessionAttempt(currentSession.id, attemptToken, { status: "error", lastActivity: new Date().toISOString(), lastError: errMsg });
     context.emit("session:completed", { sessionId: currentSession.id, result: null, error: errMsg });

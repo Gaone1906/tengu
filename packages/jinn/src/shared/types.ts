@@ -879,6 +879,16 @@ export interface EngineLimitsResponse {
   engines: Record<string, EngineLimitEngineSnapshot>;
 }
 
+/** Deterministic usage governor thresholds, as percentages of each Claude usage
+ *  window. All three default to 80 when unset or non-positive. The 5-hour and
+ *  7-day thresholds gate session spawns (evaluateGovernor's "halt"); the context
+ *  threshold signals an in-place compaction ("handoff") and never blocks a spawn. */
+export interface GovernorConfig {
+  fiveHourStopPct?: number;
+  sevenDayStopPct?: number;
+  contextCompactPct?: number;
+}
+
 // --- config.yaml `models:` block shapes (all fields optional/forgiving) ---
 
 export interface ModelConfigEntry {
@@ -972,6 +982,9 @@ export interface JinnConfig {
   /** Spend caps keyed by employee name: a USD cap on that employee's total spend across the
    *  current calendar month — NOT a per-session cap. At or above it, their turns are blocked. */
   budgets?: { employees?: Record<string, number> };
+  /** Usage governor: halts session spawns before either the 5-hour or 7-day Claude
+   *  window would exceed its stop threshold, and flags context usage for compaction. */
+  governor?: GovernorConfig;
   sessions?: {
     interruptOnNewMessage?: boolean;
     staleChat?: {
