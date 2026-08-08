@@ -1,6 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import type { HookRegistry, HookPayload } from "./hook-registry.js";
 import { evaluateCommandPolicy } from "../shared/command-policy.js";
+import { ensureRestorePoint } from "../security/restore-points.js";
 
 export interface HookEndpointCtx {
   reg: HookRegistry;
@@ -64,7 +65,15 @@ export function validateHookPost(
     const command = input && typeof input === "object" && "command" in input
       ? String((input as { command?: unknown }).command ?? "")
       : "";
-    const decision = evaluateCommandPolicy(command);
+    const cwd = body.hook.cwd;
+    if (cwd) {
+      try {
+        ensureRestorePoint(cwd, body.jinnSessionId!);
+      } catch {
+        // Best-effort: a restore point is recovery insurance, not a gate — never block on its failure.
+      }
+    }
+    const decision = evaluateCommandPolicy(command, cwd);
     if (decision.action === "block") {
       return { status: 451, body: decision.reason || "Command blocked by Jinn security policy" };
     }
