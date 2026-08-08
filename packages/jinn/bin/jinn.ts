@@ -235,6 +235,46 @@ withJson(workflow.command("retry <workflowId> <runId> <nodeId>").requiredOption(
     });
 }
 
+// Service subcommands (jinn service install|start|stop|status) — wraps the
+// launchd (macOS) / systemd --user (Linux) supervisor definitions.
+{
+  const serviceCmd = program
+    .command("service")
+    .description("Manage the OS-level supervised daemon (launchd on macOS, systemd --user on Linux)");
+
+  serviceCmd
+    .command("install")
+    .description("Write the boot/login-start service definition (RunAtLoad / WantedBy=default.target)")
+    .action(async () => {
+      const { runServiceInstall } = await import("../src/cli/service.js");
+      await runServiceInstall();
+    });
+
+  serviceCmd
+    .command("start")
+    .description("Start the installed service")
+    .action(async () => {
+      const { runServiceStart } = await import("../src/cli/service.js");
+      await runServiceStart();
+    });
+
+  serviceCmd
+    .command("stop")
+    .description("Stop the installed service")
+    .action(async () => {
+      const { runServiceStop } = await import("../src/cli/service.js");
+      await runServiceStop();
+    });
+
+  serviceCmd
+    .command("status")
+    .description("Show whether the service is installed and running")
+    .action(async () => {
+      const { runServiceStatus } = await import("../src/cli/service.js");
+      await runServiceStatus();
+    });
+}
+
 export function buildProgram(): Command { return program; }
 export function isDirectExecution(moduleUrl: string, argvPath: string | undefined): boolean {
   if (!argvPath) return false;
