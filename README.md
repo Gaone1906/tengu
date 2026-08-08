@@ -7,9 +7,10 @@ usage-governed AI agent org running on a Claude Max 5x ($100) subscription.
 Publishing name (not yet published): npm `tengu-cli`, binary `tengu`, GitHub `tengu-cli` — matching
 Jinn's own `jinn-cli` convention. Confirmed available on both npm and GitHub as of 2026-08-07.
 
-**Status:** design complete, no code yet. Nothing installed (`~/.jinn` does not exist).
-[03-implementation-plan.md](docs/03-implementation-plan.md) is consolidated and ready to execute;
-twelve decisions (D1–D12) are recorded with reasoning in [01-decisions.md](docs/01-decisions.md).
+**Status:** design closed. Nothing installed (`~/.jinn` does not exist), no code written.
+[16-features.md](docs/16-features.md) is the final user-facing feature list — start there.
+[03-implementation-plan.md](docs/03-implementation-plan.md) is the build plan. Seventeen decisions
+(D1–D17) are recorded with reasoning in [01-decisions.md](docs/01-decisions.md).
 
 ## Goal
 
@@ -39,6 +40,7 @@ destroying work.
 | [13-costs.md](docs/13-costs.md) | Desktop-wrapper effort as a multiplier, and real 2026 hosting prices across 5 providers |
 | [14-lid-close-mode.md](docs/14-lid-close-mode.md) | **Correction:** `caffeinate` does not survive lid-close. What actually does, on macOS |
 | [15-ui-ux.md](docs/15-ui-ux.md) | Jinn's actual design system (verified) and how Tengu extends its existing screens — includes a real [HTML mockup](docs/mockups/limits-page.html) |
+| **[16-features.md](docs/16-features.md)** | **The final feature list, from the user's perspective — start here** |
 
 ## Naming note
 

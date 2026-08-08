@@ -451,3 +451,44 @@ reusing what's legitimately reusable.
 hand-rolled progress bar. A real trend line (cost-per-todo, weekly pace) needs either a hand-rolled SVG
 sparkline (matches the codebase's evident preference for small custom primitives) or a new dependency.
 Decide once the data shape is known.
+
+---
+
+## D17 — Closing the remaining open pointers
+
+*(see [16-features.md](16-features.md) for the user-facing summary this resolves into)*
+
+Design phase closed. Remaining open items from D8–D16 and their topic docs, resolved:
+
+- **Cross-instance budget coordination** ([D11](01-decisions.md#d11--two-profiles-per-service-employees-in-work-a-council-that-plans-across-them)):
+  personal and work profiles share one governor state file if ever run concurrently, so neither spends
+  against a budget it doesn't actually have alone. Default assumption remains one active profile at a
+  time.
+- **Contract changes between services** ([09](09-work-profile-and-council.md)): a service needing
+  something from another opens a task in the *providing* service, rather than cross-service write
+  access. Matches real team ownership; avoids the coupling a shared-write model would create.
+- **Stale service knowledge base** ([09](09-work-profile-and-council.md)): "I don't know, let me check"
+  is an explicit valid council/service response — it opens an investigation task rather than guessing
+  from outdated docs.
+- **Non-mechanically-checkable `verify`** ([10-checkpointing.md](10-checkpointing.md)): falls back to a
+  weaker criterion (file exists / contains expected content) and is flagged lower-confidence at the
+  review gate, rather than forcing a pass/fail that doesn't fit the work.
+- **Per-checkpoint commit granularity** ([10-checkpointing.md](10-checkpointing.md)): kept as-is —
+  recoverability outweighs a tidy log. Squashing at the review gate is a per-project option, not
+  required.
+- **Where it runs day to day** ([12-deployment-and-ux.md](12-deployment-and-ux.md)): the laptop, by
+  default, using D14/D15's boot-start service + lid-close toggle. Moving to a rented always-on box
+  later ([13-costs.md](13-costs.md)) is a config change, not a rebuild — nothing in the design assumes
+  one or the other.
+- **Remote/phone access**: not built for v1 — the local dashboard is enough to start. A secure tunnel
+  (Tailscale) is a five-minute add whenever it's actually wanted; not worth designing around
+  speculatively.
+- **Charting** ([15-ui-ux.md](15-ui-ux.md)): hand-rolled, matching the app's existing preference for
+  small custom primitives over a new dependency — the actual need (two trend lines) doesn't justify one.
+
+**Deliberately left for build-time, not resolved here** — these need the real codebase or running
+telemetry to answer, and guessing further would just be more speculation stacked on speculation:
+whether `depth` is 0-indexed (decides if the sub-sub-task level needs a schema change), whether the
+existing `WorkspaceSwitcher` already does what profile-switching needs, and the real Opus/Sonnet token
+split and reviewer share once genuine work is flowing. None of these block starting the build — they're
+the first things the system will tell us, not open design questions.
