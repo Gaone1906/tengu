@@ -31,10 +31,10 @@ describe("PairingScreen", () => {
       />,
     )
 
-    expect(screen.getByRole("button", { name: /pair with jinn cli/i })).toBeTruthy()
+    expect(screen.getByRole("button", { name: /pair with tengu cli/i })).toBeTruthy()
     expect(screen.getByRole("button", { name: /pair from web settings/i })).toBeTruthy()
-    expect(screen.getByText(/run this on the computer where jinn is running/i)).toBeTruthy()
-    expect(screen.getByText(/jinn pair/i)).toBeTruthy()
+    expect(screen.getByText(/run this on the computer where tengu is running/i)).toBeTruthy()
+    expect(screen.getByText(/tengu pair/i)).toBeTruthy()
 
     fireEvent.click(screen.getByRole("button", { name: /pair from web settings/i }))
 
@@ -52,7 +52,7 @@ describe("PairingScreen", () => {
       />,
     )
 
-    expect(screen.getByText("jinn -i jinn-yorio pair")).toBeTruthy()
+    expect(screen.getByText("tengu -i jinn-yorio pair")).toBeTruthy()
   })
 
   it("shows the bare pair command for the default instance", () => {
@@ -64,7 +64,7 @@ describe("PairingScreen", () => {
       />,
     )
 
-    expect(screen.getByText("jinn pair")).toBeTruthy()
+    expect(screen.getByText("tengu pair")).toBeTruthy()
   })
 
   it("toggles the open pairing flow closed when its header is clicked again", () => {
@@ -76,14 +76,14 @@ describe("PairingScreen", () => {
       />,
     )
 
-    const cliHeader = screen.getByRole("button", { name: /pair with jinn cli/i })
+    const cliHeader = screen.getByRole("button", { name: /pair with tengu cli/i })
     expect(cliHeader.getAttribute("aria-expanded")).toBe("true")
-    expect(screen.getByText(/run this on the computer where jinn is running/i)).toBeTruthy()
+    expect(screen.getByText(/run this on the computer where tengu is running/i)).toBeTruthy()
 
     fireEvent.click(cliHeader)
 
     expect(cliHeader.getAttribute("aria-expanded")).toBe("false")
-    expect(screen.queryByText(/run this on the computer where jinn is running/i)).toBeNull()
+    expect(screen.queryByText(/run this on the computer where tengu is running/i)).toBeNull()
   })
 
   it("keeps fallback setup-token pairing explicit and ephemeral", () => {

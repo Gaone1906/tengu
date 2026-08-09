@@ -22,7 +22,7 @@ export function PairingScreen({ authState, pairing, error, onPair }: PairingScre
   // instance it carries `-i <instance>`, so a multi-instance operator doesn't
   // pair the wrong one — the single most common cause of "invalid code".
   const instance = authState?.instance
-  const pairCommand = instance && instance !== "jinn" ? `jinn -i ${instance} pair` : "jinn pair"
+  const pairCommand = instance && instance !== "jinn" ? `tengu -i ${instance} pair` : "tengu pair"
   const visibleError = useMemo(() => {
     if (!error) return null
     if (/expired|invalid/i.test(error) && mode === "token") {
@@ -76,14 +76,14 @@ export function PairingScreen({ authState, pairing, error, onPair }: PairingScre
             <FlowButton
               active={flow === "cli"}
               icon={<Terminal size={16} />}
-              title="Pair with Jinn CLI"
+              title="Pair with Tengu CLI"
               controls="jinn-pair-cli-flow"
               onClick={() => toggleFlow("cli")}
             />
             {flow === "cli" && (
               <div id="jinn-pair-cli-flow" className="animate-auth-reveal rounded-[var(--radius-md)] bg-[var(--fill-tertiary)] px-[var(--space-3)] py-[var(--space-3)] shadow-[inset_0_0_0_1px_var(--separator)] text-[length:var(--text-footnote)] leading-[var(--leading-relaxed)] text-[var(--text-secondary)]">
                 <ol className="flex flex-col gap-1.5 text-pretty">
-                  <li>1. Run this on the computer where Jinn is running.</li>
+                  <li>1. Run this on the computer where Tengu is running.</li>
                   <li>
                     2. <span className="font-[var(--font-code)] text-[var(--text-primary)]">{pairCommand}</span>
                   </li>
@@ -102,7 +102,7 @@ export function PairingScreen({ authState, pairing, error, onPair }: PairingScre
             {flow === "web" && (
               <div id="jinn-pair-web-flow" className="animate-auth-reveal rounded-[var(--radius-md)] bg-[var(--fill-tertiary)] px-[var(--space-3)] py-[var(--space-3)] shadow-[inset_0_0_0_1px_var(--separator)] text-[length:var(--text-footnote)] leading-[var(--leading-relaxed)] text-[var(--text-secondary)]">
                 <ol className="flex flex-col gap-1.5 text-pretty">
-                  <li>1. Open the already-paired local dashboard on the computer running Jinn.</li>
+                  <li>1. Open the already-paired local dashboard on the computer running Tengu.</li>
                   <li>2. Go to Settings &gt; Pairing and press Create pairing code.</li>
                   <li>3. Bring the code back here. Enter the code below.</li>
                 </ol>

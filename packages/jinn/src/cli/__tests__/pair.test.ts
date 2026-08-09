@@ -195,7 +195,7 @@ describe("pair CLI helpers", () => {
     }, 7777);
 
     expect(text).toContain("ABCD-EFGH-JKLM");
-    expect(text).toContain("Open Jinn on the other device");
+    expect(text).toContain("Open Tengu on the other device");
     expect(text).toContain("5 minutes");
     expect(text).not.toContain("gateway-token");
   });
@@ -280,8 +280,8 @@ describe("pair CLI helpers", () => {
     expect(text).toContain("Paired browsers");
     expect(text).toContain("This Mac");
     expect(text).toContain("iPhone browser");
-    expect(text).toContain("jinn unpair -- -device-2");
-    expect(formatPairedDevices([])).toContain("Create a code with jinn pair");
+    expect(text).toContain("tengu unpair -- -device-2");
+    expect(formatPairedDevices([])).toContain("Create a code with tengu pair");
     expect(text).not.toContain("gateway-token");
   });
 });

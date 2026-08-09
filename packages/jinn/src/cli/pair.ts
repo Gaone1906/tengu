@@ -167,7 +167,7 @@ export function formatPairingInstructions(
 ): string {
   const minutes = pairing.ttlSeconds ? Math.max(1, Math.ceil(pairing.ttlSeconds / 60)) : 5;
   return [
-    "Pair a browser with Jinn",
+    "Pair a browser with Tengu",
     "",
     // Always name the instance this code belongs to: a code only pairs the
     // instance that minted it, so an operator running several must see which one.
@@ -176,7 +176,7 @@ export function formatPairingInstructions(
     `Expires: ${minutes} minutes, single-use`,
     "",
     "On the other device:",
-    "  1. Open Jinn on the other device using your Tailscale/LAN URL.",
+    "  1. Open Tengu on the other device using your Tailscale/LAN URL.",
     "  2. When Pair This Browser appears, enter the code above.",
     "  3. After pairing, refreshes open the normal app.",
     "",
@@ -191,7 +191,7 @@ export function formatPairedDevices(devices: PairedDeviceResponse[]): string {
       "Paired browsers",
       "",
       "No paired browsers yet.",
-      "Create a code with jinn pair, then open Jinn from the other browser and enter it.",
+      "Create a code with tengu pair, then open Tengu from the other browser and enter it.",
     ].join("\n");
   }
   const lines = ["Paired browsers", ""];
@@ -201,20 +201,20 @@ export function formatPairedDevices(devices: PairedDeviceResponse[]): string {
     lines.push(`  id: ${device.id}`);
     if (device.lastSeenAt) lines.push(`  last seen: ${new Date(device.lastSeenAt).toLocaleString()}`);
     const unpairId = device.id.startsWith("-") ? `-- ${device.id}` : device.id;
-    lines.push(`  unpair: jinn unpair ${unpairId}`);
+    lines.push(`  unpair: tengu unpair ${unpairId}`);
   }
   return lines.join("\n");
 }
 
 export async function runPair(opts: { json?: boolean } = {}): Promise<void> {
   if (!fs.existsSync(JINN_HOME)) {
-    console.error("Gateway is not set up. Run \"jinn setup\" first.");
+    console.error("Gateway is not set up. Run \"tengu setup\" first.");
     process.exitCode = 1;
     return;
   }
   const info = gatewayRuntimeInfo();
   if (!info) {
-    console.error("Gateway location could not be determined. Run \"jinn setup\" first.");
+    console.error("Gateway location could not be determined. Run \"tengu setup\" first.");
     process.exitCode = 1;
     return;
   }
@@ -233,7 +233,7 @@ export async function runPair(opts: { json?: boolean } = {}): Promise<void> {
         if (others.length > 0) {
           console.log("");
           console.log(`This paired the default instance. ${others.length} other instance(s) exist.`);
-          console.log("To pair a different one, name it: jinn -i <instance> pair");
+          console.log("To pair a different one, name it: tengu -i <instance> pair");
         }
       }
     }
@@ -246,12 +246,12 @@ export async function runPair(opts: { json?: boolean } = {}): Promise<void> {
 export async function runUnpair(deviceId?: string, opts: { json?: boolean } = {}): Promise<void> {
   const connection = gatewayConnection();
   if (!fs.existsSync(JINN_HOME)) {
-    console.error("Gateway is not set up. Run \"jinn setup\" first.");
+    console.error("Gateway is not set up. Run \"tengu setup\" first.");
     process.exitCode = 1;
     return;
   }
   if (!connection) {
-    console.error("Gateway auth token was not found. Start Jinn first, then run \"jinn unpair\".");
+    console.error("Gateway auth token was not found. Start Tengu first, then run \"tengu unpair\".");
     process.exitCode = 1;
     return;
   }

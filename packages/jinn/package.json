@@ -8,7 +8,8 @@
     "node": ">=22"
   },
   "bin": {
-    "jinn": "./dist/bin/jinn.js"
+    "jinn": "./dist/bin/jinn.js",
+    "tengu": "./dist/bin/jinn.js"
   },
   "main": "./dist/src/index.js",
   "types": "./dist/src/index.d.ts",

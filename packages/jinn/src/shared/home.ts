@@ -25,7 +25,7 @@ export function claudeJsonPath(): string {
 
 /**
  * Resolve the instance NAME (not the home path) for user-facing hints such as
- * the `jinn -i <name> pair` command. Derives from an explicit JINN_INSTANCE,
+ * the `tengu -i <name> pair` command. Derives from an explicit JINN_INSTANCE,
  * else the JINN_HOME/passed-home basename with its leading dot stripped
  * (`~/.jinn-yorio` -> `jinn-yorio`), falling back to the default `jinn`.
  */
@@ -42,7 +42,7 @@ export function resolveJinnInstance(jinnHome?: string): string {
 
 /** The exact CLI command that pairs a browser to this instance. */
 export function pairCommandFor(instance: string): string {
-  return instance && instance !== "jinn" ? `jinn -i ${instance} pair` : "jinn pair";
+  return instance && instance !== "jinn" ? `tengu -i ${instance} pair` : "tengu pair";
 }
 
 /** Resolve the durable per-instance key without freezing JINN_HOME at import. */
