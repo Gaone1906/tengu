@@ -37,12 +37,12 @@ import {
 
 export { WorkflowRepositoryError };
 
-export interface CreateWorkflowInput { id: string; title: string; description?: string }
+export interface CreateWorkflowInput { id: string; title: string; description?: string; createdBy?: string }
 export interface DefinitionListQuery { cursor?: string; limit?: number; enabled?: boolean; retired?: boolean }
 export interface CursorPage<T> { items: T[]; nextCursor: string | null }
 export interface WorkflowDefinitionSummary {
   id: string; title: string; description: string | null; revision: number; enabled: boolean;
-  retiredAt: string | null; createdAt: string; updatedAt: string;
+  retiredAt: string | null; createdBy: string | null; createdAt: string; updatedAt: string;
 }
 
 export interface CreateRunInput {
@@ -119,12 +119,15 @@ function parseInputDefinition(value: unknown): WorkflowDefinition {
 }
 function parseDefinitionInput(value: unknown, description: boolean): CreateWorkflowInput {
   const input = parseJsonRecord(value, 'Workflow definition input is invalid.');
-  assertExactKeys(input, description ? ['id', 'title', 'description'] : ['id', 'title'], 'Workflow definition input is invalid.');
+  assertExactKeys(input, description ? ['id', 'title', 'description', 'createdBy'] : ['id', 'title'], 'Workflow definition input is invalid.');
   if (typeof input.id !== 'string' || typeof input.title !== 'string'
-    || (input.description !== undefined && typeof input.description !== 'string')) {
+    || (input.description !== undefined && typeof input.description !== 'string')
+    || (input.createdBy !== undefined && typeof input.createdBy !== 'string')) {
     repositoryError('bad-input', 'Workflow definition input is invalid.');
   }
-  return { id: input.id, title: input.title, ...(input.description === undefined ? {} : { description: input.description }) };
+  return { id: input.id, title: input.title,
+    ...(input.description === undefined ? {} : { description: input.description }),
+    ...(input.createdBy === undefined ? {} : { createdBy: input.createdBy }) };
 }
 function parseStoredDefinition(row: DefinitionRow): WorkflowDefinition {
   const parsed = workflowDefinitionSchema.safeParse(parseStoredJson(row.definition_json, `Workflow definition ${row.id}`));
@@ -156,7 +159,8 @@ function graphUnchanged(candidate: WorkflowDefinition, current: WorkflowDefiniti
 }
 function definitionSummary(value: WorkflowDefinition): WorkflowDefinitionSummary {
   return { id: value.id, title: value.title, description: value.description ?? null, revision: value.revision,
-    enabled: value.enabled, retiredAt: value.retiredAt ?? null, createdAt: value.createdAt, updatedAt: value.updatedAt };
+    enabled: value.enabled, retiredAt: value.retiredAt ?? null, createdBy: value.createdBy ?? null,
+    createdAt: value.createdAt, updatedAt: value.updatedAt };
 }
 function parseDefinitionQuery(value: unknown): NormalizedDefinitionQuery {
   const query = parseJsonRecord(value, 'Workflow definition query is invalid.');

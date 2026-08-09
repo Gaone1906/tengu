@@ -333,6 +333,9 @@ const rawWorkflowDefinitionSchema = z.strictObject({
   revision: z.number().int().min(1),
   enabled: z.boolean(),
   retiredAt: z.string().optional(),
+  /** The generalist employee whose `create_workflow` call authored this
+   *  definition — absent for one saved through the web editor by a human. */
+  createdBy: z.string().min(1).max(120).optional(),
   ...graphShape,
   createdAt: z.string(),
   updatedAt: z.string(),

@@ -80,6 +80,28 @@ export interface Employee {
   directReports?: string[];
   depth?: number;
   chain?: string[];
+  /** The specialist's one owned repo (absolute or ~-relative). Absent = generalist. */
+  repo?: string;
+  /** Hex color for round-table/avatar identity. */
+  color?: string;
+}
+
+/** Filesystem-resident KB manifest for one specialist
+ *  (`~/.{instance}/kb/<employeeName>/manifest.json`, docs/tengu/18-council-specialists.md). */
+export interface SpecialistKbManifest {
+  employeeName: string;
+  repo: string;
+  lastIndexedAt: string | null;
+  lastIndexedGitSha: string | null;
+  fileCount: number;
+  chunkCount: number;
+  embeddingModel: string;
+  schemaVersion: number;
+}
+
+export interface SpecialistKbResponse {
+  exists: boolean;
+  manifest: SpecialistKbManifest | null;
 }
 
 /** Editable employee fields accepted by PATCH /api/org/employees/:name.
@@ -381,6 +403,9 @@ export interface WorkflowDefinitionV2Wire {
   revision: number
   enabled: boolean
   retiredAt?: string
+  /** The generalist employee whose `create_workflow` call authored this
+   *  definition — absent for one saved through the web editor by a human. */
+  createdBy?: string
   createdAt: string
   updatedAt: string
   inputs?: Array<Record<string, unknown>>
@@ -606,6 +631,10 @@ export interface WorkItemCompactWire {
   rootId?: string
   depth?: number
   dueAt?: string | null
+  /** Project identity (docs/tengu/18-council-specialists.md) — set only on a
+   *  depth-0 item; a root with a non-null path is a "project" for the
+   *  round-table dashboard. Older gateways omit it. */
+  workspacePath?: string | null
   /** Todos v2 slice 3 board wire data (optional: older gateways omit them). */
   labels?: WorkItemLabelWire[]
   /** True while an incoming `blocks` relation originates from an open Todo. */
@@ -998,6 +1027,13 @@ export const api = {
     ),
   getDepartmentBoard: (name: string) =>
     get<Record<string, unknown>>(`/api/org/departments/${name}/board`),
+  getSpecialistKb: (name: string) =>
+    get<SpecialistKbResponse>(`/api/specialists/${encodeURIComponent(name)}/kb`),
+  triggerSpecialistIncrementalLearning: (name: string) =>
+    post<{ triggered: boolean; employee: string; message: string }>(
+      `/api/specialists/${encodeURIComponent(name)}/kb/incremental`,
+      {},
+    ),
   getSkills: () => get<{ name: string; description?: string }[]>("/api/skills"),
   getSkill: (name: string) =>
     get<{ name: string; content: string }>(`/api/skills/${encodeURIComponent(name)}`),

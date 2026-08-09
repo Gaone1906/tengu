@@ -127,6 +127,7 @@ function summary(definition: WorkflowDefinition): WorkflowDefinitionSummary {
     revision: definition.revision,
     enabled: definition.enabled,
     retiredAt: definition.retiredAt ?? null,
+    createdBy: definition.createdBy ?? null,
     createdAt: definition.createdAt,
     updatedAt: definition.updatedAt,
   };

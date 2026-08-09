@@ -50,6 +50,15 @@ function approvalActor(req: IncomingMessage): string {
   return getSession(caller)?.employee ?? `session:${caller}`;
 }
 
+/** Unlike {@link approvalActor} this has no "operator" fallback: a definition
+ *  saved from the web editor (no caller session header) has no author to badge,
+ *  it is only ever set when an employee session calls create_workflow. */
+function creatorEmployee(req: IncomingMessage): string | undefined {
+  const caller = req.headers[CALLER_SESSION_HEADER];
+  if (typeof caller !== "string" || !caller) return undefined;
+  return getSession(caller)?.employee ?? undefined;
+}
+
 function segments(pathname: string): string[] | null {
   try {
     return pathname.split("/").filter(Boolean).map((part) => decodeURIComponent(part));
@@ -141,7 +150,9 @@ async function definitions(req: IncomingMessage, res: ServerResponse, url: URL, 
   if (parts.length === 2 && method === "GET") { send(res, 200, service.listDefinitions(definitionQuery(url))); return true; }
   if (parts.length === 2 && method === "POST") {
     const value = body(req, res); const parsed = await value; if (parsed === undefined) return true;
-    send(res, 201, service.createDefinition(record(parsed, ["id", "title", "description"]) as never)); return true;
+    const input = record(parsed, ["id", "title", "description"]);
+    const createdBy = creatorEmployee(req);
+    send(res, 201, service.createDefinition({ ...input, ...(createdBy ? { createdBy } : {}) } as never)); return true;
   }
   const id = parts[2]; if (!id) return false;
   if (parts.length === 3 && method === "GET") { const value = service.getDefinition(id); if (!value) throw new WorkflowRepositoryError("not-found", `Workflow definition ${id} was not found.`); send(res, 200, value); return true; }
