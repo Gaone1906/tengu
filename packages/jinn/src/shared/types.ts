@@ -1045,6 +1045,10 @@ export interface JinnConfig {
   /** Usage governor: halts session spawns before either the 5-hour or 7-day Claude
    *  window would exceed its stop threshold, and flags context usage for compaction. */
   governor?: GovernorConfig;
+  /** Org-level roster limits (D25). Default 5 when maxGeneralists is unset or non-positive. */
+  org?: {
+    maxGeneralists?: number;
+  };
   sessions?: {
     interruptOnNewMessage?: boolean;
     staleChat?: {

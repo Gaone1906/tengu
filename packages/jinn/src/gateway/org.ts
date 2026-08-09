@@ -12,6 +12,44 @@ import {
   SYSTEM_EMPLOYEE_OVERRIDE_FIELDS,
 } from "./system-employees.js";
 
+export const GENERALIST_DEPARTMENT = "generalists";
+export const DEFAULT_MAX_GENERALISTS = 5;
+
+export function resolveMaxGeneralists(config: JinnConfig | undefined): number {
+  const configured = config?.org?.maxGeneralists;
+  return typeof configured === "number" && Number.isFinite(configured) && configured > 0
+    ? Math.floor(configured)
+    : DEFAULT_MAX_GENERALISTS;
+}
+
+export interface GeneralistCapResult {
+  ok: boolean;
+  count: number;
+  max: number;
+  error?: string;
+}
+
+// Pure — no IO — so callers beyond scanOrg's own warning below can reuse it for a hard reject.
+export function validateGeneralistCap(
+  employees: Iterable<Employee>,
+  config: JinnConfig | undefined,
+): GeneralistCapResult {
+  const max = resolveMaxGeneralists(config);
+  let count = 0;
+  for (const employee of employees) {
+    if (employee.department === GENERALIST_DEPARTMENT) count++;
+  }
+  if (count > max) {
+    return {
+      ok: false,
+      count,
+      max,
+      error: `${count} generalist employee(s) exceed the configured max of ${max} (department="${GENERALIST_DEPARTMENT}")`,
+    };
+  }
+  return { ok: true, count, max };
+}
+
 function currentOrgDir(): string {
   const instance = process.env.JINN_INSTANCE || "jinn";
   const defaultOrgDir = path.join(os.homedir(), `.${instance}`, "org");
@@ -117,6 +155,11 @@ export function scanOrg(config?: JinnConfig): Map<string, Employee> {
     }
     return undefined; // keep walking — scanOrg visits every file
   });
+
+  const capResult = validateGeneralistCap(registry.values(), config);
+  if (!capResult.ok) {
+    logger.warn(`scanOrg: ${capResult.error}`);
+  }
 
   return registry;
 }
