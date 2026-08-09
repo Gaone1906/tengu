@@ -19,6 +19,8 @@ const ExperimentDetailPage = lazyRoute(() => import('./routes/experiments/detail
 const LogsPage = lazyRoute(() => import('./routes/logs/page'), 'logs')
 const LimitsPage = lazyRoute(() => import('./routes/limits/page'), 'limits')
 const OrgPage = lazyRoute(() => import('./routes/org/page'), 'org')
+const SpecialistsPage = lazyRoute(() => import('./routes/specialists/page'), 'specialists')
+const RoundtablePage = lazyRoute(() => import('./routes/roundtable/page'), 'roundtable')
 const SettingsPage = lazyRoute(() => import('./routes/settings/page'), 'settings')
 const SkillsPage = lazyRoute(() => import('./routes/skills/page'), 'skills')
 const SkillDetailPage = lazyRoute(() => import('./routes/skills/detail'), 'skill-detail')
@@ -37,6 +39,8 @@ registerRoutePrefetch('/experiments', ExperimentsPage.prefetch)
 registerRoutePrefetch('/logs', LogsPage.prefetch)
 registerRoutePrefetch('/limits', LimitsPage.prefetch)
 registerRoutePrefetch('/org', OrgPage.prefetch)
+registerRoutePrefetch('/specialists', SpecialistsPage.prefetch)
+registerRoutePrefetch('/roundtable', RoundtablePage.prefetch)
 registerRoutePrefetch('/settings', SettingsPage.prefetch)
 registerRoutePrefetch('/skills', SkillsPage.prefetch)
 registerRoutePrefetch('/more', MorePage.prefetch)
@@ -124,6 +128,8 @@ const router = createBrowserRouter([
       { path: '/logs', element: <LogsPage /> },
       { path: '/limits', element: <LimitsPage /> },
       { path: '/org', element: <OrgPage /> },
+      { path: '/specialists', element: <SpecialistsPage /> },
+      { path: '/roundtable', element: <RoundtablePage /> },
       { path: '/settings', element: <SettingsPage /> },
       { path: '/skills', element: <SkillsPage /> },
       { path: '/skills/:name', element: <SkillDetailPage /> },

@@ -11,6 +11,8 @@ import {
   MoreHorizontal,
   NotebookPen,
   FlaskConical,
+  Boxes,
+  UsersRound,
 } from "lucide-react"
 import type { LucideIcon } from "lucide-react"
 
@@ -26,6 +28,8 @@ const BASE_NAV_ITEMS: NavItem[] = [
   { href: "/workflow", label: "Workflows", icon: Workflow },
   { href: "/experiments", label: "Experiments", icon: FlaskConical },
   { href: "/org", label: "Organization", icon: Users },
+  { href: "/specialists", label: "Specialists", icon: Boxes },
+  { href: "/roundtable", label: "Round Table", icon: UsersRound },
   { href: "/cron", label: "Cron", icon: Clock },
   { href: "/limits", label: "Limits", icon: Gauge },
   { href: "/logs", label: "Activity", icon: Activity },

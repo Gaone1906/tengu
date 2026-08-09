@@ -3,7 +3,7 @@ import { useCallback, useEffect, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import {
   MessageSquare, Users, ListChecks, Clock,
-  Activity, Zap, Settings, Plus, Hash, Workflow, Gauge, NotebookPen,
+  Activity, Zap, Settings, Plus, Hash, Workflow, Gauge, NotebookPen, Boxes,
 } from "lucide-react"
 import {
   Command,
@@ -54,6 +54,7 @@ const BASE_STATIC_PAGES = [
   { id: "page-todos", label: "Todos", icon: ListChecks, href: "/todos" },
   { id: "page-workflow", label: "Workflows", icon: Workflow, href: "/workflow" },
   { id: "page-org", label: "Organization", icon: Users, href: "/org" },
+  { id: "page-specialists", label: "Specialists", icon: Boxes, href: "/specialists" },
   { id: "page-cron", label: "Cron", icon: Clock, href: "/cron" },
   { id: "page-limits", label: "Limits", icon: Gauge, href: "/limits" },
   { id: "page-logs", label: "Activity", icon: Activity, href: "/logs" },

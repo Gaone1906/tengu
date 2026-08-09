@@ -35,6 +35,8 @@ describe('OVERFLOW_ITEMS (the More screen)', () => {
     expect(OVERFLOW_ITEMS.map((i) => i.href)).toEqual([
       '/experiments',
       '/org',
+      '/specialists',
+      '/roundtable',
       '/cron',
       '/limits',
       '/logs',

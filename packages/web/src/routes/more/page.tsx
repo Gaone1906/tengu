@@ -26,6 +26,7 @@ function itemFor(href: string): NavItem {
 // token for its glyph, the colored squares use white.
 const TINT: Record<string, { bg: string; fg: string }> = {
   "/org": { bg: "var(--system-blue)", fg: "#fff" },
+  "/specialists": { bg: "var(--system-purple)", fg: "#fff" },
   "/cron": { bg: "var(--system-orange)", fg: "#fff" },
   "/skills": { bg: "var(--accent)", fg: "var(--accent-contrast)" },
   "/logs": { bg: "var(--system-green)", fg: "#fff" },
