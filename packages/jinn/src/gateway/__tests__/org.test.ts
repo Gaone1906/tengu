@@ -127,6 +127,42 @@ jinnMcp: "yes"
   });
 });
 
+describe("scanOrg — repo/color fields", () => {
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "org-test-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("parses repo and color from an employee YAML that sets them", () => {
+    writeYaml("engineering", "specialist.yaml", `
+name: specialist
+persona: A repo-scoped specialist
+repo: ~/code/tengu
+color: "#ff6600"
+`);
+    const registry = scanOrg();
+    const emp = registry.get("specialist");
+    expect(emp).toBeDefined();
+    expect(emp!.repo).toBe("~/code/tengu");
+    expect(emp!.color).toBe("#ff6600");
+  });
+
+  it("leaves repo and color undefined when absent from the employee YAML", () => {
+    writeYaml("general", "generalist.yaml", `
+name: generalist
+persona: A generalist with no repo or color
+`);
+    const registry = scanOrg();
+    const emp = registry.get("generalist");
+    expect(emp).toBeDefined();
+    expect(emp!.repo).toBeUndefined();
+    expect(emp!.color).toBeUndefined();
+  });
+});
+
 describe("scanOrg — reserved author identities", () => {
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "org-test-reserved-"));

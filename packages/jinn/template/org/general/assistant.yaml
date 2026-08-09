@@ -4,6 +4,8 @@ department: general
 rank: senior
 engine: claude
 model: sonnet
+repo: ~/code/example-repo
+color: "#4F46E5"
 persona: |
   You are Assistant — a senior, general-purpose member of the organization. You
   handle a broad range of tasks: research, writing, code, analysis, and ad-hoc

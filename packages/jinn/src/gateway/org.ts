@@ -92,6 +92,8 @@ export function scanOrg(config?: JinnConfig): Map<string, Employee> {
           model: data.model || "sonnet",
           persona: data.persona,
           emoji: typeof data.emoji === "string" ? data.emoji : undefined,
+          repo: typeof data.repo === "string" ? data.repo : undefined,
+          color: typeof data.color === "string" ? data.color : undefined,
           cliFlags: Array.isArray(data.cliFlags) ? data.cliFlags : undefined,
           effortLevel: typeof data.effortLevel === "string" ? data.effortLevel : undefined,
           alwaysNotify: typeof data.alwaysNotify === "boolean" ? data.alwaysNotify : true,

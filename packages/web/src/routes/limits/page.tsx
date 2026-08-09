@@ -236,10 +236,6 @@ function PacingStrip({ account, now }: { account: SessionTelemetryEvent["account
   )
 }
 
-function contextRemainingColor(remainingPct: number) {
-  return remainingPct <= 10 ? "var(--system-red)" : "var(--accent)"
-}
-
 function SessionCard({
   session,
   now,
@@ -249,9 +245,6 @@ function SessionCard({
   now: number
   employeeProgress: SessionTelemetryEvent["employeeProgress"]
 }) {
-  const contextRemainingPct = session.contextUsedPct !== undefined
-    ? clampPercent(100 - session.contextUsedPct)
-    : undefined
   const tone = session.stale
     ? { color: "var(--system-orange)", label: `Stale · ${agoLabel(session.capturedAt, now)}` }
     : { color: "var(--system-green)", label: "Live" }
@@ -281,25 +274,6 @@ function SessionCard({
       <div className="mt-[var(--space-5)] text-[length:var(--text-footnote)] text-[var(--text-secondary)] truncate">
         {session.currentTodoTitle ?? "No active todo"}
       </div>
-
-      {contextRemainingPct !== undefined && (
-        <div className="mt-[var(--space-5)] min-w-0">
-          <div className="flex items-baseline justify-between gap-[var(--space-3)]">
-            <span className="text-[length:var(--text-footnote)] text-[var(--text-secondary)]">
-              Context remaining
-            </span>
-            <span className="text-[length:var(--text-body)] font-[var(--weight-bold)] text-[var(--text-primary)] tabular-nums">
-              {contextRemainingPct}%
-            </span>
-          </div>
-          <div className="mt-[var(--space-2)] h-2 rounded-full bg-[var(--fill-tertiary)] overflow-hidden">
-            <div
-              className="h-full rounded-full transition-[width] duration-500 ease-[var(--ease-smooth)]"
-              style={{ width: `${contextRemainingPct}%`, background: contextRemainingColor(contextRemainingPct) }}
-            />
-          </div>
-        </div>
-      )}
 
       {progress && progress.total > 0 && (
         <div className="mt-[var(--space-5)] text-[length:var(--text-footnote)] text-[var(--text-secondary)]">

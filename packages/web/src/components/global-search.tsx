@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import {
-  MessageSquare, Users, ListChecks, Clock, ClipboardList,
+  MessageSquare, Users, ListChecks, Clock,
   Activity, Zap, Settings, Plus, Hash, Workflow, Gauge, NotebookPen,
 } from "lucide-react"
 import {
@@ -55,7 +55,6 @@ const BASE_STATIC_PAGES = [
   { id: "page-workflow", label: "Workflows", icon: Workflow, href: "/workflow" },
   { id: "page-org", label: "Organization", icon: Users, href: "/org" },
   { id: "page-cron", label: "Cron", icon: Clock, href: "/cron" },
-  { id: "page-standup", label: "Stand-up", icon: ClipboardList, href: "/standup" },
   { id: "page-limits", label: "Limits", icon: Gauge, href: "/limits" },
   { id: "page-logs", label: "Activity", icon: Activity, href: "/logs" },
   { id: "page-skills", label: "Skills", icon: Zap, href: "/skills" },

@@ -580,6 +580,10 @@ export interface Employee {
   persona: string;
   /** Emoji icon for this employee (shown in sidebar, org chart, etc.) */
   emoji?: string;
+  /** The specialist's one owned repo (absolute or ~-relative path). Absent = generalist, not repo-scoped. */
+  repo?: string;
+  /** Hex color for round-table/avatar identity. */
+  color?: string;
   /** Extra CLI flags passed to the engine (e.g. ["--chrome"]) */
   cliFlags?: string[];
   /** MCP servers this employee needs. true = all global, false = none, string[] = specific servers */

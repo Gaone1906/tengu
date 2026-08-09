@@ -811,54 +811,6 @@ export interface DepartmentSummaryWire {
   todoCount: number
 }
 
-/** GET /api/standup — docs/tengu/03-implementation-plan.md step 11. */
-export interface StandupProgressWire {
-  rootId: string
-  total: number
-  completed: number
-  inFlight: number
-  completedPct: number
-}
-
-export interface StandupBlockedItemWire {
-  id: string
-  title: string
-  status: WorkItemStatusWire
-  assignee: string | null
-}
-
-export type StandupIncidentKindWire = 'security-block' | 'pacing-circuit-breaker'
-
-export interface StandupIncidentWire {
-  kind: StandupIncidentKindWire
-  at: string
-  actor: string | null
-  workItemId: string
-  summary: string
-}
-
-export interface DepartmentStandupWire {
-  department: string
-  progress: StandupProgressWire
-  blocked: StandupBlockedItemWire[]
-  incidents: StandupIncidentWire[]
-  narrative: string
-  narrativeFromCache: boolean
-  latestEventAt: string | null
-}
-
-export interface ProjectStandupWire {
-  rootId: string
-  title: string
-  workspacePath: string | null
-  departments: DepartmentStandupWire[]
-}
-
-export interface StandupWindowQuery {
-  since?: string
-  until?: string
-}
-
 /** The GET /api/work-items/:id payload: full row + live-derived spend + audit. */
 export interface WorkItemDetailWire {
   workItem: WorkItemFullWire
@@ -1317,20 +1269,6 @@ export const api = {
   /** Replace a Todo's label set (ids or names; nothing created implicitly). */
   setWorkItemLabels: (id: string, labels: string[]) =>
     put<{ labels: WorkItemLabelWire[] }>(`/api/work-items/${encodeURIComponent(id)}/labels`, { labels }),
-  getStandup: (window?: StandupWindowQuery) => {
-    const qs = new URLSearchParams()
-    if (window?.since) qs.set("since", window.since)
-    if (window?.until) qs.set("until", window.until)
-    const suffix = qs.toString()
-    return get<ProjectStandupWire[]>(`/api/standup${suffix ? `?${suffix}` : ""}`)
-  },
-  getProjectStandup: (rootId: string, window?: StandupWindowQuery) => {
-    const qs = new URLSearchParams()
-    if (window?.since) qs.set("since", window.since)
-    if (window?.until) qs.set("until", window.until)
-    const suffix = qs.toString()
-    return get<ProjectStandupWire>(`/api/standup/${encodeURIComponent(rootId)}${suffix ? `?${suffix}` : ""}`)
-  },
   uploadFile: async (file: File, sessionId?: string): Promise<UploadedFile> => {
     const form = new FormData()
     form.append('file', file)
