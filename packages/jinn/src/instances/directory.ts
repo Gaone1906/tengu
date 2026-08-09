@@ -201,7 +201,7 @@ export function ensureDefaultInstance(): void {
   if (instances.some((instance) => instance.name === "jinn")) return;
   saveInstances([{
     name: "jinn",
-    displayName: "Jinn",
+    displayName: "Tengu",
     port: 7777,
     home: path.join(os.homedir(), ".jinn"),
     createdAt: new Date().toISOString(),

@@ -20,7 +20,7 @@ export function isTemplateMaterializationPath(filePath: string): boolean {
 export function deriveTemplateMaterializationInputs(
   config: TemplateMaterializationConfig | null | undefined,
 ): TemplateMaterializationInputs {
-  const portalName = config?.portal?.portalName || "Jinn"
+  const portalName = config?.portal?.portalName || "Tengu"
   return {
     portalName,
     portalSlug: portalName.toLowerCase().replace(/\s+/g, "-"),

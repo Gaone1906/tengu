@@ -903,7 +903,7 @@ export function reconcileDepartmentRegistry(db: DatabaseType): number {
     .all() as string[];
   if (missing.length === 0) return 0;
   const portal = fs.existsSync(CONFIG_PATH) ? loadConfig().portal : undefined;
-  const companyPrefix = resolveTodoIdPrefix(portal?.companyName ?? "Jinn", portal?.companyPrefix);
+  const companyPrefix = resolveTodoIdPrefix(portal?.companyName ?? "Tengu", portal?.companyPrefix);
   for (const slug of missing) {
     resolveDepartmentPrefix(db, slug, companyPrefix);
   }

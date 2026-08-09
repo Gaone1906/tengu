@@ -2380,7 +2380,7 @@ function workspaceDisplayName(instance: Instance): string {
     }
   } catch { /* registry name fallback */ }
   const slug = instance.name.replace(/^jinn-/, "");
-  return slug ? slug.charAt(0).toUpperCase() + slug.slice(1) : "Jinn";
+  return slug ? slug.charAt(0).toUpperCase() + slug.slice(1) : "Tengu";
 }
 
 function processIsAlive(pid: number): boolean {
@@ -6816,7 +6816,7 @@ export async function handleApiRequest(
       let todoPrefix: string | null;
       try {
         todoPrefix = resolveTodoIdPrefix(
-          config.portal?.companyName ?? "Jinn",
+          config.portal?.companyName ?? "Tengu",
           config.portal?.companyPrefix,
         );
       } catch {
@@ -6854,7 +6854,7 @@ export async function handleApiRequest(
       // prefix mints future Todos under its own sequence. Only validity is checked.
       if (companyPrefix !== undefined && companyPrefix !== null) {
         try {
-          resolveTodoIdPrefix(companyName ?? config.portal?.companyName ?? "Jinn", companyPrefix);
+          resolveTodoIdPrefix(companyName ?? config.portal?.companyName ?? "Tengu", companyPrefix);
         } catch (error) {
           return badRequest(res, error instanceof Error ? error.message : "Invalid Todo prefix");
         }
@@ -6862,7 +6862,7 @@ export async function handleApiRequest(
       if (companyName !== undefined || companyPrefix !== undefined) {
         try {
           resolveTodoIdPrefix(
-            companyName ?? config.portal?.companyName ?? "Jinn",
+            companyName ?? config.portal?.companyName ?? "Tengu",
             companyPrefix === null ? undefined : companyPrefix ?? config.portal?.companyPrefix,
           );
         } catch (error) {
@@ -6892,7 +6892,7 @@ export async function handleApiRequest(
       context.reloadConfig?.();
       logger.info(`Onboarding: company configured=${companyName !== undefined}, portal name="${portalName}", operator="${operatorName}", language="${language}"`);
 
-      const effectiveName = portalName || "Jinn";
+      const effectiveName = portalName || "Tengu";
       const languageSection = language && language !== "English"
         ? `\n\n## Language\nAlways respond in ${language}. All communication with the user must be in ${language}.`
         : "";
@@ -7716,7 +7716,7 @@ async function runWebSession(
         }
         context.emit("session:completed", {
           sessionId: currentSession.id,
-          employee: currentSession.employee || config.portal?.portalName || "Jinn",
+          employee: currentSession.employee || config.portal?.portalName || "Tengu",
           title: currentSession.title,
           result: lateText,
           error: null,
@@ -7897,7 +7897,7 @@ async function runWebSession(
             if (completedFallback) {
               context.emit("session:completed", {
                 sessionId: currentSession.id,
-                employee: currentSession.employee || config.portal?.portalName || "Jinn",
+                employee: currentSession.employee || config.portal?.portalName || "Tengu",
                 title: currentSession.title,
                 result: fallbackResult.result,
                 error: fallbackResult.error || null,
@@ -7969,7 +7969,7 @@ async function runWebSession(
             if (completedAfterRetry) {
               context.emit("session:completed", {
                 sessionId: currentSession.id,
-                employee: currentSession.employee || config.portal?.portalName || "Jinn",
+                employee: currentSession.employee || config.portal?.portalName || "Tengu",
                 title: currentSession.title,
                 result: retryResult.result,
                 error: retryResult.error || null,
@@ -8076,7 +8076,7 @@ async function runWebSession(
     if (completedSession) {
       context.emit("session:completed", {
         sessionId: currentSession.id,
-        employee: currentSession.employee || config.portal?.portalName || "Jinn",
+        employee: currentSession.employee || config.portal?.portalName || "Tengu",
         title: currentSession.title,
         result: quietPreempted ? null : result.result,
         error: reportedError,

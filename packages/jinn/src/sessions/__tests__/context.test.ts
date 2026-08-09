@@ -32,7 +32,7 @@ describe("buildContext — COO (no employee)", () => {
   it("emits the slim COO identity anchor and points at the operating manual", () => {
     const out = buildContext({ ...baseOpts });
     // Slim 3-line identity anchor (default portalName = "Jinn")
-    expect(out).toContain("# You are Jinn");
+    expect(out).toContain("# You are Tengu");
     expect(out).toContain("COO of the user's AI organization");
     // Anchor points at the auto-loaded manual rather than duplicating it
     expect(out).toContain("CLAUDE.md");
@@ -63,7 +63,7 @@ describe("buildContext — employee mode", () => {
   it("emits the employee identity section instead of the COO anchor", () => {
     const out = buildContext({ ...baseOpts, employee: minimalEmployee });
     expect(out).toContain("# You are Content Lead");
-    expect(out).toContain("You are an AI employee in the Jinn gateway system.");
+    expect(out).toContain("You are an AI employee in the Tengu gateway system.");
     expect(out).toContain("## Your persona");
     expect(out).toContain("You lead the content team.");
     // The employee section carries the role block, not the COO "manual" anchor.
@@ -781,7 +781,7 @@ describe("buildContext — maxChars trimming", () => {
     const out = buildContext({ ...baseOpts });
     expect(out.length).toBeLessThan(100_000);
     // Essential sections present and intact.
-    expect(out).toContain("# You are Jinn");
+    expect(out).toContain("# You are Tengu");
     expect(out).toContain("## Current session");
   });
 });

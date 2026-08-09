@@ -289,7 +289,7 @@ models:
       - { id: "GPT-OSS 120B (Medium)", label: "GPT-OSS 120B Medium", supportsEffort: false, effortLevels: [], contextWindow: 131072 }
 connectors: {}
 portal:
-  companyName: "Jinn"
+  companyName: "Tengu"
 
 # ── Optional blocks (uncomment to customize) ──────────────────────────────
 # MCP servers give employees browser, search, fetch, and messaging tools.
@@ -454,13 +454,13 @@ export async function runSetup(opts?: { force?: boolean }): Promise<void> {
   const isFreshSetup = !fs.existsSync(CONFIG_PATH);
   const isInteractive = process.stdin.isTTY && isFreshSetup;
 
-  // Derive default COO name from instance name if set, otherwise "Jinn"
+  // Derive default COO name from instance name if set, otherwise "Tengu"
   const instanceName = process.env.JINN_INSTANCE;
   const setupName = process.env.JINN_SETUP_NAME?.trim();
   const instanceLabel = instanceName?.replace(/^jinn-/, "");
   const defaultName = setupName || (instanceLabel
     ? instanceLabel.charAt(0).toUpperCase() + instanceLabel.slice(1)
-    : "Jinn");
+    : "Tengu");
 
   let chosenName = defaultName;
   let chosenCompanyName = defaultName;
@@ -539,7 +539,7 @@ export async function runSetup(opts?: { force?: boolean }): Promise<void> {
     } else {
       source += `\nportal:\n${companyLine}\n`;
     }
-    if (chosenName !== "Jinn") {
+    if (chosenName !== "Tengu") {
       const portalNameLine = `  portalName: ${JSON.stringify(chosenName)}`;
       if (/^\s*portalName:/m.test(source)) source = source.replace(/^\s*portalName:.*$/m, portalNameLine);
       else source = source.replace(/^portal:\s*$/m, `portal:\n${portalNameLine}`);

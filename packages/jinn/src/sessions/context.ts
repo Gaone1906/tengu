@@ -187,7 +187,7 @@ export function buildContext(opts: BuildContextOptions): string {
   const gatewayUrl = platformContext.gatewayBaseUrl;
 
   // Resolve personalized names from config
-  const portalName = opts.portalName || opts.config?.portal?.portalName || "Jinn";
+  const portalName = opts.portalName || opts.config?.portal?.portalName || "Tengu";
   const operatorName = opts.operatorName || opts.config?.portal?.operatorName;
   const language = opts.language || opts.config?.portal?.language || "English";
 
@@ -752,7 +752,7 @@ function renderScopedRoster(
 export function buildScopedRosterSection(
   employee: Employee | undefined,
   hierarchy: OrgHierarchy | undefined,
-  portalName = "Jinn",
+  portalName = "Tengu",
   jinnMcpAttached = false,
 ): string | null {
   return renderScopedRoster(employee, hierarchy, portalName, false, jinnMcpAttached);

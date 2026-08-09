@@ -501,7 +501,7 @@ export async function startGateway(
     file: config.logging.file,
   });
 
-  const gatewayName = config.portal?.portalName || "Jinn";
+  const gatewayName = config.portal?.portalName || "Tengu";
   logger.info(`Starting ${gatewayName} gateway (boot ${bootId}, pid ${process.pid})...`);
 
   // Initialize database and recover any sessions stuck from a previous run

@@ -62,7 +62,7 @@ function configuredPortalName(): string {
   } catch {
     // Tests and partially-seeded homes may not have a complete config yet.
   }
-  return "Jinn";
+  return "Tengu";
 }
 
 function portalApprovalRoot(registry: Map<string, Employee>): RootApprovalTarget | null {
@@ -74,7 +74,7 @@ function portalApprovalRoot(registry: Map<string, Employee>): RootApprovalTarget
     logger.warn(`portal.portalName "${configuredName}" collides with an org employee; ignoring it as approval root so employee authority cannot inherit virtual COO authority`);
   }
 
-  for (const candidate of ["Jinn", "Portal COO", "operator", "COO"]) {
+  for (const candidate of ["Tengu", "Portal COO", "operator", "COO"]) {
     if (candidate !== configuredName && !registry.has(candidate)) {
       return { name: candidate, department: null, kind: "virtual" };
     }

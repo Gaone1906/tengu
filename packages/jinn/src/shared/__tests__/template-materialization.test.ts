@@ -7,10 +7,10 @@ import {
 } from "../template-materialization.js"
 
 describe("template materialization", () => {
-  it("derives the default Jinn replacements", () => {
+  it("derives the default Tengu replacements", () => {
     expect(deriveTemplateMaterializationInputs({})).toEqual({
-      portalName: "Jinn",
-      portalSlug: "jinn",
+      portalName: "Tengu",
+      portalSlug: "tengu",
     })
   })
 
@@ -47,7 +47,7 @@ describe("template materialization", () => {
       deriveTemplateMaterializationInputs({}),
     )
 
-    expect(materialized).toBe("name: Jinn\nunknown: {{futureValue}}\n")
+    expect(materialized).toBe("name: Tengu\nunknown: {{futureValue}}\n")
     expect(findUnresolvedTemplatePlaceholders(materialized)).toEqual(["{{futureValue}}"])
   })
 
