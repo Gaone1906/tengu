@@ -7,6 +7,7 @@ export type ChatBlockType =
   | 'todo-activity'
   | 'workflow-definition'
   | 'workflow-run'
+  | 'handoff-document'
 export type ChatBlockStatus = 'queued' | 'dispatched' | 'running' | 'waiting' | 'done' | 'completed' | 'error'
 export type ChatBlockOp = 'put' | 'patch' | 'remove'
 export type JsonPrimitive = string | number | boolean | null
@@ -105,6 +106,7 @@ const SUPPORTED_BLOCK_TYPES = new Set<ChatBlockType>([
   'todo-activity',
   'workflow-definition',
   'workflow-run',
+  'handoff-document',
 ])
 const ACTIVITY_BLOCK_TYPES = new Set<ChatBlockType>([
   'todo-activity',
@@ -238,6 +240,12 @@ export function blockFallbackContent(block: ChatBlock): string {
     return typeof block.payload.preview === 'string' && block.payload.preview.trim()
       ? `Followed up: ${block.payload.preview}`
       : 'Followed up'
+  }
+  if (block.type === 'handoff-document') {
+    if (block.title || block.summary) return prefix
+    return typeof block.payload.kind === 'string' && block.payload.kind.trim()
+      ? `Handoff · ${block.payload.kind.replace(/-/g, ' ')}`
+      : prefix
   }
   if (block.type === 'todo-activity') {
     const status = typeof block.payload.status === 'string' && block.payload.status.trim()

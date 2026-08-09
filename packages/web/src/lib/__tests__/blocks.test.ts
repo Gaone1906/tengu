@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { applyBlockEnvelopeToMessages } from "../blocks"
+import { applyBlockEnvelopeToMessages, blockFallbackContent, isChatBlock } from "../blocks"
 
 describe("web chat block reducer", () => {
   it("puts, patches, and removes a block message by block id", () => {
@@ -163,5 +163,60 @@ describe("web chat block reducer", () => {
     expect(next).toHaveLength(2);
     expect(next[0]?.blocks).toBeUndefined();
     expect(next[1]?.blocks?.[0]?.id).toBe("plan");
+  });
+});
+
+describe("handoff-document block", () => {
+  it("accepts a handoff-document block the same way delegation is accepted", () => {
+    expect(isChatBlock({
+      id: "hd-sr-1",
+      type: "handoff-document",
+      version: 1,
+      status: "done",
+      title: "Scope request",
+      payload: {
+        kind: "scope-request",
+        document: { id: "sr-1", repo: "gaone1906/tengu", summary: "Add council redesign" },
+      },
+    })).toBe(true);
+  });
+
+  it("falls back to the block title when one is set, like delegation does", () => {
+    const fallback = blockFallbackContent({
+      id: "hd-sr-1",
+      type: "handoff-document",
+      version: 1,
+      title: "Scope request",
+      payload: { kind: "scope-request", document: {} },
+    });
+
+    expect(fallback).toBe("Scope request");
+  });
+
+  it("derives a label from the document kind when no title is set", () => {
+    const fallback = blockFallbackContent({
+      id: "hd-sr-2",
+      type: "handoff-document",
+      version: 1,
+      payload: { kind: "task-assignment", document: {} },
+    });
+
+    expect(fallback).toBe("Handoff · task assignment");
+  });
+
+  it("puts a handoff-document block into the message stream like any other block type", () => {
+    const put = applyBlockEnvelopeToMessages([], {
+      op: "put",
+      block: {
+        id: "hd-1",
+        type: "handoff-document",
+        version: 1,
+        payload: { kind: "completion-report", document: { status: "completed" } },
+      },
+    }, "Handoff · completion report", 100);
+
+    expect(put).toHaveLength(1);
+    expect(put[0]?.blocks?.[0]?.type).toBe("handoff-document");
+    expect(put[0]?.content).toBe("Handoff · completion report");
   });
 });
