@@ -107,8 +107,12 @@ ${V1_WORK_ITEM_ID_ISSUANCES_TABLE_DDL};
 
 /* ── Current (v2) schema — Todos v2 slice 1 ────────────────────────────────── */
 
-/** v2 (Todos v2 slice 1): per-department prefixes + sub-task tree columns. */
-export const WORK_ITEMS_TABLE_DDL = `
+/** v2 (Todos v2 slice 1) shape, frozen exactly as it shipped before the
+ *  `phase` column landed (docs/tengu/18-council-specialists.md, D21) — the
+ *  recognizer `recognizedHealableV2` matches against to heal an existing
+ *  database in place (`ALTER TABLE ... ADD COLUMN phase`), same role as
+ *  `V2_APPROVAL_WORK_ITEMS_TABLE_DDL` for the approval-column drop. */
+export const PRE_PHASE_WORK_ITEMS_TABLE_DDL = `
 CREATE TABLE IF NOT EXISTS work_items (
   id                  TEXT PRIMARY KEY CHECK (${CANONICAL_ID_SQL}),
   title               TEXT NOT NULL,
@@ -134,6 +138,44 @@ CREATE TABLE IF NOT EXISTS work_items (
   updated_at          TEXT NOT NULL,
   closed_at           TEXT
 )`;
+
+/** v2 (Todos v2 slice 1): per-department prefixes + sub-task tree columns.
+ *  `phase` (docs/tengu/18-council-specialists.md, D21) is a plain label on the
+ *  tree, exactly parallel to `department` — a per-project vocabulary, not a
+ *  new depth. It is appended LAST, not next to `department`, AND its comma
+ *  sits on the line BELOW `closed_at` rather than trailing it: SQLite's
+ *  `ALTER TABLE ... ADD COLUMN` (the healing path for an existing database)
+ *  splices `, phase TEXT` in literally, immediately before the closing paren,
+ *  with no comma of its own on the preceding line and no space before that
+ *  paren. This exact layout is the only one a fresh CREATE and a healed ALTER
+ *  agree on byte-for-byte once `sqlShape` collapses whitespace runs — it does
+ *  NOT reorder text, so a comma's position relative to it still matters. */
+export const WORK_ITEMS_TABLE_DDL = `
+CREATE TABLE IF NOT EXISTS work_items (
+  id                  TEXT PRIMARY KEY CHECK (${CANONICAL_ID_SQL}),
+  title               TEXT NOT NULL,
+  body                TEXT,
+  status              TEXT NOT NULL DEFAULT 'backlog' CHECK (status IN ('backlog','assigned','executing','in_review','done','blocked','escalated','cancelled')),
+  department          TEXT,
+  assignee            TEXT,
+  created_by          TEXT NOT NULL,
+  parent_id           TEXT REFERENCES work_items(id),
+  root_id             TEXT NOT NULL,
+  depth               INTEGER NOT NULL DEFAULT 0 CHECK ((parent_id IS NULL AND depth = 0) OR (parent_id IS NOT NULL AND depth BETWEEN 1 AND 3)),
+  due_at              TEXT,
+  priority            INTEGER NOT NULL DEFAULT 2 CHECK (priority BETWEEN 0 AND 3),
+  rank                REAL,
+  version             INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
+  source              TEXT NOT NULL DEFAULT 'human' CHECK (source IN ('human','delegation','cron','workflow','session','connector','goal')),
+  source_ref          TEXT,
+  acceptance          TEXT,
+  verify_policy       TEXT,
+  rounds              INTEGER NOT NULL DEFAULT 0,
+  budget_usd          REAL,
+  created_at          TEXT NOT NULL,
+  updated_at          TEXT NOT NULL,
+  closed_at           TEXT
+, phase TEXT)`;
 
 /** Pre-PLA-48 v2 work_items shape, when approvals were also shadowed in eight
  *  columns here. Frozen recognizer: a match is healed at boot. */
@@ -179,6 +221,7 @@ const V2_APPROVAL_COLUMNS: readonly string[] = ["approval_state", "approval_requ
 export const WORK_ITEMS_INDEX_DDL = `
 CREATE INDEX IF NOT EXISTS idx_work_items_status     ON work_items(status);
 CREATE INDEX IF NOT EXISTS idx_work_items_department ON work_items(department);
+CREATE INDEX IF NOT EXISTS idx_work_items_phase      ON work_items(phase);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_work_items_source_ref
   ON work_items(source, source_ref) WHERE source_ref IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_work_items_recent     ON work_items(updated_at DESC, created_at DESC);
@@ -400,6 +443,54 @@ CREATE TABLE IF NOT EXISTS work_item_workspace (
 )`;
 
 export const WORK_ITEM_WORKSPACE_DDL = `${WORK_ITEM_WORKSPACE_TABLE_DDL};`;
+
+/** Profile registry (docs/tengu/18-council-specialists.md, D22): a user-
+ *  defined namespace inside one running instance (work/personal/side-project/
+ *  hobby/...) — modeled on `departments` minus the ID-prefix machinery, since
+ *  a profile never drives a Todo ID. */
+export const PROFILES_TABLE_DDL = `
+CREATE TABLE IF NOT EXISTS profiles (
+  id         TEXT PRIMARY KEY CHECK (id GLOB 'prf_[0-9a-f]*' AND length(id) = 16),
+  slug       TEXT NOT NULL UNIQUE,
+  name       TEXT NOT NULL,
+  color      TEXT CHECK (color IS NULL OR color GLOB '#[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]'),
+  created_at TEXT NOT NULL
+)`;
+
+export const PROFILES_DDL = `${PROFILES_TABLE_DDL};`;
+
+/** Profile overlay (D22): which profile a root Todo belongs to, modeled
+ *  byte-for-byte on `work_item_workspace` above — one current row per item,
+ *  edited in place. Root-only is enforced at the write path
+ *  (`work-items/store.ts`), re-proven at boot below. */
+export const WORK_ITEM_PROFILE_TABLE_DDL = `
+CREATE TABLE IF NOT EXISTS work_item_profile (
+  work_item_id TEXT PRIMARY KEY REFERENCES work_items(id),
+  profile_id   TEXT NOT NULL REFERENCES profiles(id),
+  updated_at   TEXT NOT NULL
+)`;
+
+export const WORK_ITEM_PROFILE_DDL = `${WORK_ITEM_PROFILE_TABLE_DDL};`;
+
+/** Per-project phase vocabulary (docs/tengu/18-council-specialists.md, D21):
+ *  `phase` on `work_items` stays a plain label, exactly parallel to
+ *  `department` — this registers the vocabulary for ONE project (`root_id`),
+ *  not company-wide the way `departments` is. Root-only is enforced at the
+ *  write path (`work-items/store.ts`, `work-items/phases.ts`), re-proven at
+ *  boot below. */
+export const WORK_ITEM_PHASES_TABLE_DDL = `
+CREATE TABLE IF NOT EXISTS work_item_phases (
+  root_id        TEXT NOT NULL REFERENCES work_items(id),
+  slug           TEXT NOT NULL,
+  sequence_order INTEGER NOT NULL,
+  created_at     TEXT NOT NULL,
+  PRIMARY KEY (root_id, slug)
+)`;
+
+export const WORK_ITEM_PHASES_DDL = `
+${WORK_ITEM_PHASES_TABLE_DDL};
+CREATE INDEX IF NOT EXISTS idx_wi_phases_root ON work_item_phases(root_id, sequence_order);
+`;
 
 export const WORK_ITEM_EDIT_RECEIPTS_DDL = `
 CREATE TABLE IF NOT EXISTS work_item_edit_receipts (
@@ -741,6 +832,9 @@ const REQUIRED_TABLE_SQL = new Map<string, string>([
   ["work_item_verify", WORK_ITEM_VERIFY_TABLE_DDL],
   ["work_item_fanout", WORK_ITEM_FANOUT_TABLE_DDL],
   ["work_item_workspace", WORK_ITEM_WORKSPACE_TABLE_DDL],
+  ["profiles", PROFILES_TABLE_DDL],
+  ["work_item_profile", WORK_ITEM_PROFILE_TABLE_DDL],
+  ["work_item_phases", WORK_ITEM_PHASES_TABLE_DDL],
   ["work_item_edit_receipts", WORK_ITEM_EDIT_RECEIPTS_DDL],
   ["work_item_id_allocator", WORK_ITEM_ID_ALLOCATOR_TABLE_DDL],
   ["work_item_id_burns", WORK_ITEM_ID_BURNS_TABLE_DDL],
@@ -767,6 +861,9 @@ const V2_ADDITIVE_TABLES: ReadonlyArray<{ name: string; ddl: string }> = [
   { name: "work_item_verify", ddl: WORK_ITEM_VERIFY_DDL },
   { name: "work_item_fanout", ddl: WORK_ITEM_FANOUT_DDL },
   { name: "work_item_workspace", ddl: WORK_ITEM_WORKSPACE_DDL },
+  { name: "profiles", ddl: PROFILES_DDL },
+  { name: "work_item_profile", ddl: WORK_ITEM_PROFILE_DDL },
+  { name: "work_item_phases", ddl: WORK_ITEM_PHASES_DDL },
 ];
 
 /**
@@ -873,17 +970,33 @@ function hasShadowApprovalColumns(db: DatabaseType): boolean {
   return sqlShape(currentTableSql(db, "work_items")) === sqlShape(V2_APPROVAL_WORK_ITEMS_TABLE_DDL);
 }
 
+/** D21: `work_items` is v2-family (has the sub-task tree's `root_id`, absent
+ *  from both the v1 and prerelease shapes) but still lacks `phase` — healed by
+ *  `ALTER TABLE ... ADD COLUMN phase` in `migrateWorkItemsSchema` before
+ *  classification. A direct column check, not a whole-table shape match
+ *  against `PRE_PHASE_WORK_ITEMS_TABLE_DDL`, so this composes with
+ *  `shadowedApprovals`: a pre-PLA-48 database can lack BOTH the dropped
+ *  approval columns' healing AND `phase` at once, and each defect heals
+ *  independently. The `root_id` gate keeps this from firing on a v1 or
+ *  prerelease table, which the ALTER/index DDL below would not apply to. */
+function hasPrePhaseWorkItems(db: DatabaseType): boolean {
+  if (!tableExists(db, "work_items")) return false;
+  const columns = new Set((db.prepare("PRAGMA table_info(work_items)").all() as Array<{ name: string }>).map((column) => column.name));
+  return columns.has("root_id") && !columns.has("phase");
+}
+
 /** A v2 database whose only defects heal at boot: additive tables that shipped
  *  later are absent (e.g. slice-1 pre-comments), and/or work_items still carries
- *  the pre-PLA-48 approval columns. Never a refusal and never a rebuild. Every
- *  OTHER table that is present must shape-match exactly. */
+ *  the pre-PLA-48 approval columns or lacks the `phase` column. Never a refusal
+ *  and never a rebuild. Every OTHER table that is present must shape-match exactly. */
 function recognizedHealableV2(db: DatabaseType): boolean {
   const additiveNames = new Set(V2_ADDITIVE_TABLES.map((table) => table.name));
   const shadowedApprovals = hasShadowApprovalColumns(db);
+  const prePhase = hasPrePhaseWorkItems(db);
   const missing = V2_ADDITIVE_TABLES.filter((table) => !tableExists(db, table.name));
-  if (missing.length === 0 && !shadowedApprovals) return false; // nothing to heal
+  if (missing.length === 0 && !shadowedApprovals && !prePhase) return false; // nothing to heal
   for (const [name, expected] of REQUIRED_TABLE_SQL) {
-    if (name === "work_items" && shadowedApprovals) continue;
+    if (name === "work_items" && (shadowedApprovals || prePhase)) continue;
     if (additiveNames.has(name) && !tableExists(db, name)) continue;
     if (sqlShape(currentTableSql(db, name)) !== sqlShape(expected)) return false;
   }
@@ -1077,6 +1190,31 @@ export function verifyCurrentWorkItemSchema(db: DatabaseType): void {
     if (!owner || owner.depth !== 0) refusal();
     if (!row.workspace_path.trim()) refusal();
   }
+  // Profile identity (D22): every overlay row references a live item, only a
+  // root (depth 0) item may carry one — mirrors the workspace check above —
+  // and its profile_id must reference a registered profile.
+  const profileIds = new Set(db.prepare("SELECT id FROM profiles").pluck().all() as string[]);
+  const profileRows = db.prepare("SELECT work_item_id, profile_id FROM work_item_profile").all() as Array<{
+    work_item_id: string;
+    profile_id: string;
+  }>;
+  for (const row of profileRows) {
+    const owner = byId.get(row.work_item_id);
+    if (!owner || owner.depth !== 0) refusal();
+    if (!profileIds.has(row.profile_id)) refusal();
+  }
+  // Phase registry (D21): every row references a live root (depth 0) item —
+  // a project — the same one-root-per-outcome convention the workspace and
+  // profile overlays use.
+  const phaseRows = db.prepare("SELECT root_id, slug FROM work_item_phases").all() as Array<{
+    root_id: string;
+    slug: string;
+  }>;
+  for (const row of phaseRows) {
+    const owner = byId.get(row.root_id);
+    if (!owner || owner.depth !== 0) refusal();
+    if (!row.slug.trim()) refusal();
+  }
 }
 
 function classifyOpenWorkItemsDatabase(db: DatabaseType): WorkItemSchemaPreflight {
@@ -1144,19 +1282,27 @@ export function migrateWorkItemsSchema(
   const migrate = db.transaction((): WorkItemsMigrationResult => {
     // In-place self-heal, BEFORE classification: a v2 database created before a
     // later slice shipped its additive tables (or before PLA-48 dropped the
-    // approval columns) is brought to the canonical shape here so the exact-shape
-    // verifier below sees the complete v2 schema. IF NOT EXISTS makes this a
-    // no-op everywhere else, and a refused classification rolls the creates back
-    // with the transaction. Never a rebuild, never a refusal. (List order
-    // matters: work_item_labels references labels.)
+    // approval columns, or before D21 added `phase`) is brought to the
+    // canonical shape here so the exact-shape verifier below sees the complete
+    // v2 schema. IF NOT EXISTS makes this a no-op everywhere else, and a
+    // refused classification rolls the creates back with the transaction.
+    // Never a rebuild, never a refusal. (List order matters: work_item_labels
+    // references labels; work_item_profile references profiles.)
     const shadowedApprovals = hasShadowApprovalColumns(db);
-    if (shadowedApprovals || sqlShape(currentTableSql(db, "work_items")) === sqlShape(WORK_ITEMS_TABLE_DDL)) {
+    const prePhase = hasPrePhaseWorkItems(db);
+    if (shadowedApprovals || prePhase || sqlShape(currentTableSql(db, "work_items")) === sqlShape(WORK_ITEMS_TABLE_DDL)) {
       for (const table of V2_ADDITIVE_TABLES) db.exec(table.ddl);
       // PLA-48: a pre-drop database hands its shadowed approvals to their one
       // owner and then loses the columns — same transaction, both or neither.
       if (shadowedApprovals) {
         backfillWorkItemApprovals(db, "work_items");
         for (const column of V2_APPROVAL_COLUMNS) db.exec(`ALTER TABLE work_items DROP COLUMN ${column}`);
+      }
+      // D21: appended last so a fresh CREATE and this healed ALTER agree on
+      // the stored shape byte-for-byte (see WORK_ITEMS_TABLE_DDL's comment).
+      if (prePhase) {
+        db.exec(`ALTER TABLE work_items ADD COLUMN phase TEXT`);
+        db.exec(WORK_ITEMS_INDEX_DDL);
       }
       // Slice-5 review F2: departments that gained Todos through pre-fix
       // move-only writes get their registry rows.

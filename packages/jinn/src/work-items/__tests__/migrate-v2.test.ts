@@ -157,10 +157,28 @@ describe("legacy approval columns heal into work_item_approvals", () => {
     const file = path.join(tmp, "registry-backfill.db");
     // A pre-PLA-48 home: work_items still carries the shadow approval_* columns,
     // with the real indexes and triggers; the additive tables never shipped.
+    // Indexes are the PRE-D21 set (no `phase` yet — that column doesn't exist
+    // on this frozen shape either), matching what a database of this era
+    // actually had on disk.
     const legacy = new Database(file);
     migrate.registerWorkItemIdentityFunctions(legacy);
+    const preD21IndexDdl = `
+CREATE INDEX IF NOT EXISTS idx_work_items_status     ON work_items(status);
+CREATE INDEX IF NOT EXISTS idx_work_items_department ON work_items(department);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_work_items_source_ref
+  ON work_items(source, source_ref) WHERE source_ref IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_work_items_recent     ON work_items(updated_at DESC, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_work_items_default_order
+  ON work_items((rank IS NULL), rank, updated_at DESC, created_at DESC, id ASC);
+CREATE INDEX IF NOT EXISTS idx_work_items_manual_order
+  ON work_items(status, (rank IS NULL), rank, updated_at DESC, created_at DESC, id ASC);
+CREATE INDEX IF NOT EXISTS idx_work_items_parent     ON work_items(parent_id) WHERE parent_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_work_items_root       ON work_items(root_id);
+CREATE INDEX IF NOT EXISTS idx_work_items_created_by ON work_items(created_by, (parent_id IS NULL), updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_work_items_due        ON work_items(due_at) WHERE due_at IS NOT NULL;
+`;
     for (const ddl of [migrate.WORK_ITEM_IDENTITY_TABLES_DDL, migrate.V2_APPROVAL_WORK_ITEMS_TABLE_DDL,
-      migrate.WORK_ITEMS_INDEX_DDL, migrate.WORK_ITEM_EVENTS_DDL, migrate.WORK_ITEM_EDIT_RECEIPTS_DDL,
+      preD21IndexDdl, migrate.WORK_ITEM_EVENTS_DDL, migrate.WORK_ITEM_EDIT_RECEIPTS_DDL,
       migrate.WORK_ITEM_IDENTITY_TRIGGERS_DDL]) legacy.exec(ddl);
     const pendingId = seedItem(legacy, { state: "pending", request: "legacy pending gate", ref: "workflow-gate:old:run:g", target: "coo", target_kind: "employee" });
     const decidedId = seedItem(legacy, { state: "approved", request: "legacy decided gate", target: "coo", target_kind: "employee", escalated_at: "2026-07-02T00:00:00.000Z", decided_by: "operator", decided_at: "2026-07-03T00:00:00.000Z" });

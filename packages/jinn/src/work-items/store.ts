@@ -10,6 +10,8 @@ import { currentApproval, currentApprovalsByItem, type WorkItemApproval } from '
 import { currentVerifyCommand, currentVerifyCommandsByItem, upsertVerifyCommand } from './verify-rows.js';
 import { currentFanout, currentFanoutsByItem, upsertFanout, type WorkItemFanout } from './fanout-rows.js';
 import { currentWorkspace, currentWorkspacesByItem, upsertWorkspacePath, type WorkItemWorkspace } from './workspace-rows.js';
+import { currentProfile, currentProfilesByItem, upsertProfileId, type WorkItemProfile } from './profile-rows.js';
+import { resolvePhase } from './phases.js';
 
 /**
  * Work-item store — the substrate of the Todos ledger (GRS-002, elevated by
@@ -108,6 +110,10 @@ export interface WorkItem {
   body: string | null;
   status: WorkItemStatus;
   department: string | null;
+  /** Council/specialist redesign (docs/tengu/18-council-specialists.md, D21):
+   *  a label on the tree, exactly parallel to `department` — per-project
+   *  vocabulary (`work_item_phases`, rootId-scoped), not a new tree depth. */
+  phase: string | null;
   assignee: string | null;
   /** Who asked for this item: 'operator', an employee slug, or 'system'. */
   createdBy: string;
@@ -150,6 +156,11 @@ export interface WorkItem {
    *  `work_item_workspace` (additive table), overlaid the same way
    *  verify/fanout are. */
   workspacePath: string | null;
+  /** Council/specialist redesign (D22): which user-defined profile a root
+   *  Todo belongs to. Set only on a depth-0 item; always null on any deeper
+   *  Todo. Stored in `work_item_profile` (additive table), overlaid the same
+   *  way verify/fanout/workspace are. */
+  profileId: string | null;
   approvalState: ApprovalState | null;
   approvalRequest: string | null;
   approvalRef: string | null;
@@ -174,6 +185,9 @@ export interface CreateWorkItemInput {
   body?: string | null;
   status?: WorkItemStatus;
   department?: string | null;
+  /** D21: per-project vocabulary, inherited from the parent when not given
+   *  explicitly — same rule as `department`. */
+  phase?: string | null;
   assignee?: string | null;
   /** Creator identity; defaults to 'operator' for source=human, 'system' otherwise. */
   createdBy?: string;
@@ -206,6 +220,9 @@ export interface CreateWorkItemInput {
    *  valid on a root create (no `parentId`) — throws otherwise, same shape as
    *  `verifyCommand`'s depth-3 guard. */
   workspacePath?: string | null;
+  /** D22: only valid on a root create (no `parentId`) — throws otherwise,
+   *  same shape as `workspacePath`'s depth-0 guard. */
+  profileId?: string | null;
   // Deliberately NO approval fields (design §1.3, anti-bottleneck principle):
   // a fresh Todo's approval is always none; approval is attached only by the
   // 021b decision/mirror machinery where a human decision is genuinely required.
@@ -214,6 +231,8 @@ export interface CreateWorkItemInput {
 export interface ListWorkItemsFilter {
   status?: WorkItemStatus;
   department?: string;
+  /** D21: per-project vocabulary — exact match, same as `department`. */
+  phase?: string;
   assignee?: string;
   source?: WorkItemSource;
   needsAttentionFor?: string;
@@ -272,7 +291,7 @@ function parseVerifyPolicy(raw: unknown): VerifyPolicy | null {
 type WorkItemRowBase = Omit<WorkItem,
   | 'approvalState' | 'approvalRequest' | 'approvalRef' | 'approvalOptions' | 'approvalChoice' | 'approvalOperatorOnly'
   | 'approvalTarget' | 'approvalTargetKind' | 'approvalEscalatedAt' | 'approvalDecidedBy' | 'approvalDecidedAt'
-  | 'verifyCommand' | 'parallelSafe' | 'parallelGroup' | 'workspacePath'>;
+  | 'verifyCommand' | 'parallelSafe' | 'parallelGroup' | 'workspacePath' | 'profileId'>;
 
 function rowToWorkItem(row: Record<string, unknown>): WorkItemRowBase {
   return {
@@ -281,6 +300,7 @@ function rowToWorkItem(row: Record<string, unknown>): WorkItemRowBase {
     body: (row.body as string) ?? null,
     status: row.status as WorkItemStatus,
     department: (row.department as string) ?? null,
+    phase: (row.phase as string) ?? null,
     assignee: (row.assignee as string) ?? null,
     createdBy: row.created_by as string,
     parentId: (row.parent_id as string) ?? null,
@@ -318,6 +338,7 @@ function overlayApproval(
   verifyCommand: string | undefined,
   fanout: WorkItemFanout | undefined,
   workspace: WorkItemWorkspace | undefined,
+  profile: WorkItemProfile | undefined,
 ): WorkItem {
   return {
     ...base,
@@ -325,6 +346,7 @@ function overlayApproval(
     parallelSafe: fanout?.parallelSafe ?? false,
     parallelGroup: fanout?.parallelGroup ?? null,
     workspacePath: workspace?.workspacePath ?? null,
+    profileId: profile?.profileId ?? null,
     approvalState: approval?.state ?? null,
     approvalRequest: approval?.request ?? null,
     approvalRef: approval?.ref ?? null,
@@ -346,12 +368,14 @@ function hydrateApprovals(items: WorkItemRowBase[]): WorkItem[] {
   const verifyByItem = currentVerifyCommandsByItem(ids);
   const fanoutByItem = currentFanoutsByItem(ids);
   const workspaceByItem = currentWorkspacesByItem(ids);
+  const profileByItem = currentProfilesByItem(ids);
   return items.map((item) => overlayApproval(
     item,
     currentByItem.get(item.id),
     verifyByItem.get(item.id),
     fanoutByItem.get(item.id),
     workspaceByItem.get(item.id),
+    profileByItem.get(item.id),
   ));
 }
 
@@ -381,7 +405,8 @@ export type WorkItemEventKind =
   | 'approval_requested'
   | 'approval_decided'
   | 'verify_result'
-  | 'escalated';
+  | 'escalated'
+  | 'phase_changed';
 
 export interface WorkItemEvent {
   id: string;
@@ -599,8 +624,14 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
   if (input.workspacePath !== undefined && input.workspacePath !== null && depth !== 0) {
     throw new Error(`workspacePath can only be set on a root Todo (this item would be depth ${depth})`);
   }
+  // Council/specialist redesign (D22): a profile is a namespace on a project,
+  // matching the same root-only convention workspacePath uses.
+  if (input.profileId !== undefined && input.profileId !== null && depth !== 0) {
+    throw new Error(`profileId can only be set on a root Todo (this item would be depth ${depth})`);
+  }
   const companyPrefix = resolveCompanyPrefix();
   const department = input.department !== undefined ? input.department : parent?.department ?? null;
+  const phase = input.phase !== undefined ? input.phase : parent?.phase ?? null;
   const prefix = department ? resolveDepartmentPrefix(db, department, companyPrefix) : companyPrefix;
   const claim = allocateWorkItemId(db, now, prefix);
   const id = claim.id;
@@ -617,7 +648,7 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
       .get(source, sourceRef) as Record<string, unknown> | undefined;
     // Overlay like every other WorkItem-producing read: a retried machine mint
     // can hit an item that has since gained an approval.
-    return row ? overlayApproval(rowToWorkItem(row), currentApproval(row.id as string), currentVerifyCommand(row.id as string), currentFanout(row.id as string), currentWorkspace(row.id as string)) : undefined;
+    return row ? overlayApproval(rowToWorkItem(row), currentApproval(row.id as string), currentVerifyCommand(row.id as string), currentFanout(row.id as string), currentWorkspace(row.id as string), currentProfile(row.id as string)) : undefined;
   };
 
   const txn = db.transaction((): WorkItem => {
@@ -629,8 +660,8 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
       db.prepare(
         `INSERT INTO work_items
            (id, title, body, status, department, assignee, created_by, parent_id, root_id, depth, due_at,
-            priority, source, source_ref, acceptance, verify_policy, budget_usd, created_at, updated_at, closed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            priority, source, source_ref, acceptance, verify_policy, budget_usd, created_at, updated_at, closed_at, phase)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         id,
         input.title,
@@ -652,6 +683,7 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
         now,
         now,
         closedAt,
+        phase,
       );
     } catch (err) {
       // Lost the idempotency race — another writer inserted the same key. Return
@@ -674,6 +706,12 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
     }
     if (input.workspacePath) {
       upsertWorkspacePath(id, input.workspacePath);
+    }
+    if (input.profileId) {
+      upsertProfileId(id, input.profileId);
+    }
+    if (phase) {
+      resolvePhase(db, parent ? parent.rootId : id, phase);
     }
     if (parent) {
       // Re-verify the parent under the write lock before auditing the link.
@@ -712,7 +750,7 @@ export function getWorkItem(id: string): WorkItem | undefined {
   const db = initDb();
   const todoId = parseTodoId(id);
   const row = db.prepare('SELECT * FROM work_items WHERE id = ?').get(todoId) as Record<string, unknown> | undefined;
-  return row ? overlayApproval(rowToWorkItem(row), currentApproval(todoId), currentVerifyCommand(todoId), currentFanout(todoId), currentWorkspace(todoId)) : undefined;
+  return row ? overlayApproval(rowToWorkItem(row), currentApproval(todoId), currentVerifyCommand(todoId), currentFanout(todoId), currentWorkspace(todoId), currentProfile(todoId)) : undefined;
 }
 
 /**
@@ -758,6 +796,35 @@ export function setWorkItemWorkspace(workItemId: string, workspacePath: string, 
   return stored;
 }
 
+/**
+ * Set (or clear) a Todo's phase (docs/tengu/18-council-specialists.md, D21):
+ * a label on the tree, exactly parallel to `department` — not a new depth.
+ * Registers the phase in the project's `work_item_phases` registry (rootId-
+ * scoped) if it is not there yet, writes the plain column, and audits the
+ * transition with a dedicated `phase_changed` event rather than the generic
+ * `metadata_edited` one, so phase history reads as its own timeline.
+ */
+export function setWorkItemPhase(workItemId: string, phase: string | null, actor: string): WorkItem {
+  const db = initDb();
+  const item = getWorkItem(workItemId);
+  if (!item) throw new Error(`work item ${workItemId} not found`);
+  if (phase === item.phase) return item;
+  const txn = db.transaction((): WorkItem => {
+    if (phase) resolvePhase(db, item.rootId, phase);
+    const now = new Date().toISOString();
+    db.prepare('UPDATE work_items SET phase = ?, updated_at = ?, version = version + 1 WHERE id = ?').run(phase, now, item.id);
+    appendWorkItemEvent({
+      workItemId: item.id,
+      kind: 'phase_changed',
+      actor,
+      detail: { fromPhase: item.phase, toPhase: phase },
+      versionEffect: 'companion',
+    });
+    return getWorkItem(item.id)!;
+  });
+  return txn();
+}
+
 /** Read a bounded set of Todos in caller order with one row query and one
  * approval hydration pass. Unknown ids are omitted. */
 export function getWorkItems(ids: readonly string[]): WorkItem[] {
@@ -782,7 +849,7 @@ export function getWorkItemBySourceRef(source: WorkItemSource, sourceRef: string
   const row = db
     .prepare('SELECT * FROM work_items WHERE source = ? AND source_ref = ?')
     .get(source, sourceRef) as Record<string, unknown> | undefined;
-  return row ? overlayApproval(rowToWorkItem(row), currentApproval(row.id as string), currentVerifyCommand(row.id as string), currentFanout(row.id as string), currentWorkspace(row.id as string)) : undefined;
+  return row ? overlayApproval(rowToWorkItem(row), currentApproval(row.id as string), currentVerifyCommand(row.id as string), currentFanout(row.id as string), currentWorkspace(row.id as string), currentProfile(row.id as string)) : undefined;
 }
 
 const WORK_ITEM_STATUS_VALUES: readonly WorkItemStatus[] = [
@@ -822,6 +889,10 @@ function workItemWhere(filter: ListWorkItemsFilter): { sql: string; values: unkn
   if (filter.department) {
     conditions.push('department = ?');
     values.push(filter.department);
+  }
+  if (filter.phase) {
+    conditions.push('phase = ?');
+    values.push(filter.phase);
   }
   if (filter.assignee) {
     conditions.push('assignee = ?');
