@@ -187,6 +187,42 @@ describe("rollupAccountLimits", () => {
     expect(rollup.fiveHourUsedPct).toBe(10);
     expect(rollup.sevenDayUsedPct).toBe(5);
   });
+
+  it("rolls up the Opus bucket separately from the general bucket (D25)", () => {
+    const opusSession = makeSession("planner", "claude-opus-4-1");
+    writeSnapshot(opusSession.id, baseSnapshotBody({
+      model: { id: "claude-opus-4-1-20250805", display_name: "Opus" },
+      rate_limits: {
+        five_hour: { used_percentage: 88, resets_at: 4_102_444_800 },
+        seven_day: { used_percentage: 70, resets_at: 4_102_444_800 },
+      },
+    }));
+    const sonnetSession = makeSession("engineer", "claude-sonnet-4-5");
+    writeSnapshot(sonnetSession.id, baseSnapshotBody({
+      model: { id: "claude-sonnet-4-5", display_name: "Sonnet" },
+      rate_limits: {
+        five_hour: { used_percentage: 22, resets_at: 4_102_444_800 },
+        seven_day: { used_percentage: 12, resets_at: 4_102_444_800 },
+      },
+    }));
+
+    const rows = collectSessionTelemetry({ dir: CLAUDE_DIR });
+    const rollup = rollupAccountLimits(rows);
+    expect(rollup.fiveHourUsedPct).toBe(22);
+    expect(rollup.sevenDayUsedPct).toBe(12);
+    expect(rollup.opusFiveHourUsedPct).toBe(88);
+    expect(rollup.opusSevenDayUsedPct).toBe(70);
+  });
+
+  it("leaves the Opus fields undefined when no session reports on an Opus model", () => {
+    const session = makeSession("engineer", "claude-sonnet-4-5");
+    writeSnapshot(session.id, baseSnapshotBody({ model: { id: "claude-sonnet-4-5", display_name: "Sonnet" } }));
+
+    const rows = collectSessionTelemetry({ dir: CLAUDE_DIR });
+    const rollup = rollupAccountLimits(rows);
+    expect(rollup.opusFiveHourUsedPct).toBeUndefined();
+    expect(rollup.opusSevenDayUsedPct).toBeUndefined();
+  });
 });
 
 describe("recordSevenDayWindowSample / readSevenDayWindowLog", () => {

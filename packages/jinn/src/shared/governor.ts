@@ -2,17 +2,24 @@ import fs from "node:fs";
 import path from "node:path";
 import type { GovernorConfig } from "./types.js";
 import { CLAUDE_LIMITS_DIR } from "./paths.js";
+import { claudeModelIdFromSnapshot, claudeUsageBucket } from "./claude-models.js";
 
 export const DEFAULT_GOVERNOR_STOP_PCT = 80;
 
 /** Per-session/account Claude usage snapshot, shaped to match the eventual
  *  shared/session-telemetry.ts sensor output — evaluateGovernor consumes this
- *  shape whether it comes from that module or the local fallback reader below. */
+ *  shape whether it comes from that module or the local fallback reader below.
+ *  `opus*` fields are the separate Opus Max-plan bucket (D3/D25); unqualified
+ *  fields are the general bucket. */
 export interface GovernorTelemetry {
   fiveHourUsedPct?: number;
   fiveHourResetsAt?: string;
   sevenDayUsedPct?: number;
   sevenDayResetsAt?: string;
+  opusFiveHourUsedPct?: number;
+  opusFiveHourResetsAt?: string;
+  opusSevenDayUsedPct?: number;
+  opusSevenDayResetsAt?: string;
   contextUsedPct?: number;
   capturedAt?: string;
   stale?: boolean;
@@ -46,11 +53,12 @@ export function resolveGovernorConfig(config: GovernorConfig | undefined): Resol
 
 /**
  * Deterministic usage governor. Tracks both the 5-hour and 7-day Claude usage
- * windows independently and halts if EITHER would cross its stop threshold —
- * the 7-day cap is checked first because it's the harder stop (a 5-hour halt
- * clears in hours; a 7-day halt clears in days), so its reason wins when both
- * windows are over threshold at once. Context usage is a separate, softer
- * signal ("handoff" — compact in place, D5) and never blocks a spawn.
+ * windows independently, per bucket (general and Opus, D3/D25), and halts if
+ * ANY of the four crosses its stop threshold — both buckets share the same
+ * configured percentages. The 7-day cap is checked first because it's the
+ * harder stop (a 5-hour halt clears in hours; a 7-day halt clears in days).
+ * Context usage is a separate, softer signal ("handoff" — compact in place,
+ * D5) and never blocks a spawn.
  */
 export function evaluateGovernor(
   telemetry: GovernorTelemetry,
@@ -70,6 +78,17 @@ export function evaluateGovernor(
   }
 
   if (
+    typeof telemetry.opusSevenDayUsedPct === "number" &&
+    telemetry.opusSevenDayUsedPct >= thresholds.sevenDayStopPct
+  ) {
+    return {
+      action: "halt",
+      reason: `Opus 7-day usage at ${telemetry.opusSevenDayUsedPct}% has reached the ${thresholds.sevenDayStopPct}% stop threshold`,
+      resumeAt: telemetry.opusSevenDayResetsAt,
+    };
+  }
+
+  if (
     typeof telemetry.fiveHourUsedPct === "number" &&
     telemetry.fiveHourUsedPct >= thresholds.fiveHourStopPct
   ) {
@@ -77,6 +96,17 @@ export function evaluateGovernor(
       action: "halt",
       reason: `5-hour usage at ${telemetry.fiveHourUsedPct}% has reached the ${thresholds.fiveHourStopPct}% stop threshold`,
       resumeAt: telemetry.fiveHourResetsAt,
+    };
+  }
+
+  if (
+    typeof telemetry.opusFiveHourUsedPct === "number" &&
+    telemetry.opusFiveHourUsedPct >= thresholds.fiveHourStopPct
+  ) {
+    return {
+      action: "halt",
+      reason: `Opus 5-hour usage at ${telemetry.opusFiveHourUsedPct}% has reached the ${thresholds.fiveHourStopPct}% stop threshold`,
+      resumeAt: telemetry.opusFiveHourResetsAt,
     };
   }
 
@@ -101,46 +131,62 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/**
- * Freshest `<sessionId>.json` statusline snapshot in a Claude engine-limits
- * directory, preferring one that actually carries rate-limit data. Mirrors
- * shared/engine-limits.ts's own account-level file-selection heuristic; kept
- * as a local copy rather than an import so the governor's enforcement path
- * has no dependency on that module's internals.
- */
-function latestClaudeSnapshotFile(dir: string): string | null {
+interface ClaudeSnapshotFileInfo {
+  file: string;
+  hasRateLimits: boolean;
+  usageBucket: "opus" | "general" | undefined;
+  mtimeMs: number;
+}
+
+/** Mirrors shared/engine-limits.ts's own file-selection heuristic; kept as a
+ *  local copy so the governor's enforcement path has no dependency on that
+ *  module's internals. */
+function listClaudeSnapshotFiles(dir: string): ClaudeSnapshotFileInfo[] {
   try {
-    const files = fs.readdirSync(dir)
+    return fs.readdirSync(dir)
       .filter((name) => name.endsWith(".json"))
       .map((name) => path.join(dir, name))
       .map((file) => {
         let hasRateLimits = false;
+        let usageBucket: "opus" | "general" | undefined;
         try {
           const parsed = JSON.parse(fs.readFileSync(file, "utf-8"));
           hasRateLimits = !!parsed?.rate_limits?.five_hour || !!parsed?.rate_limits?.seven_day;
+          usageBucket = claudeUsageBucket(claudeModelIdFromSnapshot(parsed?.model));
         } catch { /* ignore corrupt snapshots here; fall through to the next-best file */ }
-        return { file, hasRateLimits, mtimeMs: fs.statSync(file).mtimeMs };
+        return { file, hasRateLimits, usageBucket, mtimeMs: fs.statSync(file).mtimeMs };
       })
       .sort((a, b) => b.mtimeMs - a.mtimeMs);
-    return files.find((f) => f.hasRateLimits)?.file ?? files[0]?.file ?? null;
   } catch {
-    return null;
+    return [];
   }
 }
 
-/**
- * Free, local, network-free telemetry read for the enforcement call site — the
- * same statusline snapshot the Limits page falls back to (shared/engine-limits.ts),
- * not the OAuth usage API. Claude's 5-hour/7-day windows are account-wide, so any
- * session's freshest snapshot reflects current account usage regardless of which
- * session is about to spawn. Returns {} (→ "run") when no snapshot exists yet.
- */
-export function readLocalGovernorTelemetry(): GovernorTelemetry {
-  const latest = latestClaudeSnapshotFile(CLAUDE_LIMITS_DIR);
-  if (!latest) return {};
+// Files with no model field (unclassifiable) fold into general — the pre-D25 behavior.
+function pickGeneralSnapshot(files: readonly ClaudeSnapshotFileInfo[]): ClaudeSnapshotFileInfo | null {
+  const candidates = files.filter((f) => f.usageBucket !== "opus");
+  return candidates.find((f) => f.hasRateLimits) ?? candidates[0] ?? null;
+}
 
+// No fallback to "closest file anyway" — absent Opus data means no Opus telemetry, not a guess.
+function pickOpusSnapshot(files: readonly ClaudeSnapshotFileInfo[]): ClaudeSnapshotFileInfo | null {
+  const candidates = files.filter((f) => f.usageBucket === "opus");
+  return candidates.find((f) => f.hasRateLimits) ?? null;
+}
+
+interface SnapshotWindows {
+  fiveHourUsedPct?: number;
+  fiveHourResetsAt?: string;
+  sevenDayUsedPct?: number;
+  sevenDayResetsAt?: string;
+  contextUsedPct?: number;
+  capturedAt?: string;
+  stale?: boolean;
+}
+
+function readSnapshotWindows(file: string): SnapshotWindows {
   try {
-    const parsed = JSON.parse(fs.readFileSync(latest, "utf-8")) as unknown;
+    const parsed = JSON.parse(fs.readFileSync(file, "utf-8")) as unknown;
     if (!isRecord(parsed)) return {};
 
     const rateLimits = isRecord(parsed.rate_limits) ? parsed.rate_limits : {};
@@ -151,7 +197,7 @@ export function readLocalGovernorTelemetry(): GovernorTelemetry {
     const fiveHourResetsAtSec = fiveHour ? num(fiveHour.resets_at) : undefined;
     const sevenDayResetsAtSec = sevenDay ? num(sevenDay.resets_at) : undefined;
 
-    const stat = fs.statSync(latest);
+    const stat = fs.statSync(file);
     return {
       fiveHourUsedPct: fiveHour ? num(fiveHour.used_percentage) : undefined,
       fiveHourResetsAt: fiveHourResetsAtSec ? new Date(fiveHourResetsAtSec * 1000).toISOString() : undefined,
@@ -164,4 +210,39 @@ export function readLocalGovernorTelemetry(): GovernorTelemetry {
   } catch {
     return {};
   }
+}
+
+/**
+ * Free, local, network-free telemetry read for the enforcement call site — the
+ * same statusline snapshots the Limits page falls back to (shared/engine-limits.ts),
+ * not the OAuth usage API. Claude's 5-hour/7-day windows are account-wide, so any
+ * session's freshest snapshot reflects current account usage regardless of which
+ * session is about to spawn. Returns {} (→ "run") when no snapshot exists yet.
+ * Reads the general and Opus buckets from separate snapshots (D3/D25) — two
+ * sessions on different models concurrently can report either bucket.
+ */
+export function readLocalGovernorTelemetry(): GovernorTelemetry {
+  const files = listClaudeSnapshotFiles(CLAUDE_LIMITS_DIR);
+  if (files.length === 0) return {};
+
+  const general = pickGeneralSnapshot(files);
+  const opus = pickOpusSnapshot(files);
+  if (!general && !opus) return {};
+
+  const generalWindows = general ? readSnapshotWindows(general.file) : {};
+  const opusWindows = opus ? readSnapshotWindows(opus.file) : {};
+
+  return {
+    fiveHourUsedPct: generalWindows.fiveHourUsedPct,
+    fiveHourResetsAt: generalWindows.fiveHourResetsAt,
+    sevenDayUsedPct: generalWindows.sevenDayUsedPct,
+    sevenDayResetsAt: generalWindows.sevenDayResetsAt,
+    opusFiveHourUsedPct: opusWindows.fiveHourUsedPct,
+    opusFiveHourResetsAt: opusWindows.fiveHourResetsAt,
+    opusSevenDayUsedPct: opusWindows.sevenDayUsedPct,
+    opusSevenDayResetsAt: opusWindows.sevenDayResetsAt,
+    contextUsedPct: generalWindows.contextUsedPct ?? opusWindows.contextUsedPct,
+    capturedAt: generalWindows.capturedAt ?? opusWindows.capturedAt,
+    stale: generalWindows.stale ?? opusWindows.stale,
+  };
 }

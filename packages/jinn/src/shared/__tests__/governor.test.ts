@@ -124,3 +124,46 @@ describe("evaluateGovernor — no telemetry means run", () => {
     expect(evaluateGovernor({}, undefined).action).toBe("run");
   });
 });
+
+/** D25: Claude Max plans draw Opus from its own separate, much smaller 5h/7d
+ *  window. A council with several Opus generalists can sit comfortably under
+ *  an aggregate threshold — mostly cheap Sonnet-specialist headroom — while
+ *  the Opus bucket alone is over threshold underneath it. These pin that the
+ *  Opus-only fields halt on their own, independent of the general/aggregate
+ *  fields, which is exactly the gap D25 says was previously invisible. */
+describe("evaluateGovernor — the Opus bucket halts independently of the general bucket", () => {
+  it("halts on the Opus 5-hour bucket alone when the general 5-hour bucket is well under threshold", () => {
+    const telemetry: GovernorTelemetry = { fiveHourUsedPct: 20, opusFiveHourUsedPct: 85, opusFiveHourResetsAt: "2026-08-08T20:00:00.000Z" };
+    const decision = evaluateGovernor(telemetry, undefined);
+    expect(decision.action).toBe("halt");
+    expect(decision.reason).toMatch(/Opus/);
+    expect(decision.reason).toMatch(/5-hour/);
+    expect(decision.resumeAt).toBe("2026-08-08T20:00:00.000Z");
+  });
+
+  it("halts on the Opus 7-day bucket alone when the general 7-day bucket is well under threshold", () => {
+    const telemetry: GovernorTelemetry = { sevenDayUsedPct: 15, opusSevenDayUsedPct: 92, opusSevenDayResetsAt: "2026-08-14T00:00:00.000Z" };
+    const decision = evaluateGovernor(telemetry, undefined);
+    expect(decision.action).toBe("halt");
+    expect(decision.reason).toMatch(/Opus/);
+    expect(decision.reason).toMatch(/7-day/);
+    expect(decision.resumeAt).toBe("2026-08-14T00:00:00.000Z");
+  });
+
+  it("does not halt when only the Opus bucket is present and under threshold", () => {
+    const telemetry: GovernorTelemetry = { opusFiveHourUsedPct: 50, opusSevenDayUsedPct: 30 };
+    expect(evaluateGovernor(telemetry, undefined).action).toBe("run");
+  });
+
+  it("the Opus 7-day halt is reported even when the general 5-hour bucket is also over threshold (7-day is still the harder stop)", () => {
+    const telemetry: GovernorTelemetry = { fiveHourUsedPct: 90, opusSevenDayUsedPct: 88 };
+    const decision = evaluateGovernor(telemetry, undefined);
+    expect(decision.action).toBe("halt");
+    expect(decision.reason).toMatch(/Opus 7-day/);
+  });
+
+  it("runs when neither bucket is over threshold", () => {
+    const telemetry: GovernorTelemetry = { fiveHourUsedPct: 30, sevenDayUsedPct: 20, opusFiveHourUsedPct: 40, opusSevenDayUsedPct: 25 };
+    expect(evaluateGovernor(telemetry, undefined).action).toBe("run");
+  });
+});

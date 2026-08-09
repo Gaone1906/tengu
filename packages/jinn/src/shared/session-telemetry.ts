@@ -29,6 +29,9 @@ export interface SessionTelemetry {
   costUsd?: number;
   capturedAt?: string;
   stale: boolean;
+  // Read from the statusline's own model field, not `model` above (the session
+  // registry's assigned model, which can differ from what the CLI reports mid-session).
+  usageBucket?: "opus" | "general";
 }
 
 type ParsedSessionSnapshot = Omit<SessionTelemetry, "sessionId" | "employee" | "employeeDisplayName" | "model" | "workItemId" | "status">;
@@ -55,6 +58,7 @@ function readSessionSnapshot(file: string): ParsedSessionSnapshot {
       costUsd: parsed.costUsd,
       capturedAt: parsed.capturedAtIso,
       stale: parsed.stale,
+      usageBucket: parsed.usageBucket,
     };
   } catch {
     return MISSING_OR_MALFORMED_SNAPSHOT;
@@ -110,6 +114,26 @@ export interface AccountLimitsRollup {
   fiveHourResetsAt?: string;
   sevenDayUsedPct?: number;
   sevenDayResetsAt?: string;
+  opusFiveHourUsedPct?: number;
+  opusFiveHourResetsAt?: string;
+  opusSevenDayUsedPct?: number;
+  opusSevenDayResetsAt?: string;
+}
+
+function rollupWindow(
+  rollup: AccountLimitsRollup,
+  entry: SessionTelemetry,
+  pctKey: "fiveHourUsedPct" | "sevenDayUsedPct" | "opusFiveHourUsedPct" | "opusSevenDayUsedPct",
+  resetsKey: "fiveHourResetsAt" | "sevenDayResetsAt" | "opusFiveHourResetsAt" | "opusSevenDayResetsAt",
+  sourcePct: number | undefined,
+  sourceResetsAt: string | undefined,
+): void {
+  if (sourcePct === undefined) return;
+  const current = rollup[pctKey];
+  if (current === undefined || sourcePct > current) {
+    rollup[pctKey] = sourcePct;
+    rollup[resetsKey] = sourceResetsAt;
+  }
 }
 
 /**
@@ -120,20 +144,20 @@ export interface AccountLimitsRollup {
  * whichever session happened to write last wins, even when another session's
  * snapshot — captured inside the SAME window — shows a higher used%. The true
  * account figure is the max observed in the window, not the latest write.
+ *
+ * Rolled up separately per usage bucket (D3/D25); a session with no bucket
+ * signal is folded into the general figures, the pre-D25 behavior.
  */
 export function rollupAccountLimits(entries: readonly SessionTelemetry[]): AccountLimitsRollup {
   const live = entries.filter((entry) => !entry.stale);
   const rollup: AccountLimitsRollup = {};
   for (const entry of live) {
-    if (entry.fiveHourUsedPct !== undefined
-      && (rollup.fiveHourUsedPct === undefined || entry.fiveHourUsedPct > rollup.fiveHourUsedPct)) {
-      rollup.fiveHourUsedPct = entry.fiveHourUsedPct;
-      rollup.fiveHourResetsAt = entry.fiveHourResetsAt;
-    }
-    if (entry.sevenDayUsedPct !== undefined
-      && (rollup.sevenDayUsedPct === undefined || entry.sevenDayUsedPct > rollup.sevenDayUsedPct)) {
-      rollup.sevenDayUsedPct = entry.sevenDayUsedPct;
-      rollup.sevenDayResetsAt = entry.sevenDayResetsAt;
+    if (entry.usageBucket === "opus") {
+      rollupWindow(rollup, entry, "opusFiveHourUsedPct", "opusFiveHourResetsAt", entry.fiveHourUsedPct, entry.fiveHourResetsAt);
+      rollupWindow(rollup, entry, "opusSevenDayUsedPct", "opusSevenDayResetsAt", entry.sevenDayUsedPct, entry.sevenDayResetsAt);
+    } else {
+      rollupWindow(rollup, entry, "fiveHourUsedPct", "fiveHourResetsAt", entry.fiveHourUsedPct, entry.fiveHourResetsAt);
+      rollupWindow(rollup, entry, "sevenDayUsedPct", "sevenDayResetsAt", entry.sevenDayUsedPct, entry.sevenDayResetsAt);
     }
   }
   return rollup;

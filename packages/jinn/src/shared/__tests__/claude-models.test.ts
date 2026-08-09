@@ -3,7 +3,9 @@ import {
   CLAUDE_ALIAS_IDS,
   CLAUDE_EFFORT_LEVELS,
   claudeFallbackCandidates,
+  claudeModelIdFromSnapshot,
   claudeTokenFromCredentialsJson,
+  claudeUsageBucket,
   knownClaudeModels,
   parseAnthropicModels,
   parseClaudeEffortLevels,
@@ -104,6 +106,49 @@ describe("parseClaudeEffortLevels", () => {
                                             (low, medium, high, xhigh, max)
       --model <model>                       Model for the current session.
     `)).toEqual(["low", "medium", "high", "xhigh", "max"]);
+  });
+});
+
+describe("claudeModelIdFromSnapshot", () => {
+  it("returns a bare string model id/alias as-is", () => {
+    expect(claudeModelIdFromSnapshot("opus")).toBe("opus");
+    expect(claudeModelIdFromSnapshot("claude-opus-4-1")).toBe("claude-opus-4-1");
+  });
+
+  it("extracts id from a {id, display_name} object, the shape actually written to disk", () => {
+    expect(claudeModelIdFromSnapshot({ id: "claude-opus-4-1-20250805", display_name: "Opus" })).toBe("claude-opus-4-1-20250805");
+  });
+
+  it("falls back to display_name when id is absent", () => {
+    expect(claudeModelIdFromSnapshot({ display_name: "Opus" })).toBe("Opus");
+  });
+
+  it("returns undefined for missing, empty, or unrecognizable values", () => {
+    expect(claudeModelIdFromSnapshot(undefined)).toBeUndefined();
+    expect(claudeModelIdFromSnapshot("")).toBeUndefined();
+    expect(claudeModelIdFromSnapshot({})).toBeUndefined();
+    expect(claudeModelIdFromSnapshot(42)).toBeUndefined();
+  });
+});
+
+/** D3/D25: Opus draws from its own separate, much smaller Max-plan bucket;
+ *  every other Claude model shares the general bucket. */
+describe("claudeUsageBucket", () => {
+  it("classifies any Opus-family id/alias as the opus bucket", () => {
+    expect(claudeUsageBucket("opus")).toBe("opus");
+    expect(claudeUsageBucket("claude-opus-4-1-20250805")).toBe("opus");
+  });
+
+  it("classifies Sonnet, Fable, Haiku, and unrecognized ids as the general bucket", () => {
+    expect(claudeUsageBucket("sonnet")).toBe("general");
+    expect(claudeUsageBucket("claude-sonnet-4-5")).toBe("general");
+    expect(claudeUsageBucket("fable")).toBe("general");
+    expect(claudeUsageBucket("claude-haiku-4-5")).toBe("general");
+    expect(claudeUsageBucket("some-future-model-id")).toBe("general");
+  });
+
+  it("returns undefined (no signal) for an absent model", () => {
+    expect(claudeUsageBucket(undefined)).toBeUndefined();
   });
 });
 

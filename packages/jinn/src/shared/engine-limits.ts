@@ -13,7 +13,7 @@ import type {
 } from "./types.js";
 import { CLAUDE_LIMITS_DIR } from "./paths.js";
 import { getModelRegistry } from "./models.js";
-import { readClaudeOAuthToken } from "./claude-models.js";
+import { readClaudeOAuthToken, claudeModelIdFromSnapshot, claudeUsageBucket } from "./claude-models.js";
 import { resolveBin } from "./resolve-bin.js";
 
 type JsonRecord = Record<string, unknown>;
@@ -93,6 +93,8 @@ export interface ParsedClaudeSnapshot {
   costUsd?: number;
   mtimeMs: number;
   stale: boolean;
+  model?: string;
+  usageBucket?: "opus" | "general";
 }
 
 /**
@@ -112,6 +114,7 @@ export function parseClaudeStatuslineSnapshot(file: string): ParsedClaudeSnapsho
   ].filter(Boolean) as EngineLimitWindow[];
   const ctx = isRecord(parsed.context_window) ? parsed.context_window : undefined;
   const stat = fs.statSync(file);
+  const model = claudeModelIdFromSnapshot(parsed.model);
   return {
     capturedAtIso: str(parsed.captured_at) ?? new Date(stat.mtimeMs).toISOString(),
     windows,
@@ -127,6 +130,8 @@ export function parseClaudeStatuslineSnapshot(file: string): ParsedClaudeSnapsho
     costUsd: isRecord(parsed.cost) ? num(parsed.cost.total_cost_usd) : undefined,
     mtimeMs: stat.mtimeMs,
     stale: isClaudeSnapshotStale(stat.mtimeMs),
+    model,
+    usageBucket: claudeUsageBucket(model),
   };
 }
 

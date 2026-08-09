@@ -68,7 +68,7 @@ function labelClaudeModel(displayName: string, id: string): string {
   return trimmed.replace(/^Claude\s+/i, "");
 }
 
-function claudeFamily(value: string | undefined): string | undefined {
+export function claudeFamily(value: string | undefined): string | undefined {
   if (!value) return undefined;
   const v = value.toLowerCase();
   if (v === "opus" || /\bopus\b/.test(v) || /-opus-/.test(v)) return "opus";
@@ -76,6 +76,24 @@ function claudeFamily(value: string | undefined): string | undefined {
   if (v === "fable" || /\bfable\b/.test(v) || /-fable-/.test(v)) return "fable";
   if (v === "haiku" || /\bhaiku\b/.test(v) || /-haiku-/.test(v)) return "haiku";
   return undefined;
+}
+
+// Statusline's `model` field is either a bare id/alias string or {id, display_name}.
+export function claudeModelIdFromSnapshot(value: unknown): string | undefined {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const obj = value as Record<string, unknown>;
+    const id = typeof obj.id === "string" ? obj.id.trim() : "";
+    if (id) return id;
+    const displayName = typeof obj.display_name === "string" ? obj.display_name.trim() : "";
+    if (displayName) return displayName;
+  }
+  return undefined;
+}
+
+export function claudeUsageBucket(model: string | undefined): "opus" | "general" | undefined {
+  if (!model) return undefined;
+  return claudeFamily(model) === "opus" ? "opus" : "general";
 }
 
 function effortValues(raw: unknown): string[] {
