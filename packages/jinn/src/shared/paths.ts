@@ -87,6 +87,9 @@ export const CRON_RUNS = path.join(JINN_HOME, "cron", "runs");
 export const HANDOFFS_DIR = path.join(JINN_HOME, "handoffs");
 export const ORG_DIR = path.join(JINN_HOME, "org");
 export const SKILLS_DIR = path.join(JINN_HOME, "skills");
+/** Per-specialist RAG knowledge bases (docs/tengu/18-council-specialists.md):
+ *  one subdirectory per employee, holding its vector index + manifest. */
+export const KB_DIR = path.join(JINN_HOME, "kb");
 export const DOCS_DIR = path.join(JINN_HOME, "docs");
 export const LOGS_DIR = path.join(JINN_HOME, "logs");
 export const TMP_DIR = path.join(JINN_HOME, "tmp");
