@@ -1,6 +1,6 @@
-
 import { useSettings } from "@/routes/settings-provider"
 import { emojiForName } from "@/lib/emoji-pool"
+import { colorForName } from "@/lib/color-pool"
 
 interface EmployeeAvatarProps {
   name: string
@@ -22,6 +22,7 @@ export function EmployeeAvatar({
   const { settings } = useSettings()
   const override = name ? settings.employeeOverrides[name] : undefined
   const emoji = override?.emoji || emojiForName(name || '')
+  const color = override?.color || colorForName(name || '')
   const fontSize = fontSizeOverride ?? Math.round(size * 0.6)
 
   return (
@@ -41,6 +42,7 @@ export function EmployeeAvatar({
         flexShrink: 0,
         cursor: onClick ? "pointer" : undefined,
         userSelect: "none",
+        boxShadow: `0 0 0 2px ${color}`,
         ...style,
       }}
     >
@@ -57,8 +59,10 @@ export function AvatarPreview({
   className,
   onClick,
   emoji: overrideEmoji,
-}: EmployeeAvatarProps & { emoji?: string }) {
+  color: overrideColor,
+}: EmployeeAvatarProps & { emoji?: string; color?: string }) {
   const emoji = overrideEmoji || emojiForName(name)
+  const color = overrideColor || colorForName(name)
   const fontSize = fontSizeOverride ?? Math.round(size * 0.6)
 
   return (
@@ -78,6 +82,7 @@ export function AvatarPreview({
         flexShrink: 0,
         cursor: onClick ? "pointer" : undefined,
         userSelect: "none",
+        boxShadow: `0 0 0 2px ${color}`,
       }}
     >
       {emoji}

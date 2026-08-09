@@ -1,6 +1,7 @@
 export interface EmployeeOverride {
   emoji?: string
   profileImage?: string
+  color?: string
 }
 
 export interface JinnSettings {
