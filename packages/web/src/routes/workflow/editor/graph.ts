@@ -35,6 +35,7 @@ export interface EditorMeta {
   revision: number
   enabled: boolean
   inputs?: WorkflowDefinitionV2Wire["inputs"]
+  createdBy?: string
   createdAt: string
   updatedAt: string
 }
@@ -47,6 +48,7 @@ export function toEditorMeta(definition: WorkflowDefinitionV2Wire): EditorMeta {
     revision: definition.revision,
     enabled: definition.enabled,
     ...(definition.inputs === undefined ? {} : { inputs: definition.inputs }),
+    ...(definition.createdBy === undefined ? {} : { createdBy: definition.createdBy }),
     createdAt: definition.createdAt,
     updatedAt: definition.updatedAt,
   }
@@ -94,6 +96,7 @@ export function serializeDefinition(
     revision: meta.revision,
     enabled: meta.enabled,
     ...(meta.inputs === undefined ? {} : { inputs: meta.inputs }),
+    ...(meta.createdBy === undefined ? {} : { createdBy: meta.createdBy }),
     nodes: nodes.map((node) => {
       const value = node.data.node
       return { id: value.id, type: value.type, name: value.name.trim() || NODE_TYPE_LABEL[value.type], config: value.config }

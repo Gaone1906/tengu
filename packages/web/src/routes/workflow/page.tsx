@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { ArrowLeft, Play } from "lucide-react"
+import { ArrowLeft, Play, Sparkles } from "lucide-react"
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import { PageLayout } from "@/components/page-layout"
 import { useBreadcrumbs } from "@/context/breadcrumb-context"
@@ -21,6 +21,20 @@ import {
   formatStarted,
   statusMeta,
 } from "./run-support"
+
+/** D24: no dedicated "specialist handoff" node — a council generalist authors
+ *  a pipeline the same way any employee does, through `create_workflow`. This
+ *  just surfaces whichever employee's session the gateway saw make that call
+ *  (`WorkflowDefinitionV2Wire.createdBy`, unset for one saved from this editor
+ *  by a human). */
+function AuthoredByBadge({ employee }: { employee: string }) {
+  return (
+    <span className="inline-flex w-fit items-center gap-1 rounded-full bg-[var(--fill-tertiary)] px-2 py-0.5 text-[length:var(--text-caption2)] font-[var(--weight-medium)] text-[var(--text-secondary)]">
+      <Sparkles size={11} aria-hidden />
+      Authored by {employee}
+    </span>
+  )
+}
 
 function RunRow({ run }: { run: WorkflowRunSummaryV2Wire }) {
   const meta = statusMeta(run.status)
@@ -230,6 +244,7 @@ function WorkflowSurface({ store }: { store: EditorStoreApi }) {
           <h1 className="truncate text-[length:var(--text-headline)] font-[var(--weight-bold)] tracking-[var(--tracking-tight)]">
             {meta.title}
           </h1>
+          {meta.createdBy && <AuthoredByBadge employee={meta.createdBy} />}
         </div>
         <SaveChip onReload={() => void reload()} />
         <EnableSwitch flushNow={flushNow} />

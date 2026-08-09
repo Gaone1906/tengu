@@ -168,4 +168,18 @@ describe("workflow editor surface", () => {
     await waitFor(() => expect(setWorkflowEnabled).toHaveBeenCalledWith("morning-digest", true, 3))
     expect(await screen.findByRole("switch", { name: /disable workflow/i })).toBeTruthy()
   })
+
+  it("badges a council-authored workflow with its generalist", async () => {
+    getWorkflowDefinition.mockResolvedValue({ ...structuredClone(definition), createdBy: "council-lead" })
+    renderRoute("/workflow/morning-digest")
+
+    expect(await screen.findByText("Authored by council-lead")).toBeTruthy()
+  })
+
+  it("shows no author badge for a workflow saved without one", async () => {
+    renderRoute("/workflow/morning-digest")
+
+    await screen.findByText("Kickoff")
+    expect(screen.queryByText(/Authored by/)).toBeNull()
+  })
 })
