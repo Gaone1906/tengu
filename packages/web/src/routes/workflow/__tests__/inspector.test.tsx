@@ -249,6 +249,47 @@ describe("employee inspector output schema", () => {
   })
 })
 
+describe("employee inspector json output field", () => {
+  it("swaps the description input for a JSON shape textarea", async () => {
+    const store = renderInspector()
+    await userEvent.click(screen.getByRole("button", { name: "Enable structured output" }))
+
+    await choose("Type", "json")
+
+    expect(employeeConfig(store).output).toMatchObject({
+      fields: { result: { type: "json", required: false } },
+    })
+    expect(screen.getByLabelText("Output field 1 example shape")).toBeTruthy()
+    expect(screen.queryByLabelText("Output field 1 description")).toBeNull()
+  })
+
+  it("flags invalid JSON inline without dropping the draft text", async () => {
+    const store = renderInspector()
+    await userEvent.click(screen.getByRole("button", { name: "Enable structured output" }))
+    await choose("Type", "json")
+
+    fireEvent.change(screen.getByLabelText("Output field 1 example shape"), { target: { value: "{not json" } })
+
+    expect(screen.getByText("Not valid JSON — the shape won't be enforced until this parses.")).toBeTruthy()
+    expect(employeeConfig(store).output).toMatchObject({
+      fields: { result: { type: "json", required: false, description: "{not json" } },
+    })
+  })
+
+  it("accepts valid JSON with no inline error", async () => {
+    const store = renderInspector()
+    await userEvent.click(screen.getByRole("button", { name: "Enable structured output" }))
+    await choose("Type", "json")
+
+    fireEvent.change(screen.getByLabelText("Output field 1 example shape"), { target: { value: '{"a":1}' } })
+
+    expect(screen.queryByText("Not valid JSON — the shape won't be enforced until this parses.")).toBeNull()
+    expect(employeeConfig(store).output).toMatchObject({
+      fields: { result: { type: "json", required: false, description: '{"a":1}' } },
+    })
+  })
+})
+
 describe("employee inspector timeout", () => {
   it("round-trips a blank timeout to undefined", () => {
     const store = renderInspector({ timeoutMinutes: 45 })

@@ -269,7 +269,7 @@ function TriggerForm({ node, update }: FormProps) {
 
 const EFFORTS = ["low", "medium", "high", "xhigh"]
 const OUTPUT_FIELD_NAME = /^[A-Za-z_][A-Za-z0-9_-]*$/
-const OUTPUT_FIELD_TYPES = ["string", "number", "boolean", "string[]"] as const
+const OUTPUT_FIELD_TYPES = ["string", "number", "boolean", "string[]", "json"] as const
 
 type OutputFieldType = typeof OUTPUT_FIELD_TYPES[number]
 type OutputFieldConfig = {
@@ -280,6 +280,60 @@ type OutputFieldConfig = {
 type OutputSchemaConfig = {
   fields: Record<string, OutputFieldConfig>
   allowAdditionalFields: boolean
+}
+
+/** For a 'json' field there is no separate shape/example slot in the schema
+ *  (`workflowOutputFieldSchema` only carries type/required/description), so the
+ *  textarea writes its raw JSON straight into `description` — parse-validated
+ *  here, not persisted as parsed structure. */
+function JsonShapeField({
+  index,
+  value,
+  onChange,
+}: {
+  index: number
+  value: string
+  onChange: (value: string) => void
+}) {
+  const [draft, setDraft] = useState(value)
+  const [jsonError, setJsonError] = useState<string | null>(null)
+
+  useEffect(() => setDraft(value), [value])
+
+  const changeDraft = (next: string) => {
+    setDraft(next)
+    onChange(next)
+    if (!next.trim()) {
+      setJsonError(null)
+      return
+    }
+    try {
+      JSON.parse(next)
+      setJsonError(null)
+    } catch {
+      setJsonError("Not valid JSON — the shape won't be enforced until this parses.")
+    }
+  }
+
+  return (
+    <Field label="Example shape (JSON)">
+      <Textarea
+        aria-label={`Output field ${index + 1} example shape`}
+        rows={4}
+        value={draft}
+        onChange={(event) => changeDraft(event.target.value)}
+        placeholder={'{\n  "id": "string",\n  "items": []\n}'}
+        aria-invalid={jsonError ? true : undefined}
+        aria-describedby={jsonError ? `output-field-${index}-json-error` : undefined}
+        style={{ fontFamily: "var(--font-code)" }}
+      />
+      {jsonError && (
+        <p id={`output-field-${index}-json-error`} className="mt-1 text-[length:var(--text-caption2)] text-[var(--system-red)]">
+          {jsonError}
+        </p>
+      )}
+    </Field>
+  )
 }
 
 function OutputFieldRow({
@@ -364,20 +418,33 @@ function OutputFieldRow({
           Required
         </label>
       </div>
-      <Field label="Description">
-        <TextInput
-          aria-label={`Output field ${index + 1} description`}
+      {field.type === "json" ? (
+        <JsonShapeField
+          index={index}
           value={field.description ?? ""}
-          onChange={(event) => {
-            const description = event.target.value
+          onChange={(description) => {
             const next = { ...field }
             if (description) next.description = description
             else delete next.description
             onChange(next)
           }}
-          placeholder="What this field contains"
         />
-      </Field>
+      ) : (
+        <Field label="Description">
+          <TextInput
+            aria-label={`Output field ${index + 1} description`}
+            value={field.description ?? ""}
+            onChange={(event) => {
+              const description = event.target.value
+              const next = { ...field }
+              if (description) next.description = description
+              else delete next.description
+              onChange(next)
+            }}
+            placeholder="What this field contains"
+          />
+        </Field>
+      )}
     </div>
   )
 }
