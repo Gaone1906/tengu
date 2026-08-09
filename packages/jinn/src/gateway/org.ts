@@ -165,6 +165,157 @@ export function scanOrg(config?: JinnConfig): Map<string, Employee> {
   return registry;
 }
 
+const SPECIALIST_NAME_PATTERN = /^[a-z][a-z0-9-]{0,38}$/;
+
+export interface NewSpecialistFields {
+  name: string;
+  repo: string;
+  engine: string;
+  model: string;
+  effortLevel?: string;
+}
+
+export interface NewSpecialistResult {
+  ok: boolean;
+  value?: NewSpecialistFields;
+  error?: string;
+}
+
+/** Default persona seeded onto a wizard-created specialist (docs/tengu/18-council-specialists.md).
+ *  Editable afterward like any other employee's persona via PATCH /api/org/employees/:name. */
+function defaultSpecialistPersona(name: string, repo: string): string {
+  return [
+    `You are ${name}, a specialist employee who owns exactly one repo: ${repo}.`,
+    `You hold a persistent, RAG-retrieved knowledge base of that repo — use search_repo_knowledge / ` +
+      `read_repo_chunk to retrieve what you need rather than assuming repo content from memory. Retrieval ` +
+      `is index-only and capped; never treat a search hit as the whole file.`,
+    `You work continuously and unattended on delegated work (Todos, task-assignment handoffs from the ` +
+      `council's generalists), scoped to this one repo. When a generalist consults you during scope/plan ` +
+      `drafting, answer from what you actually know about this repo — say so plainly when something is ` +
+      `outside it.`,
+  ].join("\n\n");
+}
+
+/**
+ * Validate a specialist-creation request body (docs/tengu/18-council-specialists.md's wizard,
+ * `routes/specialists/new.tsx`): name/repo are required, model/effortLevel/engine are validated
+ * against the live model registry the same way `validateEmployeeUpdate` does for edits. Pure — no IO.
+ */
+export function validateNewSpecialist(
+  config: JinnConfig,
+  registry: ReadonlyMap<string, Employee>,
+  body: Record<string, unknown>,
+): NewSpecialistResult {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return { ok: false, error: "create body must be a JSON object" };
+  }
+
+  const name = typeof body.name === "string" ? body.name.trim() : "";
+  if (!name) return { ok: false, error: "name is required" };
+  if (!SPECIALIST_NAME_PATTERN.test(name)) {
+    return { ok: false, error: `invalid name "${name}" — lowercase letters, digits, and hyphens only, starting with a letter` };
+  }
+  if (/^(operator|system)$/i.test(name) || /^(session|cron|workflow):/i.test(name)) {
+    return { ok: false, error: `"${name}" collides with a reserved author identity` };
+  }
+  if (registry.has(name)) {
+    return { ok: false, error: `an employee named "${name}" already exists` };
+  }
+
+  const repo = typeof body.repo === "string" ? body.repo.trim() : "";
+  if (!repo) return { ok: false, error: "repo is required" };
+
+  const modelRegistry = getModelRegistry(config);
+  const engine = typeof body.engine === "string" && body.engine.trim() ? body.engine.trim() : "claude";
+  const entry = modelRegistry[engine];
+  if (!entry) {
+    const known = Object.keys(modelRegistry).join(", ");
+    return { ok: false, error: `unknown engine "${engine}" (known: ${known || "none"})` };
+  }
+
+  const model = typeof body.model === "string" && body.model.trim() ? body.model.trim() : entry.defaultModel;
+  if (!model) return { ok: false, error: `engine "${engine}" has no models registered` };
+  if (!entry.models.some((m) => m.id === model)) {
+    if (engine === "pi") {
+      logger.warn(`pi model "${model}" not in discovered set yet — allowing`);
+    } else {
+      const known = entry.models.map((m) => m.id).join(", ");
+      return { ok: false, error: `unknown model "${model}" for engine "${engine}" (known: ${known || "none"})` };
+    }
+  }
+
+  let effortLevel: string | undefined;
+  if (body.effortLevel !== undefined) {
+    if (typeof body.effortLevel !== "string" || !body.effortLevel.trim()) {
+      return { ok: false, error: "effortLevel must be a non-empty string" };
+    }
+    effortLevel = body.effortLevel.trim();
+    const valid = effortLevelsForModel(config, engine, model);
+    if (valid.length === 0) {
+      return { ok: false, error: `engine "${engine}" model "${model}" does not support effort levels` };
+    }
+    if (!valid.includes(effortLevel)) {
+      return { ok: false, error: `invalid effortLevel "${effortLevel}" (valid: ${valid.join(", ")})` };
+    }
+  }
+
+  return { ok: true, value: { name, repo, engine, model, effortLevel } };
+}
+
+/**
+ * Write a brand-new specialist's employee YAML (docs/tengu/18-council-specialists.md's Data model
+ * table — `config/org/specialists/README.md` explains why specialists are never hand-authored).
+ * `interactive: true` is set deliberately here, not as the specialist's steady state (specialists
+ * "work continuously and unattended") but as the SAME exclusion mechanism `dispatchContinuousLoop`
+ * already gives council generalists, borrowed for the duration of onboarding: it keeps the
+ * teaching-phase session's questions waiting on the human instead of being auto-continued. The
+ * wizard clears it via `setSpecialistOnboarding` once the teaching phase's transcript is harvested.
+ */
+export function createSpecialistYaml(fields: NewSpecialistFields): boolean {
+  const dir = path.join(currentOrgDir(), SPECIALIST_DEPARTMENT);
+  fs.mkdirSync(dir, { recursive: true });
+  const filePath = path.join(dir, `${fields.name}.yaml`);
+  const data: Record<string, unknown> = {
+    name: fields.name,
+    displayName: fields.name,
+    department: SPECIALIST_DEPARTMENT,
+    rank: "employee",
+    engine: fields.engine,
+    model: fields.model,
+    repo: fields.repo,
+    persona: defaultSpecialistPersona(fields.name, fields.repo),
+    interactive: true,
+  };
+  if (fields.effortLevel) data.effortLevel = fields.effortLevel;
+  try {
+    fs.writeFileSync(filePath, yaml.dump(data, { lineWidth: -1 }), "utf-8");
+    return true;
+  } catch (err) {
+    logger.warn(`Failed to write specialist YAML for ${fields.name}: ${err}`);
+    return false;
+  }
+}
+
+/** Flip a specialist's onboarding-only `interactive` flag (see `createSpecialistYaml`). Called once
+ *  the teaching phase's transcript is harvested — `onboarding: false` clears the key entirely so a
+ *  hand-edited specialist YAML can still opt back into `interactive: true` deliberately later. */
+export function setSpecialistOnboarding(name: string, onboarding: boolean): boolean {
+  const filePath = findEmployeeYamlPath(name);
+  if (!filePath) return false;
+  try {
+    const raw = fs.readFileSync(filePath, "utf-8");
+    const data = yaml.load(raw) as Record<string, unknown>;
+    if (!data || typeof data !== "object") return false;
+    if (onboarding) data.interactive = true;
+    else delete data.interactive;
+    fs.writeFileSync(filePath, yaml.dump(data, { lineWidth: -1 }), "utf-8");
+    return true;
+  } catch (err) {
+    logger.warn(`Failed to update onboarding state for ${name}: ${err}`);
+    return false;
+  }
+}
+
 /**
  * Find the YAML file for an employee by name.
  * Searches ORG_DIR recursively.
