@@ -244,7 +244,7 @@ export function ChatEmployeePicker({
               : ''
           )}
         >
-          <span className="text-xl shrink-0">🧞</span>
+          <span className="text-xl shrink-0">👺</span>
           <div className="flex-1 min-w-0">
             <span className="text-[length:var(--text-footnote)] font-[var(--weight-semibold)] text-[var(--text-primary)]">
               {portalName}

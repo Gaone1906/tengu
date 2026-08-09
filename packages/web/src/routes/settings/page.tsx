@@ -879,7 +879,7 @@ export default function SettingsPage() {
                 <input
                   type="text"
                   className={CONTROL_CLASS}
-                  placeholder="Jinn"
+                  placeholder="Tengu"
                   value={nameValue}
                   onChange={(e) => setNameValue(e.target.value)}
                   onBlur={() => {

@@ -265,7 +265,7 @@ export function NavRibbon({
   const pathname = useLocation().pathname
   const { theme, setTheme } = useTheme()
   const { settings } = useSettings()
-  const portalName = settings.portalName ?? "Jinn"
+  const portalName = settings.portalName ?? "Tengu"
   // Ambient governor awareness (Tengu steps 1–3): a status dot on the Limits
   // icon, glanceable from any screen without new chrome.
   const { data: telemetry } = useSessionTelemetry()

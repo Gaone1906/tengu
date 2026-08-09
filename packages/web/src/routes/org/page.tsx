@@ -33,8 +33,8 @@ export default function OrgPage() {
       .getOrg()
       .then((data: OrgData) => {
         const coo: Employee = {
-          name: (settings.portalName ?? "Jinn").toLowerCase(),
-          displayName: settings.portalName ?? "Jinn",
+          name: (settings.portalName ?? "Tengu").toLowerCase(),
+          displayName: settings.portalName ?? "Tengu",
           department: "",
           rank: "executive",
           engine: "claude",

@@ -77,7 +77,7 @@ interface GlobalSearchProps {
 
 export function GlobalSearch({ initialOpen = false }: GlobalSearchProps) {
   const { settings } = useSettings()
-  const portalName = settings.portalName ?? "Jinn"
+  const portalName = settings.portalName ?? "Tengu"
   const [open, setOpen] = useState(initialOpen)
   const [recents, setRecents] = useState<RecentItem[]>([])
   const goTo = useNavigate()

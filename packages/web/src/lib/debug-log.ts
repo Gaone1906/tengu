@@ -41,7 +41,7 @@ export async function shareDebugLog(): Promise<void> {
   // share() may reject on non-secure-context or user-cancel; fall back to clipboard.
   try {
     if (typeof navigator.share === "function") {
-      await navigator.share({ title: "Jinn debug log", text: payload });
+      await navigator.share({ title: "Tengu debug log", text: payload });
       return;
     }
   } catch {

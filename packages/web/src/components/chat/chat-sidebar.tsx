@@ -1162,7 +1162,7 @@ export function ChatSidebar({
   onContactEmployee,
 }: ChatSidebarProps) {
   const { settings } = useSettings()
-  const portalName = settings.portalName ?? "Jinn"
+  const portalName = settings.portalName ?? "Tengu"
   const portalSlug = portalName.toLowerCase()
 
   const qc = useQueryClient()
@@ -1693,7 +1693,7 @@ export function ChatSidebar({
 
   const fixTitleCb = useCallback((title: string | undefined, employee: string | undefined) => {
     if (!title) return employee || portalName
-    if (portalName !== "Jinn" && title.startsWith("Jinn - ")) {
+    if (portalName !== "Tengu" && title.startsWith("Tengu - ")) {
       return portalName + title.slice(4)
     }
     return title
