@@ -1,4 +1,4 @@
-<h1 align="center">🐉 Tengu</h1>
+<h1 align="center">👺 Tengu</h1>
 
 <p align="center"><b>An autonomous, usage-governed AI agent org for Claude Max — a fork of Jinn.</b></p>
 
