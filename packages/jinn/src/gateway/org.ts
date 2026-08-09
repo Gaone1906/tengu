@@ -13,6 +13,7 @@ import {
 } from "./system-employees.js";
 
 export const GENERALIST_DEPARTMENT = "generalists";
+export const SPECIALIST_DEPARTMENT = "specialists";
 export const DEFAULT_MAX_GENERALISTS = 5;
 
 export function resolveMaxGeneralists(config: JinnConfig | undefined): number {

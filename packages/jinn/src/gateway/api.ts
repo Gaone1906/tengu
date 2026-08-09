@@ -1188,6 +1188,7 @@ function compactWorkItem(
     rootId: item.rootId,
     depth: item.depth,
     dueAt: item.dueAt,
+    workspacePath: item.workspacePath,
     source: item.source,
     sourceRef: item.sourceRef,
     rank: item.rank,
@@ -1865,6 +1866,7 @@ function operatorOnlyControlPlaneRoute(method: string, pathname: string): string
   if (method === "POST" && matchRoute("/api/cron/:id/trigger", pathname)) return "cron manual trigger";
   if (method === "PATCH" && matchRoute("/api/org/employees/:name", pathname)) return "org employee update";
   if (method === "PUT" && matchRoute("/api/org/departments/:name/board", pathname)) return "legacy org board write";
+  if (method === "POST" && matchRoute("/api/specialists/:name/kb/incremental", pathname)) return "specialist incremental learning trigger";
   if (method === "DELETE" && matchRoute("/api/skills/:name", pathname)) return "skill removal";
   if (method === "PUT" && matchRoute("/api/skills/:name", pathname)) return "skill update";
   return null;
@@ -6218,6 +6220,40 @@ export async function handleApiRequest(
       const body = _parsed.body as any;
       fs.writeFileSync(boardPath, JSON.stringify(body, null, 2));
       return json(res, { status: "ok" });
+    }
+
+    // GET /api/specialists/:name/kb — read-only KB manifest (18-council-specialists.md)
+    params = matchRoute("/api/specialists/:name/kb", pathname);
+    if (method === "GET" && params) {
+      const { scanOrg } = await import("./org.js");
+      const emp = scanOrg(context.getConfig()).get(params.name);
+      if (!emp) return notFound(res);
+      if (!emp.repo) return badRequest(res, `"${params.name}" is not a specialist (no repo configured)`);
+      const { readManifest } = await import("../knowledge-base/manifest.js");
+      const manifest = readManifest(params.name) ?? null;
+      return json(res, { exists: manifest !== null, manifest });
+    }
+
+    // POST /api/specialists/:name/kb/incremental — re-run incremental learning now
+    params = matchRoute("/api/specialists/:name/kb/incremental", pathname);
+    if (method === "POST" && params) {
+      const { scanOrg } = await import("./org.js");
+      const emp = scanOrg(context.getConfig()).get(params.name);
+      if (!emp) return notFound(res);
+      if (!emp.repo) return badRequest(res, `"${params.name}" is not a specialist (no repo configured)`);
+
+      logger.info(`Manual incremental KB update for specialist "${emp.name}"`);
+
+      const { runIncrementalUpdate } = await import("../knowledge-base/index.js");
+      runIncrementalUpdate({ name: emp.name, repo: emp.repo }).catch((err) =>
+        logger.error(`Incremental KB update failed for "${emp.name}": ${err instanceof Error ? err.message : String(err)}`)
+      );
+
+      return json(res, {
+        triggered: true,
+        employee: emp.name,
+        message: `Incremental learning triggered for "${emp.name}"`,
+      });
     }
 
     // GET /api/skills
