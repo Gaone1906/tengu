@@ -309,7 +309,7 @@ describe("control-plane writes require operator authority", () => {
     const before = await call("GET", "/api/onboarding");
     expect(before.status).toBe(200);
     // Todos v2: allocation is per-prefix, so the company prefix never freezes.
-    expect(JSON.parse(before.bodyText)).toMatchObject({ todoPrefix: "JIN", todoPrefixFrozen: false });
+    expect(JSON.parse(before.bodyText)).toMatchObject({ todoPrefix: "TEN", todoPrefixFrozen: false });
 
     const valid = await call("POST", "/api/onboarding", { companyName: "IC-IDEV", companyPrefix: "JIN" }, {
       authorization: "Bearer test-token",

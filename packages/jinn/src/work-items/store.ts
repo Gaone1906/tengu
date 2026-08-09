@@ -734,7 +734,7 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
  *  explicit `portal.companyPrefix` override; configless homes keep `JIN`. */
 export function resolveCompanyPrefix(): string {
   const portal = fs.existsSync(CONFIG_PATH) ? loadConfig().portal : undefined;
-  return resolveTodoIdPrefix(portal?.companyName ?? 'Jinn', portal?.companyPrefix);
+  return resolveTodoIdPrefix(portal?.companyName ?? 'Tengu', portal?.companyPrefix);
 }
 
 /** Register a department in the registry if it is not there yet (review F2):

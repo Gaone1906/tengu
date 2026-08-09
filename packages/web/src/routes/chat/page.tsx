@@ -117,7 +117,7 @@ export default function ChatPageWrapper() {
 function ChatPage() {
   const { settings } = useSettings()
   const todoPrefixes = useTodoPrefixes()
-  const portalName = settings.portalName ?? 'Jinn'
+  const portalName = settings.portalName ?? 'Tengu'
   // The URL is the single source of truth for the selected session
   // (`/?session=<id>`) — selecting is a navigation, so browser back/forward
   // walk the session trail, refresh restores the thread, and links carry it.

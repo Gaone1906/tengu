@@ -20,13 +20,13 @@ beforeAll(async () => {
 });
 
 describe("Phase A Todo identity", () => {
-  it("issues the sole public identity from a monotonic JIN allocator", () => {
+  it("issues the sole public identity from a monotonic TEN allocator", () => {
     const first = store.createWorkItem({ title: "first" });
     const second = store.createWorkItem({ title: "second" });
 
-    expect(first.id).toBe("JIN-1");
-    expect(second.id).toBe("JIN-2");
-    expect(db.prepare("SELECT high_water FROM work_item_id_allocator WHERE prefix = 'JIN'").pluck().get()).toBe(2);
+    expect(first.id).toBe("TEN-1");
+    expect(second.id).toBe("TEN-2");
+    expect(db.prepare("SELECT high_water FROM work_item_id_allocator WHERE prefix = 'TEN'").pluck().get()).toBe(2);
     expect(db.prepare("SELECT ordinal FROM work_item_id_burns ORDER BY ordinal").pluck().all()).toEqual([1, 2]);
     expect(db.prepare("SELECT ordinal FROM work_item_id_issuances ORDER BY ordinal").pluck().all()).toEqual([1, 2]);
   });

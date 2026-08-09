@@ -263,7 +263,7 @@ export function DocumentTitle() {
   const { settings } = useSettings()
 
   useEffect(() => {
-    const name = settings.portalName || 'Jinn'
+    const name = settings.portalName || 'Tengu'
     const desired = `${name} - AI Gateway`
     if (document.title !== desired) {
       document.title = desired

@@ -42,7 +42,7 @@ describe("work-item store — schema", () => {
 describe("work-item store — create / get / list", () => {
   it("creates an item with sane defaults and reads it back", () => {
     const wi = store.createWorkItem({ title: "Design the dispatcher" });
-    expect(wi.id).toMatch(/^JIN-[1-9][0-9]*$/);
+    expect(wi.id).toMatch(/^TEN-[1-9][0-9]*$/);
     expect(wi.status).toBe("backlog");
     expect(wi.priority).toBe(2);
     expect(wi.source).toBe("human");

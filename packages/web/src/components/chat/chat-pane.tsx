@@ -114,7 +114,7 @@ export function ChatPane({
   onNewChat,
   onSessionMetaChange,
   onRefresh,
-  portalName = 'Jinn',
+  portalName = 'Tengu',
   subscribe,
   engineRegistry,
   connectionSeq,

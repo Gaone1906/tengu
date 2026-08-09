@@ -1367,7 +1367,7 @@ describe("Todos v2 — sub-task create, tree route, new filters, cascade archive
     );
     expect(explicitNull.status).toBe(201);
     expect(explicitNull.body.workItem.department).toBeNull();
-    expect(explicitNull.body.workItem.id.slice(0, 3)).toBe("JIN"); // company prefix
+    expect(explicitNull.body.workItem.id.slice(0, 3)).toBe("TEN"); // company prefix
 
     const explicitString = makeRes();
     await api.handleApiRequest(
