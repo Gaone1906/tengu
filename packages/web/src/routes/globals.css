@@ -145,16 +145,19 @@
   --chat-top-clearance: max(var(--safe-top), 12px);
 }
 
-/* LEDGER DARK — warm charcoal + amber (default) */
+/* TENGU STEEL — steel grey + crimson (default). Replaces the prior warm-charcoal
+   + amber "Ledger Dark" palette; structural tokens (radius/ease/font) unchanged,
+   only the color values below. --system-red stays a distinct coral so error
+   states read differently from the brand-red --accent. */
 :root, [data-theme="dark"] {
   --font-ui: "Hanken Grotesk", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
   --font-display: "Hanken Grotesk", -apple-system, system-ui, sans-serif;
   --font-code: "IBM Plex Mono", "SF Mono", Monaco, Menlo, monospace;
-  --bg: #14130F;
-  --bg-secondary: #1E1C16;
-  --bg-tertiary: #2A2720;
-  --material-regular: rgba(30,28,22,0.92);
-  --material-thick: rgba(20,18,15,0.96);
+  --bg: #17181B;
+  --bg-secondary: #1F2124;
+  --bg-tertiary: #2A2D31;
+  --material-regular: rgba(30,32,35,0.92);
+  --material-thick: rgba(22,24,27,0.96);
   --material-thin: rgba(255,255,255,0.05);
   --material-ultra-thin: rgba(255,255,255,0.03);
   --fill-primary: rgba(255,255,255,0.10);
@@ -162,15 +165,15 @@
   --fill-tertiary: rgba(255,255,255,0.05);
   --fill-quaternary: rgba(255,255,255,0.035);
   --separator: rgba(255,255,255,0.09);
-  --separator-opaque: #38342B;
+  --separator-opaque: #34373B;
   --scrim: rgba(0,0,0,0.32);
-  --text-primary: #E8E4D8;
-  --text-secondary: rgba(232,228,216,0.62);
-  --text-tertiary: rgba(232,228,216,0.38);
-  --text-quaternary: rgba(232,228,216,0.22);
-  --accent: #E0A33C;
-  --accent-fill: rgba(224,163,60,0.14);
-  --accent-contrast: #14130F;
+  --text-primary: #E7E8EA;
+  --text-secondary: rgba(231,232,234,0.62);
+  --text-tertiary: rgba(231,232,234,0.38);
+  --text-quaternary: rgba(231,232,234,0.22);
+  --accent: #C6362A;
+  --accent-fill: rgba(198,54,42,0.14);
+  --accent-contrast: #FBEDEA;
   --system-blue: #5B9BD5;
   --system-green: #7DBE6A;
   --system-red: #E0675A;
@@ -185,16 +188,16 @@
   --shadow-overlay: 0 0 0 0.5px rgba(0,0,0,0.40), 0 16px 48px rgba(0,0,0,0.65), inset 0 1px 0 rgba(255,255,255,0.05);
   /* Frosted header-pill material (theme-aware). Dark bumped for legibility — the
      0.55/0.10 pill nearly vanished on the near-black bg. */
-  --pill-bg: rgba(34,31,24,0.64);
+  --pill-bg: rgba(28,30,33,0.64);
   --pill-border: rgba(255,255,255,0.14);
   --code-bg: rgba(255,255,255,0.05);
   --code-border: rgba(255,255,255,0.09);
-  --code-text: #E8E4D8;
+  --code-text: #E7E8EA;
   /* Tonal staircase (chrome recedes, content leads): Ribbon (lightest chrome)
      > Chat List (mid) > Thread (--bg, deepest). Quiet ~8 L* steps; no rest
      hairlines — the only line is the list's scroll-activated header separator. */
-  --ribbon-bg: #232019;
-  --sidebar-bg: #1C1A14;
+  --ribbon-bg: #202225;
+  --sidebar-bg: #1A1C1F;
   --sidebar-backdrop: blur(40px) saturate(160%);
   --radius-sm: 6px;
   --radius-md: 10px;
