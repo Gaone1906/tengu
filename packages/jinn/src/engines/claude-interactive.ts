@@ -889,6 +889,40 @@ export function pasteAndSubmit(
   };
 }
 
+/** Claude Code's own one-time interactive disclaimer, shown once per install
+ *  before it will honor --dangerously-skip-permissions at all — seedTrust()'s
+ *  bypassPermissionsModeAccepted write in ~/.claude.json is necessary but not
+ *  sufficient; the CLI's own bundled logic gates the flag behind a genuine
+ *  interactive accept ("bypass requires accepting the disclaimer interactively
+ *  first"), so a config write alone leaves every fresh spawn stuck here forever
+ *  with no completion signal. Every session is already spawned with that flag by
+ *  design (D-continuous-execution), so leaving a human to click through this once
+ *  per session defeats it; answering it here is the code-level equivalent of the
+ *  operator's own already-given, one-time consent (see docs/tengu/01-decisions.md),
+ *  not a new decision made on their behalf. Self-disposing: stops listening once it
+ *  answers, or after 60s if the banner never appears (the common case — claude's own
+ *  cold-start latency in some environments comfortably exceeds 8s, which a first cut
+ *  of this used and silently missed the banner because the listener had already torn
+ *  itself down before claude got around to writing it). */
+function answerBypassPermissionsDisclaimer(proc: Pick<pty.IPty, "write" | "onData">, jinnSessionId: string): void {
+  const SIGNATURE = "Claude Code running in Bypass Permissions mode";
+  let buffer = "";
+  let answered = false;
+  const disposable = proc.onData((raw) => {
+    if (answered) return;
+    buffer += raw;
+    if (buffer.length > 4000) buffer = buffer.slice(-4000);
+    if (!buffer.includes(SIGNATURE)) return;
+    answered = true;
+    logger.info(`InteractiveClaudeEngine: answering the one-time Bypass Permissions disclaimer for ${jinnSessionId}`);
+    proc.write("2\r");
+    disposable.dispose();
+  });
+  setTimeout(() => {
+    if (!answered) disposable.dispose();
+  }, 60000).unref?.();
+}
+
 export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngine {
   name = "claude" as const;
   /** Active turn resolvers keyed by Jinn session id. `boundProc` is the specific
@@ -1632,6 +1666,7 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
       cwd: opts.cwd || JINN_HOME,
       env,
     });
+    answerBypassPermissionsDisclaimer(proc, jinnSessionId);
     this.spawnParams.set(jinnSessionId, { model: opts.model, effortLevel: opts.effortLevel, appendApplied: true });
     return this.wireProcToStream(jinnSessionId, proc, port ? proxy : undefined);
   }
@@ -1687,6 +1722,7 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
           cwd: opts.cwd || JINN_HOME,
           env,
         });
+        answerBypassPermissionsDisclaimer(proc, jinnSessionId);
         const handle = this.wireProcToStream(jinnSessionId, proc, port ? proxy : undefined);
         // Idle spawn carries no --append-system-prompt (the view-only PTY); mark it so
         // the first real turn through run() cold-respawns with the persona + sentinel.

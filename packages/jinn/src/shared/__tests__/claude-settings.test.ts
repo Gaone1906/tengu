@@ -49,6 +49,7 @@ describe("claude-settings", () => {
     expect(d.projects[projectDir].hasCompletedProjectOnboarding).toBe(true);
     expect(d.hasCompletedOnboarding).toBe(true);
     expect(d.hasCompletedClaudeInChromeOnboarding).toBe(true);
+    expect(d.bypassPermissionsModeAccepted).toBe(true);
   });
 
   it("seedTrust writes a one-time backup of a pre-existing ~/.claude.json before first modification", () => {
@@ -65,7 +66,7 @@ describe("claude-settings", () => {
     expect(fs.readFileSync(backup, "utf-8")).toBe(original);
   });
 
-  it("seedTrust does not accept bypass-permissions consent for a host user", () => {
+  it("seedTrust records bypass-permissions consent for a host user, same as Docker's acceptBypassPermissions()", () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "home-"));
     const claudeJson = path.join(home, ".claude.json");
     const projectDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "proj-")));
@@ -73,7 +74,7 @@ describe("claude-settings", () => {
 
     seedTrust(claudeJson, projectDir);
 
-    expect(JSON.parse(fs.readFileSync(claudeJson, "utf-8")).bypassPermissionsModeAccepted).toBe(false);
+    expect(JSON.parse(fs.readFileSync(claudeJson, "utf-8")).bypassPermissionsModeAccepted).toBe(true);
   });
 
   it("seedTrust creates the config directory when it does not exist yet", () => {
@@ -86,7 +87,7 @@ describe("claude-settings", () => {
     seedTrust(claudeJson, projectDir);
     const data = JSON.parse(fs.readFileSync(claudeJson, "utf-8"));
     expect(data.projects[projectDir].hasTrustDialogAccepted).toBe(true);
-    expect(data.bypassPermissionsModeAccepted).toBeUndefined();
+    expect(data.bypassPermissionsModeAccepted).toBe(true);
   });
 
   it("seedTrust does not create a backup when ~/.claude.json doesn't exist yet", () => {
