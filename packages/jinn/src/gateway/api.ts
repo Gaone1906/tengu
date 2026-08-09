@@ -1866,7 +1866,11 @@ function operatorOnlyControlPlaneRoute(method: string, pathname: string): string
   if (method === "POST" && matchRoute("/api/cron/:id/trigger", pathname)) return "cron manual trigger";
   if (method === "PATCH" && matchRoute("/api/org/employees/:name", pathname)) return "org employee update";
   if (method === "PUT" && matchRoute("/api/org/departments/:name/board", pathname)) return "legacy org board write";
+  if (method === "POST" && pathname === "/api/specialists") return "specialist creation";
   if (method === "POST" && matchRoute("/api/specialists/:name/kb/incremental", pathname)) return "specialist incremental learning trigger";
+  if (method === "POST" && matchRoute("/api/specialists/:name/kb/learn", pathname)) return "specialist learning phase trigger";
+  if (method === "POST" && matchRoute("/api/specialists/:name/kb/teach/start", pathname)) return "specialist teaching phase start";
+  if (method === "POST" && matchRoute("/api/specialists/:name/kb/teach/complete", pathname)) return "specialist teaching phase completion";
   if (method === "DELETE" && matchRoute("/api/skills/:name", pathname)) return "skill removal";
   if (method === "PUT" && matchRoute("/api/skills/:name", pathname)) return "skill update";
   return null;
@@ -6222,6 +6226,29 @@ export async function handleApiRequest(
       return json(res, { status: "ok" });
     }
 
+    // POST /api/specialists — create a new specialist (routes/specialists/new.tsx, the wizard's
+    // write path; 18-council-specialists.md's Data model table, config/org/specialists/README.md).
+    // Writes the employee YAML only — the caller (the wizard) drives the learning/teaching phases
+    // as separate calls below so their own "indexing…"/"awaiting your input…" UI states can track them.
+    if (method === "POST" && pathname === "/api/specialists") {
+      const _parsed = await readJsonBody(req, res);
+      if (!_parsed.ok) return;
+      const body = _parsed.body as Record<string, unknown>;
+      const { scanOrg, validateNewSpecialist, createSpecialistYaml } = await import("./org.js");
+      const config = context.getConfig();
+      const registry = scanOrg(config);
+      const result = validateNewSpecialist(config, registry, body);
+      if (!result.ok) return badRequest(res, result.error || "invalid specialist");
+
+      const wrote = createSpecialistYaml(result.value!);
+      if (!wrote) return serverError(res, `failed to write specialist YAML for "${result.value!.name}"`);
+
+      context.reloadOrg?.();
+      const created = scanOrg(config).get(result.value!.name);
+      logger.info(`Specialist "${result.value!.name}" created (repo=${result.value!.repo})`);
+      return json(res, { status: "ok", employee: created ?? null }, 201);
+    }
+
     // GET /api/specialists/:name/kb — read-only KB manifest (18-council-specialists.md)
     params = matchRoute("/api/specialists/:name/kb", pathname);
     if (method === "GET" && params) {
@@ -6254,6 +6281,125 @@ export async function handleApiRequest(
         employee: emp.name,
         message: `Incremental learning triggered for "${emp.name}"`,
       });
+    }
+
+    // POST /api/specialists/:name/kb/learn — the wizard's learning phase (full index, first-ever
+    // run for a brand-new specialist — `runIncrementalUpdate` above is for an already-learned one).
+    // Fire-and-forget, same shape as the incremental route: a first-time run can download the
+    // ~130MB embedding model (18-council-specialists.md), so the wizard polls GET .../kb for the
+    // manifest to appear rather than this request blocking on it.
+    params = matchRoute("/api/specialists/:name/kb/learn", pathname);
+    if (method === "POST" && params) {
+      const { scanOrg } = await import("./org.js");
+      const emp = scanOrg(context.getConfig()).get(params.name);
+      if (!emp) return notFound(res);
+      if (!emp.repo) return badRequest(res, `"${params.name}" is not a specialist (no repo configured)`);
+
+      logger.info(`Learning phase triggered for specialist "${emp.name}" (${emp.repo})`);
+
+      const { runLearningPhase } = await import("../knowledge-base/index.js");
+      runLearningPhase({ name: emp.name, repo: emp.repo }).catch((err) =>
+        logger.error(`Learning phase failed for "${emp.name}": ${err instanceof Error ? err.message : String(err)}`)
+      );
+
+      return json(res, {
+        triggered: true,
+        employee: emp.name,
+        message: `Learning phase triggered for "${emp.name}"`,
+      });
+    }
+
+    // POST /api/specialists/:name/kb/teach/start — the wizard's teaching phase, kickoff half. Creates
+    // an ordinary web session bound to the specialist, seeded with teaching.ts's kickoff prompt, and
+    // dispatches it the same way POST /api/sessions does. Requires the learning phase's manifest to
+    // already exist — the specialist has nothing repo-grounded to draw questions from before that.
+    params = matchRoute("/api/specialists/:name/kb/teach/start", pathname);
+    if (method === "POST" && params) {
+      const { scanOrg } = await import("./org.js");
+      const emp = scanOrg(context.getConfig()).get(params.name);
+      if (!emp) return notFound(res);
+      if (!emp.repo) return badRequest(res, `"${params.name}" is not a specialist (no repo configured)`);
+      const { readManifest } = await import("../knowledge-base/manifest.js");
+      if (!readManifest(emp.name)) {
+        return badRequest(res, `learning phase for "${emp.name}" has not completed yet`);
+      }
+
+      const { buildTeachingKickoffPrompt } = await import("../knowledge-base/teaching.js");
+      const prompt = buildTeachingKickoffPrompt({ name: emp.name, repo: emp.repo });
+
+      const config = context.getConfig();
+      const selection = validateNewSessionSelection(config, {}, {
+        engine: emp.engine,
+        model: emp.model,
+        effortLevel: emp.effortLevel,
+        employee: emp.name,
+      });
+      if (!selection.ok) return badRequest(res, selection.error || "invalid engine/model/effort for this specialist");
+      const engineName = selection.engine || config.engines.default;
+      const sessionKey = `specialist-teach:${emp.name}:${Date.now()}`;
+      const session = createSession({
+        engine: engineName,
+        source: "web",
+        sourceRef: sessionKey,
+        connector: "web",
+        sessionKey,
+        replyContext: { source: "web" },
+        userId: resolveUserHeader(req.headers, config.gateway.userHeader),
+        employee: emp.name,
+        effortLevel: selection.effortLevel,
+        model: selection.model,
+        prompt,
+        promptExcerpt: `Teaching phase — ${emp.name}`,
+        portalName: config.portal?.portalName,
+      });
+      insertMessage(session.id, "user", prompt);
+
+      const engine = context.sessionManager.getEngine(engineName);
+      if (!engine) {
+        updateSession(session.id, { status: "error", lastError: `Engine "${engineName}" not available` });
+        return json(res, { sessionId: session.id, employee: emp.name, status: "error" }, 201);
+      }
+
+      updateSession(session.id, { status: "running", lastActivity: new Date().toISOString() });
+      session.status = "running";
+      const queueItemId = enqueueQueueItem(session.id, sessionKey, prompt);
+      context.emit("queue:updated", { sessionId: session.id, sessionKey });
+      dispatchWebSessionRun(session, prompt, engine, config, context, { queueItemId });
+
+      logger.info(`Teaching phase started for specialist "${emp.name}" (session=${session.id})`);
+      return json(res, { sessionId: session.id, employee: emp.name, status: "running" }, 201);
+    }
+
+    // POST /api/specialists/:name/kb/teach/complete — harvest the teaching session's transcript
+    // (teaching.ts's runTeachingPhase, the only writer of `source: 'teaching'` chunks) and clear the
+    // onboarding-only `interactive` flag `createSpecialistYaml` set, making the specialist eligible
+    // to appear in the carousel/round-table picker for the first time.
+    params = matchRoute("/api/specialists/:name/kb/teach/complete", pathname);
+    if (method === "POST" && params) {
+      const { scanOrg, setSpecialistOnboarding } = await import("./org.js");
+      const emp = scanOrg(context.getConfig()).get(params.name);
+      if (!emp) return notFound(res);
+      if (!emp.repo) return badRequest(res, `"${params.name}" is not a specialist (no repo configured)`);
+
+      const _parsed = await readJsonBody(req, res);
+      if (!_parsed.ok) return;
+      const body = _parsed.body as Record<string, unknown>;
+      const sessionId = typeof body.sessionId === "string" ? body.sessionId.trim() : "";
+      if (!sessionId) return badRequest(res, "sessionId is required");
+      const session = getSession(sessionId);
+      if (!session) return notFound(res);
+      if (session.employee !== emp.name) {
+        return badRequest(res, `session "${sessionId}" does not belong to specialist "${emp.name}"`);
+      }
+
+      const { runTeachingPhase } = await import("../knowledge-base/teaching.js");
+      const result = await runTeachingPhase({ name: emp.name, repo: emp.repo }, sessionId);
+
+      setSpecialistOnboarding(emp.name, false);
+      context.reloadOrg?.();
+
+      logger.info(`Teaching phase completed for specialist "${emp.name}" (${result.chunkCount} chunk(s))`);
+      return json(res, { ...result, employee: emp.name, ready: true });
     }
 
     // GET /api/specialists/:name/kb/search — the sole RAG read path into a
