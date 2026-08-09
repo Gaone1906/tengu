@@ -84,6 +84,10 @@ export interface Employee {
   repo?: string;
   /** Hex color for round-table/avatar identity. */
   color?: string;
+  /** Asks clarifying questions in chat and idles for a reply rather than working end to end.
+   *  For a wizard-created specialist, set only for the duration of onboarding (the learning +
+   *  teaching phases) — the carousel/round-table picker filters on `repo && !interactive`. */
+  interactive?: boolean;
 }
 
 /** Filesystem-resident KB manifest for one specialist
@@ -97,6 +101,40 @@ export interface SpecialistKbManifest {
   chunkCount: number;
   embeddingModel: string;
   schemaVersion: number;
+}
+
+/** Body for POST /api/specialists (the creation wizard's write path). */
+export interface NewSpecialistInput {
+  name: string;
+  repo: string;
+  model?: string;
+  effortLevel?: string;
+  engine?: string;
+}
+
+export interface CreateSpecialistResult {
+  status: string;
+  employee: Employee | null;
+}
+
+export interface TriggerSpecialistLearningResult {
+  triggered: boolean;
+  employee: string;
+  message: string;
+}
+
+export interface StartSpecialistTeachingResult {
+  sessionId: string;
+  employee: string;
+  status: string;
+}
+
+export interface CompleteSpecialistTeachingResult {
+  sessionId: string;
+  chunkCount: number;
+  transcriptChars: number;
+  employee: string;
+  ready: boolean;
 }
 
 export interface SpecialistKbResponse {
@@ -1034,6 +1072,15 @@ export const api = {
       `/api/specialists/${encodeURIComponent(name)}/kb/incremental`,
       {},
     ),
+  /** The creation wizard's write path (routes/specialists/new.tsx). */
+  createSpecialist: (data: NewSpecialistInput) =>
+    post<CreateSpecialistResult>("/api/specialists", data),
+  triggerSpecialistLearning: (name: string) =>
+    post<TriggerSpecialistLearningResult>(`/api/specialists/${encodeURIComponent(name)}/kb/learn`, {}),
+  startSpecialistTeaching: (name: string) =>
+    post<StartSpecialistTeachingResult>(`/api/specialists/${encodeURIComponent(name)}/kb/teach/start`, {}),
+  completeSpecialistTeaching: (name: string, sessionId: string) =>
+    post<CompleteSpecialistTeachingResult>(`/api/specialists/${encodeURIComponent(name)}/kb/teach/complete`, { sessionId }),
   getSkills: () => get<{ name: string; description?: string }[]>("/api/skills"),
   getSkill: (name: string) =>
     get<{ name: string; content: string }>(`/api/skills/${encodeURIComponent(name)}`),

@@ -20,6 +20,7 @@ const LogsPage = lazyRoute(() => import('./routes/logs/page'), 'logs')
 const LimitsPage = lazyRoute(() => import('./routes/limits/page'), 'limits')
 const OrgPage = lazyRoute(() => import('./routes/org/page'), 'org')
 const SpecialistsPage = lazyRoute(() => import('./routes/specialists/page'), 'specialists')
+const NewSpecialistPage = lazyRoute(() => import('./routes/specialists/new'), 'specialists-new')
 const RoundtablePage = lazyRoute(() => import('./routes/roundtable/page'), 'roundtable')
 const SettingsPage = lazyRoute(() => import('./routes/settings/page'), 'settings')
 const SkillsPage = lazyRoute(() => import('./routes/skills/page'), 'skills')
@@ -129,6 +130,7 @@ const router = createBrowserRouter([
       { path: '/limits', element: <LimitsPage /> },
       { path: '/org', element: <OrgPage /> },
       { path: '/specialists', element: <SpecialistsPage /> },
+      { path: '/specialists/new', element: <NewSpecialistPage /> },
       { path: '/roundtable', element: <RoundtablePage /> },
       { path: '/settings', element: <SettingsPage /> },
       { path: '/skills', element: <SkillsPage /> },

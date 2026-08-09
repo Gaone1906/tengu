@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { RefreshCw } from "lucide-react"
+import { Plus, RefreshCw } from "lucide-react"
+import { Button } from "@/components/ui/button"
 import { api } from "@/lib/api"
 import { queryKeys } from "@/lib/query-keys"
 import { PageLayout } from "@/components/page-layout"
@@ -42,8 +43,12 @@ export default function SpecialistsPage() {
   const qc = useQueryClient()
 
   const orgQuery = useQuery({ queryKey: queryKeys.org.all, queryFn: api.getOrg })
+  // A specialist mid-onboarding (learning/teaching not both complete yet, routes/specialists/new.tsx)
+  // is `interactive: true` for the duration — the same borrowed exclusion mechanism
+  // `dispatchContinuousLoop` gives council generalists. Exclude it from the usable roster
+  // until the wizard clears that flag (docs/tengu/18-council-specialists.md).
   const specialists = useMemo(
-    () => (orgQuery.data?.employees ?? []).filter((e) => !!e.repo),
+    () => (orgQuery.data?.employees ?? []).filter((e) => !!e.repo && !e.interactive),
     [orgQuery.data],
   )
 
@@ -96,14 +101,20 @@ export default function SpecialistsPage() {
                   : "Sonnet-tier employees who each own one repo"}
               </div>
             </div>
-            <button
-              type="button"
-              aria-label="Refresh specialists"
-              onClick={() => void orgQuery.refetch()}
-              className="grid size-[30px] place-items-center rounded-full text-[var(--text-tertiary)] transition-colors hover:bg-[var(--fill-secondary)]"
-            >
-              <RefreshCw size={13} strokeWidth={2.2} className={orgQuery.isFetching ? "animate-spin" : undefined} aria-hidden />
-            </button>
+            <div className="flex items-center gap-1.5">
+              <Button size="sm" onClick={() => navigate("/specialists/new")} data-testid="new-specialist-entry">
+                <Plus size={14} className="mr-1" aria-hidden />
+                New specialist
+              </Button>
+              <button
+                type="button"
+                aria-label="Refresh specialists"
+                onClick={() => void orgQuery.refetch()}
+                className="grid size-[30px] place-items-center rounded-full text-[var(--text-tertiary)] transition-colors hover:bg-[var(--fill-secondary)]"
+              >
+                <RefreshCw size={13} strokeWidth={2.2} className={orgQuery.isFetching ? "animate-spin" : undefined} aria-hidden />
+              </button>
+            </div>
           </header>
 
           <div className="mt-6">
