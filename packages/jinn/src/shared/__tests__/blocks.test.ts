@@ -171,6 +171,73 @@ describe("chat blocks", () => {
     });
   });
 
+  it("round-trips a handoff-document block the same way other block types do", () => {
+    const put = validateBlockEnvelope({
+      op: "put",
+      block: {
+        id: "hd-sr-1",
+        type: "handoff-document",
+        version: 1,
+        status: "done",
+        title: "Scope request",
+        payload: {
+          kind: "scope-request",
+          document: {
+            id: "sr-1",
+            projectRootId: "wi_root",
+            repo: "gaone1906/tengu",
+            summary: "Add council/specialist redesign",
+            proposedTouchpoints: ["packages/jinn/src/council/handoff-schemas.ts"],
+            context: "Part of D20-D25.",
+            requestedBy: "coo",
+            createdAt: "2026-08-08T00:00:00.000Z",
+          },
+        },
+      },
+    });
+
+    expect(put.ok).toBe(true);
+    if (put.ok) {
+      expect(put.envelope.block.type).toBe("handoff-document");
+      expect(blockFallbackText(put.envelope.block)).toBe("Scope request");
+    }
+
+    expect(validateBlockEnvelope({
+      op: "patch",
+      block: {
+        id: "hd-sr-1",
+        type: "handoff-document",
+        version: 2,
+        status: "done",
+        payload: {},
+      },
+    }).ok).toBe(true);
+  });
+
+  it("rejects a handoff-document put with an unknown kind", () => {
+    expect(validateBlockEnvelope({
+      op: "put",
+      block: {
+        id: "hd-sr-2",
+        type: "handoff-document",
+        version: 1,
+        payload: { kind: "scope-approval", document: {} },
+      },
+    })).toMatchObject({ ok: false, error: "handoff-document payload requires a valid kind" });
+  });
+
+  it("rejects a handoff-document put whose document fails its kind's shape", () => {
+    expect(validateBlockEnvelope({
+      op: "put",
+      block: {
+        id: "hd-sr-3",
+        type: "handoff-document",
+        version: 1,
+        payload: { kind: "scope-request", document: { id: "sr-1" } },
+      },
+    })).toMatchObject({ ok: false, error: "scope-request document requires projectRootId" });
+  });
+
   it("rejects obsolete diff and approval block types", () => {
     expect(validateBlockEnvelope({
       op: "put",

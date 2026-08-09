@@ -43,7 +43,8 @@ export type ChatBlockType =
   | "dispatch"
   | "todo-activity"
   | "workflow-definition"
-  | "workflow-run";
+  | "workflow-run"
+  | "handoff-document";
 export type ChatBlockStatus = "queued" | "dispatched" | "running" | "waiting" | "done" | "completed" | "error";
 export type ChatBlockOp = "put" | "patch" | "remove";
 

@@ -7,6 +7,7 @@ import type {
   JsonValue,
 } from "./types.js";
 import { STRUCTURED_MESSAGE_BODY_MAX_CHARS } from "./types.js";
+import { isHandoffDocumentKind, validateHandoffDocument } from "../council/handoff-schemas.js";
 
 const BLOCK_TYPES = new Set<ChatBlockType>([
   "task-list",
@@ -15,6 +16,7 @@ const BLOCK_TYPES = new Set<ChatBlockType>([
   "todo-activity",
   "workflow-definition",
   "workflow-run",
+  "handoff-document",
 ]);
 const STATUSES = new Set<ChatBlockStatus>([
   "queued",
@@ -175,6 +177,13 @@ function validatePayload(type: ChatBlockType, blockId: string, payload: JsonObje
     if (typeof payload.sentAt !== "number" || !Number.isFinite(payload.sentAt)) {
       return "dispatch payload requires sentAt";
     }
+  }
+  if (type === "handoff-document" && op === "put") {
+    if (!isHandoffDocumentKind(payload.kind)) {
+      return "handoff-document payload requires a valid kind";
+    }
+    const documentError = validateHandoffDocument(payload.kind, payload.document);
+    if (documentError) return documentError;
   }
   if (ACTIVITY_TYPES.has(type)) return validateActivityPayload(type, blockId, payload, op);
   return null;
