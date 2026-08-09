@@ -32,7 +32,7 @@ interface FenceScan {
 
 const MAX_PAYLOAD_BYTES = 262_144;
 const FIELD_NAME = /^[A-Za-z_][A-Za-z0-9_-]*$/;
-const FIELD_TYPES = new Set(['string', 'number', 'boolean', 'string[]']);
+const FIELD_TYPES = new Set(['string', 'number', 'boolean', 'string[]', 'json']);
 const FORBIDDEN_FIELDS = new Set(['__proto__', 'prototype', 'constructor']);
 const MESSAGES: Record<WorkflowOutputCode, string> = {
   'multiple-blocks': 'Employee output must contain at most one jinn-output block.',
@@ -154,6 +154,7 @@ function matchesType(value: JsonValue, type: OutputField['type']): boolean {
   if (type === 'string') return typeof value === 'string';
   if (type === 'number') return typeof value === 'number' && Number.isFinite(value);
   if (type === 'boolean') return typeof value === 'boolean';
+  if (type === 'json') return jsonValueSchema.safeParse(value).success;
   return Array.isArray(value) && value.every((item) => typeof item === 'string');
 }
 

@@ -212,6 +212,55 @@ describe('declared output fields', () => {
   });
 });
 
+describe('json output field', () => {
+  const jsonSchema = outputSchema({
+    plan: { type: 'json', required: true },
+    label: { type: 'string', required: false },
+  });
+
+  it('accepts a real nested object/array value', () => {
+    const payload = {
+      plan: {
+        steps: [{ id: 1, done: false }, { id: 2, done: true, notes: null }],
+        owners: ['alice', 'bob'],
+        meta: { retries: 3, ratio: 0.5 },
+      },
+    };
+    const output = parseWorkflowOutput(block(JSON.stringify(payload)), jsonSchema);
+    expect(output.fields).toEqual(payload);
+  });
+
+  it('accepts an array and a bare primitive as the whole json value', () => {
+    expect(parseWorkflowOutput(block('{"plan":[1,2,3]}'), jsonSchema).fields).toEqual({ plan: [1, 2, 3] });
+    expect(parseWorkflowOutput(block('{"plan":"just text"}'), jsonSchema).fields).toEqual({ plan: 'just text' });
+  });
+
+  it('rejects a required json field that is missing', () => {
+    expectCode(() => parseWorkflowOutput(block('{"label":"x"}'), jsonSchema), 'missing-field');
+  });
+
+  it('rejects a json field value carrying a non-finite number, submitted directly', () => {
+    const error = expectCode(
+      () => validateSubmittedFields({ plan: { score: Number.POSITIVE_INFINITY } }, jsonSchema),
+      'invalid-shape',
+    );
+    expect(error.message).toBeTruthy();
+  });
+
+  it('rejects a json field value with a forbidden nested key, submitted directly', () => {
+    const hostile = JSON.parse('{"__proto__":{"polluted":true}}') as Record<string, unknown>;
+    expect(Object.hasOwn(hostile, '__proto__')).toBe(true);
+    expectCode(() => validateSubmittedFields({ plan: hostile }, jsonSchema), 'invalid-shape');
+    expect((Object.prototype as { polluted?: unknown }).polluted).toBeUndefined();
+  });
+
+  it('rejects a json field value that is a circular structure, submitted directly', () => {
+    const cyclic: Record<string, unknown> = { steps: [] };
+    cyclic.self = cyclic;
+    expectCode(() => validateSubmittedFields({ plan: cyclic }, jsonSchema), 'invalid-shape');
+  });
+});
+
 describe('submitted output field boundary', () => {
   it('normalizes undefined to empty fields when no schema is declared', () => {
     expect(validateSubmittedFields(undefined)).toEqual({});

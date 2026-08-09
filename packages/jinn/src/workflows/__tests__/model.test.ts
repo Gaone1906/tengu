@@ -365,6 +365,20 @@ describe('employee Binding and output declarations', () => {
     }
   });
 
+  it('accepts a json output field alongside the primitive types', () => {
+    const output: WorkflowOutputSchema = {
+      fields: {
+        summary: { type: 'string', required: true },
+        details: { type: 'json', required: true, description: 'Nested handoff payload.' },
+      },
+      allowAdditionalFields: false,
+    };
+    const node = employeeNode();
+    node.config.output = output;
+
+    expect(workflowNodeSchema.parse(node)).toEqual(node);
+  });
+
   it('supports flat closed output declarations', () => {
     const output: WorkflowOutputSchema = {
       fields: {
