@@ -1045,6 +1045,7 @@ export async function startGateway(
   const stopContextCompactionWatcher = startContextCompactionWatcher({
     getEngine: (name) => engines.get(name),
     governorConfig: () => currentConfig.governor,
+    employees: () => employeeRegistry,
   });
 
   // Todos ledger truth-keeping (GRS-021a): periodically re-derive work-item
@@ -1239,7 +1240,7 @@ export async function startGateway(
       ptyWss.handleUpgrade(req, socket, head, (ws) => {
         trackHeartbeat(ws);
         try {
-          attachPtyWebSocket(ws, sessionId, ptyEngine);
+          attachPtyWebSocket(ws, sessionId, ptyEngine, { employeeProvider: (name) => employeeRegistry.get(name) });
         } catch (err) {
           logger.warn(`PTY websocket attach failed for ${sessionId}: ${err instanceof Error ? err.message : err}`);
           ws.close();

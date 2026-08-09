@@ -35,7 +35,7 @@ import {
 import { notifyParentSession, notifyRateLimited, notifyRateLimitResumed, notifyOperatorChannel } from "./callbacks.js";
 import { buildContext, buildPlatformContextSnapshot, runtimeSessionSource, type BuildContextOptions } from "./context.js";
 import { SessionQueue } from "./queue.js";
-import { JINN_HOME } from "../shared/paths.js";
+import { resolveSessionCwd } from "../shared/session-cwd.js";
 import { logger } from "../shared/logger.js";
 import { resolveEffort } from "../shared/effort.js";
 import { effortLevelsForModel, engineAvailable, isKnownEngine, engineUnavailableMessage } from "../shared/models.js";
@@ -556,7 +556,7 @@ export class SessionManager {
         resumeSessionId: resumeRefAtTurnStart.id ?? undefined,
         systemPrompt,
         platformContextRefresh,
-        cwd: JINN_HOME,
+        cwd: resolveSessionCwd(employee),
         bin: engineConfig.bin,
         model: modelForTurn,
         effortLevel,

@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { CronJob, Engine, Session } from "../shared/types.js";
-import { HANDOFFS_DIR, JINN_HOME } from "../shared/paths.js";
+import type { CronJob, Employee, Engine, Session } from "../shared/types.js";
+import { HANDOFFS_DIR } from "../shared/paths.js";
+import { resolveSessionCwd } from "../shared/session-cwd.js";
 import { logger } from "../shared/logger.js";
 import type { GovernorDecision } from "../shared/governor.js";
 import { getWorkItem } from "../work-items/store.js";
@@ -139,6 +140,9 @@ export function scheduleGovernorResume(opts: ScheduleResumeOptions): CronJob {
 export interface GovernorHaltOptions {
   session: Session;
   employee: string;
+  /** Full employee record, when available — resolves the pre-halt /compact's cwd
+   *  (resolveSessionCwd). Absent (generalist or unresolved) falls back to JINN_HOME. */
+  employeeRecord?: Employee;
   engine: Engine;
   engineBin?: string;
   engineModel?: string;
@@ -195,7 +199,7 @@ export async function performGovernorHalt(opts: GovernorHaltOptions): Promise<Go
       await engine.run({
         prompt: "/compact",
         resumeSessionId: session.engineSessionId,
-        cwd: JINN_HOME,
+        cwd: resolveSessionCwd(opts.employeeRecord),
         bin: opts.engineBin,
         model: opts.engineModel ?? session.model ?? undefined,
         sessionId: session.id,

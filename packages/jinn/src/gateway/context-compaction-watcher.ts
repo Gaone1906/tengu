@@ -6,7 +6,7 @@ import { evaluateGovernor } from "../shared/governor.js";
 import { getSession } from "../sessions/registry.js";
 import { performInPlaceCompaction, type ContextCompactionResult } from "../sessions/compaction.js";
 import { logger } from "../shared/logger.js";
-import type { Engine, GovernorConfig } from "../shared/types.js";
+import type { Employee, Engine, GovernorConfig } from "../shared/types.js";
 
 const DEFAULT_DEBOUNCE_MS = 1000;
 
@@ -15,6 +15,9 @@ export interface ContextCompactionWatcherDeps {
   /** Resolved at check time, not at start time — a config reload must not
    *  require a restart to pick up a new contextCompactPct. */
   governorConfig?: () => GovernorConfig | undefined;
+  /** Resolves the compacting session's employee record, so the /compact call's
+   *  cwd follows resolveSessionCwd instead of always JINN_HOME. */
+  employees?: () => ReadonlyMap<string, Employee>;
   debounceMs?: number;
   /** Test override; defaults to CLAUDE_LIMITS_DIR. */
   dir?: string;
@@ -73,6 +76,7 @@ export function checkContextCompaction(
     const attempt = performInPlaceCompaction({
       session,
       employee: row.employee ?? "unassigned",
+      employeeRecord: row.employee ? deps.employees?.().get(row.employee) : undefined,
       engine,
       engineModel: session.model ?? undefined,
       decision,

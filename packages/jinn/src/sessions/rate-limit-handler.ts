@@ -20,7 +20,7 @@
  */
 
 import type { Employee, Engine, EngineResult, JinnConfig, ResolvedMcpConfig, Session, StreamDelta } from "../shared/types.js";
-import { JINN_HOME } from "../shared/paths.js";
+import { resolveSessionCwd } from "../shared/session-cwd.js";
 import { logger } from "../shared/logger.js";
 import { resolveEffort } from "../shared/effort.js";
 import { effortLevelsForModel, engineAvailable, type EngineName } from "../shared/models.js";
@@ -239,7 +239,7 @@ export async function handleRateLimit(opts: RateLimitHandlerOpts): Promise<RateL
         prompt: fallbackPrompt,
         resumeSessionId: codexResume,
         systemPrompt,
-        cwd: JINN_HOME,
+        cwd: resolveSessionCwd(employee),
         bin: fallbackConfig.bin,
         model: session.model ?? fallbackConfig.model,
         effortLevel: fallbackEffort,
@@ -347,7 +347,7 @@ export async function handleRateLimit(opts: RateLimitHandlerOpts): Promise<RateL
         resumeSessionId: currentSession.engineSessionId ?? undefined,
         systemPrompt,
         platformContextRefresh,
-        cwd: JINN_HOME,
+        cwd: resolveSessionCwd(employee),
         bin: engineConfig.bin,
         model: currentSession.model ?? engineConfig.model,
         effortLevel,

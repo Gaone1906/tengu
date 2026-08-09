@@ -137,6 +137,7 @@ import {
   writeSharedSttSettings,
 } from "../stt/settings-store.js";
 import { CODEX_HOMES_DIR, JINN_HOME } from "../shared/paths.js";
+import { resolveSessionCwd } from "../shared/session-cwd.js";
 import { resolveClaudeConfigDir } from "../shared/home.js";
 import { resolveEffort } from "../shared/effort.js";
 import { selectClaudeModelFallback } from "../shared/model-fallback.js";
@@ -7238,6 +7239,7 @@ async function runWebSession(
         await performGovernorHalt({
           session: currentSession,
           employee: employee?.name ?? currentSession.employee ?? "unassigned",
+          employeeRecord: employee,
           engine,
           engineModel: currentSession.model ?? undefined,
           decision: governorDecision,
@@ -7393,7 +7395,7 @@ async function runWebSession(
       resumeSessionId: resumeRefAtTurnStart.id ?? undefined,
       systemPrompt,
       platformContextRefresh,
-      cwd: JINN_HOME,
+      cwd: resolveSessionCwd(employee),
       bin: engineConfig.bin,
       model: modelForAttempt,
       effortLevel,

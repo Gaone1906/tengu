@@ -1,7 +1,7 @@
 import fs from "node:fs";
-import type { Engine, Session } from "../shared/types.js";
+import type { Employee, Engine, Session } from "../shared/types.js";
 import type { GovernorDecision } from "../shared/governor.js";
-import { JINN_HOME } from "../shared/paths.js";
+import { resolveSessionCwd } from "../shared/session-cwd.js";
 import { logger } from "../shared/logger.js";
 import { handoffPathFor } from "./handoff.js";
 
@@ -29,6 +29,9 @@ import { handoffPathFor } from "./handoff.js";
 export interface ContextCompactionOptions {
   session: Session;
   employee: string;
+  /** Full employee record, when available — resolves the /compact call's cwd
+   *  (resolveSessionCwd). Absent (generalist or unresolved) falls back to JINN_HOME. */
+  employeeRecord?: Employee;
   /** Defaults to session.workItemId, then session.id — same fallback handoff.ts uses. */
   todoId?: string;
   engine: Engine;
@@ -66,7 +69,7 @@ export async function performInPlaceCompaction(opts: ContextCompactionOptions): 
   const compactResult = await engine.run({
     prompt: "/compact",
     resumeSessionId: session.engineSessionId,
-    cwd: JINN_HOME,
+    cwd: resolveSessionCwd(opts.employeeRecord),
     bin: opts.engineBin,
     model: opts.engineModel ?? session.model ?? undefined,
     sessionId: session.id,
@@ -93,7 +96,7 @@ export async function performInPlaceCompaction(opts: ContextCompactionOptions): 
       handoffContent,
     ].join("\n"),
     resumeSessionId: session.engineSessionId,
-    cwd: JINN_HOME,
+    cwd: resolveSessionCwd(opts.employeeRecord),
     bin: opts.engineBin,
     model: opts.engineModel ?? session.model ?? undefined,
     sessionId: session.id,

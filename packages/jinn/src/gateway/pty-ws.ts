@@ -1,14 +1,18 @@
 import type { WebSocket } from "ws";
 import type { PtyControlEvent, PtyIdleSpawnOpts, PtyViewEngine } from "../engines/pty-view-engine.js";
 import { getEngineSessionRef, getSession } from "../sessions/registry.js";
-import { JINN_HOME } from "../shared/paths.js";
+import { resolveSessionCwd } from "../shared/session-cwd.js";
 import { logger } from "../shared/logger.js";
+import type { Employee } from "../shared/types.js";
 
 const RAW_KEY_INPUTS = new Set(["\r", "\x1b", "\t", "\x03", "\x1b[A", "\x1b[B", "\x1b[C", "\x1b[D"]);
 export const PTY_RESUME_DEADLINE_MS = 15_000;
 
 interface AttachPtyWebSocketOptions {
   resumeDeadlineMs?: number;
+  /** Resolves the session's employee record, so a warm-spawned PTY's cwd
+   *  follows resolveSessionCwd instead of always JINN_HOME. */
+  employeeProvider?: (name: string) => Employee | undefined;
 }
 
 /** Attach a snapshot-first, per-session PTY WebSocket. */
@@ -101,11 +105,12 @@ export function attachPtyWebSocket(
 
   const idleSpawnOpts = (cols: number, rows: number): PtyIdleSpawnOpts => {
     const session = getSession(sessionId);
+    const employee = session?.employee ? options.employeeProvider?.(session.employee) : undefined;
     return {
       engineSessionId: session ? getEngineSessionRef(session).id : undefined,
       model: session?.model ?? undefined,
       effortLevel: session?.effortLevel ?? undefined,
-      cwd: JINN_HOME,
+      cwd: resolveSessionCwd(employee),
       cols,
       rows,
     };
