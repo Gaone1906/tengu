@@ -21,7 +21,7 @@ pain forever.
 | Departments as a queryable dimension | ✅ `department` column + registry |
 | Pipelines (sequential / conditional / parallel / switch, per-phase model, gates) | ✅ `src/workflows/`, bound to todos |
 | Cron that mints work items | ✅ Complete |
-| **Profiles** (personal / work) | ✅ `JINN_INSTANCE` + `src/instances/` — first class |
+| **Instances** (personal / work) | ✅ `JINN_INSTANCE` + `src/instances/` — first class |
 | Knowledge bases | ✅ Skills |
 | Chat command centre + activity receipts | ✅ Complete |
 | Web dashboard incl. a limits page | ✅ Complete |
@@ -68,7 +68,7 @@ Of ~20–32 working days:
 
 | Kind | Steps | Days | Merge risk |
 |---|---|---|---|
-| **Config only** — works today | 0, profiles | ~1 hr | None |
+| **Config only** — works today | 0, instances | ~1 hr | None |
 | **Additive** — new files, minimal upstream edits | 1, 2, 3, 11, most of 10 | ~8–10 | Low; several are upstreamable |
 | **Seam edits** — touch dispatch/hook paths | 4, 7, 8, 9 | ~6–8 | Medium |
 | **Against the grain** — invert an assumption | 5, 6, council, cross-instance | ~9–12 | **High, permanent** |

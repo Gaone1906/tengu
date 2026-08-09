@@ -62,9 +62,9 @@ plain-English summary of what it actually does and looks like, without implement
 
 ## For multi-project / work use
 
-- **Two completely separate profiles** — personal and work — different settings, different task lists,
+- **Two completely separate instances** — personal and work — different settings, different task lists,
   different history, no crossover.
-- **In the work profile, each of your services gets its own dedicated AI worker** that deeply knows
+- **In the work instance, each of your services gets its own dedicated AI worker** that deeply knows
   that specific codebase, rather than one generalist juggling all of them.
 - **A "council" feature for cross-service work**: describe a project that touches multiple services, and
   it asks you clarifying questions, works out which services are actually affected, consults each one
@@ -79,7 +79,7 @@ plain-English summary of what it actually does and looks like, without implement
 
 A few things were left open across the design docs. Resolved:
 
-- **Running personal and work profiles at the same time** shares one usage-budget tracker between them,
+- **Running personal and work instances at the same time** shares one usage-budget tracker between them,
   so neither one accidentally spends the other's share.
 - **When one service needs something from another**, that becomes a task for the service that owns it
   — not shared write access across services.
@@ -94,6 +94,6 @@ A few things were left open across the design docs. Resolved:
 
 A small number of things can only be answered once it's actually running — not decisions to make now,
 just the first things it'll tell us: whether the task-depth limit already fits the sub-sub-task level
-without adjustment, whether the app's existing workspace switcher already handles profile-switching,
+without adjustment, whether the app's existing workspace switcher already handles instance-switching,
 and what the real Opus-vs-Sonnet split looks like once genuine work is flowing through it. None of these
 block anything — they're just where the plan meets reality on day one.

@@ -173,9 +173,9 @@ that can land any time after the core loop works — no reason to block on it.
 - **Where does this actually run day-to-day** — your primary laptop, or a dedicated always-on box? This
   changes whether step 13's sleep-prevention piece matters at all (moot if D). Worth deciding before
   building C.
-- Does the **work profile** (separate services, separate repos, [09](09-work-profile-and-council.md))
+- Does the **work instance** (separate services, separate repos, [09](09-work-profile-and-council.md))
   change the calculus toward D? Multiple service repos plus the council's fan-out consultation phase is
-  a heavier, longer-running workload than the personal profile — more reason to want a machine that
+  a heavier, longer-running workload than the personal instance — more reason to want a machine that
   doesn't care whether your laptop is open.
 - If remote checking matters, Tailscale is the default answer — but confirm before adding it as a
   dependency anywhere in setup docs.

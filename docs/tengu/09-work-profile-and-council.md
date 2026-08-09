@@ -1,11 +1,11 @@
-# Work profile & the council
+# Work instance & the council
 
-Two profiles — **personal** and **work** — with different org shapes, and a council flow that turns a
+Two instances — **personal** and **work** — with different org shapes, and a council flow that turns a
 project request into an execution pipeline across multiple services.
 
 ---
 
-## Profiles are Jinn instances — no code required
+## Personal and work are Jinn instances — no code required
 
 `shared/home.ts` resolves the Jinn home in this order:
 
@@ -19,7 +19,7 @@ And there's a whole `src/instances/` module — `create.ts`, `start.ts`, `direct
 
 So:
 
-| Profile | Instance | Home | Org shape |
+| Instance | `JINN_INSTANCE` | Home | Org shape |
 |---|---|---|---|
 | Personal | `JINN_INSTANCE=personal` | `~/.personal` | One `engineer`, departments as labels ([D6](01-decisions.md#d6--departments-are-labels-not-agents)) |
 | Work | `JINN_INSTANCE=work` | `~/.work` | One employee **per service** + council |
@@ -36,7 +36,7 @@ running both concurrently.
 
 ---
 
-## Why the work profile overturns D6 — legitimately
+## Why the work instance overturns D6 — legitimately
 
 [D6](01-decisions.md#d6--departments-are-labels-not-agents) said departments are labels, not agents,
 because per-department agents duplicate orientation when they share a repo. It named the exception:
@@ -44,7 +44,7 @@ because per-department agents duplicate orientation when they share a repo. It n
 > Promote a department to its own employee only when the context it needs genuinely differs
 > (different repo/stack/credentials), not merely when the subject matter differs.
 
-**The work profile is that exception.** `identity`, `billing`, `mobile-api`, `web`,
+**The work instance is that exception.** `identity`, `billing`, `mobile-api`, `web`,
 `notifications` are separate repos with separate domain models and separate integration contracts.
 There is no shared orientation to duplicate — each agent's context is genuinely its own. Same test,
 opposite answer.
@@ -181,8 +181,8 @@ Cross-service ordering from the workflow; within a service, the sequential loop.
 
 ## Where the council replaces the planner
 
-In the work profile the **council subsumes the `planner` role** — phases 1–4 *are* decomposition, done
-with more context and a human in the loop. Keep `planner` in the personal profile; in work, the roster
+In the work instance the **council subsumes the `planner` role** — phases 1–4 *are* decomposition, done
+with more context and a human in the loop. Keep `planner` in the personal instance; in work, the roster
 is:
 
 ```

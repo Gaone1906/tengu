@@ -24,7 +24,7 @@ resume cleanly, and make all of it legible in a dashboard.
 | 6 | GUI: context/usage per agent, work complete overall and per agent | 2, 3 |
 | 7 | Stand-up per project × department | 11 |
 | 8 | Security officer — no wiped work, no destructive commands | 10 |
-| 9 | Two profiles (personal / work), per-service agents, council flow | 12 |
+| 9 | Two instances (personal / work), per-service agents, council flow | 12 |
 | 10 | Idempotent checkpoints — an interrupted session redoes almost nothing | 5 |
 
 ### Environment
@@ -74,7 +74,7 @@ Condensed from [02-findings.md](02-findings.md) — all `/contents/`-API verifie
 | Command gate | `shared/command-policy.ts` + `PreToolUse`→HTTP 451 in `gateway/hook-endpoint.ts` |
 | Todo tree | `work-items/` — `parentId`/`rootId`/`depth≤3`, status, assignee, comments, transitions, **`reconcile.ts`** |
 | Departments | `work-items/departments.ts` — user-defined slugs, `department` column on work items |
-| Profiles | `shared/home.ts` (`JINN_HOME`/`JINN_INSTANCE`) + `src/instances/` — **first-class, zero code** |
+| Instances | `shared/home.ts` (`JINN_HOME`/`JINN_INSTANCE`) + `src/instances/` — **first-class, zero code** |
 | Pipelines | `src/workflows/` + `gateway/workflow-todo-binding.ts` — sequential/conditional/parallel/switch, per-phase model, approval gates |
 | Knowledge bases | **Skills** (`gateway/skills.ts`) — there is no knowledge subsystem |
 | Frontend | `packages/web/src/routes/` incl. an existing `limits/` page to extend |
@@ -103,10 +103,10 @@ Condensed from [02-findings.md](02-findings.md) — all `/contents/`-API verifie
                              └────────────────────────────┘
 ```
 
-**Personal profile** (`JINN_INSTANCE=personal`): `planner` · `engineer` · `reviewer` · `security` ·
+**Personal instance** (`JINN_INSTANCE=personal`): `planner` · `engineer` · `reviewer` · `security` ·
 `scribe`. Departments are labels on work items, one executor covers all of them (D6).
 
-**Work profile** (`JINN_INSTANCE=work`): `council` (replaces `planner`) · one **senior Sonnet employee
+**Work instance** (`JINN_INSTANCE=work`): `council` (replaces `planner`) · one **senior Sonnet employee
 per service** · `reviewer` · `security` · `scribe`. Per-service agents are justified here because the
 contexts genuinely differ — separate repos, separate domains (D11).
 
@@ -341,11 +341,11 @@ value and cheap, but deferred — additive polish, not core.
 **Open before building:** does this run on the daily laptop, or a dedicated always-on box? Changes
 whether the sleep-prevention piece matters at all.
 
-### 12. Work profile & council — *4–6 days*
+### 12. Work instance & council — *4–6 days*
 
 [09-work-profile-and-council.md](09-work-profile-and-council.md).
 
-**Profiles are free** — `JINN_INSTANCE=personal` / `=work`. Separate employees, skills, cron, ledger,
+**Instances are free** — `JINN_INSTANCE=personal` / `=work`. Separate employees, skills, cron, ledger,
 DB, port.
 
 **Roster:** `council` (executive, Opus, `interactive: true`) replaces `planner`; one senior Sonnet
@@ -364,7 +364,7 @@ unmatched ones — what nobody is providing but someone needs.
 gotchas) as a Jinn skill. One-time bootstrap per service — a council consulting empty knowledge bases
 produces confident nonsense. Each completed todo appends what was learned, or they rot in a month.
 
-⚠️ **Cross-instance governor.** Both profiles share one Claude account and one set of limits, but each
+⚠️ **Cross-instance governor.** Both instances share one Claude account and one set of limits, but each
 instance's governor sees only its own sessions. Two instances each pacing to "fair share" spend double.
 **Shared account-level state outside either home is required before running both concurrently.**
 
@@ -400,9 +400,9 @@ instance's governor sees only its own sessions. Two instances each pacing to "fa
 | 9. Pacing & fan-out | 2–3 days |
 | 10. Security officer | 1.5–2.5 days |
 | 11. Stand-up | 2–3 days |
-| 12. Work profile & council | 4–6 days |
+| 12. Work instance & council | 4–6 days |
 
-**~4–5 weeks for the personal profile; ~6–7 including work profile and council.** Steps 6 and 12 carry
+**~4–5 weeks for the personal instance; ~6–7 including work instance and council.** Steps 6 and 12 carry
 most of the risk.
 
 **Three stopping points that stand alone:**

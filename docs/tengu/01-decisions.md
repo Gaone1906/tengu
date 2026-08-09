@@ -247,21 +247,21 @@ already-enforced function.
 
 ---
 
-## D11 — Two profiles; per-service employees in work; a council that plans across them
+## D11 — Two instances; per-service employees in work; a council that plans across them
 
 *(see [09-work-profile-and-council.md](09-work-profile-and-council.md))*
 
-**Profiles cost nothing.** `shared/home.ts` honours `JINN_HOME` and `JINN_INSTANCE`, and `src/instances/`
+**Instances cost nothing.** `shared/home.ts` honours `JINN_HOME` and `JINN_INSTANCE`, and `src/instances/`
 (create/start/directory/access) is a first-class upstream feature. `JINN_INSTANCE=personal` → `~/.personal`,
 `=work` → `~/.work`. Separate employees, skills, cron, ledger, DB, port.
 
-**The work profile overturns D6 — legitimately.** D6 named the exception: promote a department to its own
+**The work instance overturns D6 — legitimately.** D6 named the exception: promote a department to its own
 employee when the context genuinely differs. Separate services are separate repos with separate domain
 models, so there is no shared orientation to duplicate. Same test, opposite answer. Cross-service work is
 also the cleanest fan-out available (distinct repos, no merge conflicts) — though the weekly budget still
 governs the degree.
 
-**Council replaces `planner` in the work profile**: intake (interactive Opus) → impact triage via a service
+**Council replaces `planner` in the work instance**: intake (interactive Opus) → impact triage via a service
 registry (Opus) → **parallel read-only consultation** by each affected service against its own knowledge
 base (Sonnet) → synthesis into a dependency graph, todo tree, and a generated **Jinn workflow** (Opus) →
 **mandatory human approval** → governed execution. Opus on the reasoning phases, Sonnet on the widest one.
@@ -374,7 +374,7 @@ in rather than left as "if needed":
 - `tengu service install/start/stop/status` CLI subcommands wrapping the above.
 
 **Not decided yet, deliberately deferred:** whether this runs on the daily laptop or a rented always-on
-box ([13-costs.md](13-costs.md) has real 2026 pricing — $40–48/mo personal, $96–126/mo work profile,
+box ([13-costs.md](13-costs.md) has real 2026 pricing — $40–48/mo personal, $96–126/mo work instance,
 if that's ever wanted). Step 13's boot-start config is identical either way — a laptop just needs to
 actually be on for "on boot" to mean anything.
 
@@ -438,12 +438,12 @@ way to make Tengu feel bolted-on rather than native.
 - Security incidents → a filtered lens on the existing `/logs` Activity page, not a new page.
 - Stand-up → the one genuinely new **route**, following Cron's existing grouped-list pattern
   (employee-groups → project-groups; job-rows → department-rows).
-- Profile switcher → **possibly zero new UI** — the rail already has a `WorkspaceSwitcher`; whether it
+- Instance switcher → **possibly zero new UI** — the rail already has a `WorkspaceSwitcher`; whether it
   supports separate `JINN_INSTANCE`s or just views within one is unverified and must be checked before
   building a parallel one.
 
 **Net effect:** the honest new-UI surface is small — per-session Limits cards, a pacing/fan-out strip,
-the Stand-up route, one new glyph, one new filter lens, and possibly nothing for profiles. Most of "how
+the Stand-up route, one new glyph, one new filter lens, and possibly nothing for instances. Most of "how
 Tengu looks" is "how Jinn already looks," which is the right outcome given D1/D11's whole thesis of
 reusing what's legitimately reusable.
 
@@ -460,9 +460,9 @@ Decide once the data shape is known.
 
 Design phase closed. Remaining open items from D8–D16 and their topic docs, resolved:
 
-- **Cross-instance budget coordination** ([D11](01-decisions.md#d11--two-profiles-per-service-employees-in-work-a-council-that-plans-across-them)):
-  personal and work profiles share one governor state file if ever run concurrently, so neither spends
-  against a budget it doesn't actually have alone. Default assumption remains one active profile at a
+- **Cross-instance budget coordination** ([D11](01-decisions.md#d11--two-instances-per-service-employees-in-work-a-council-that-plans-across-them)):
+  personal and work instances share one governor state file if ever run concurrently, so neither spends
+  against a budget it doesn't actually have alone. Default assumption remains one active instance at a
   time.
 - **Contract changes between services** ([09](09-work-profile-and-council.md)): a service needing
   something from another opens a task in the *providing* service, rather than cross-service write
@@ -489,7 +489,7 @@ Design phase closed. Remaining open items from D8–D16 and their topic docs, re
 **Deliberately left for build-time, not resolved here** — these need the real codebase or running
 telemetry to answer, and guessing further would just be more speculation stacked on speculation:
 whether `depth` is 0-indexed (decides if the sub-sub-task level needs a schema change), whether the
-existing `WorkspaceSwitcher` already does what profile-switching needs, and the real Opus/Sonnet token
+existing `WorkspaceSwitcher` already does what instance-switching needs, and the real Opus/Sonnet token
 split and reviewer share once genuine work is flowing. None of these block starting the build — they're
 the first things the system will tell us, not open design questions.
 

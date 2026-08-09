@@ -33,7 +33,7 @@ destroying work.
 | [06-concurrency.md](docs/06-concurrency.md) | Sequential vs parallel — why throughput doesn't scale with agents |
 | [07-fanout-policy.md](docs/07-fanout-policy.md) | How the system decides to parallelise — two gates, fails closed |
 | [08-pacing-controller.md](docs/08-pacing-controller.md) | Spend the window, protect the week — effort before concurrency |
-| [09-work-profile-and-council.md](docs/09-work-profile-and-council.md) | Personal vs work profiles; per-service agents; the council flow |
+| [09-work-profile-and-council.md](docs/09-work-profile-and-council.md) | Personal vs work instances; per-service agents; the council flow |
 | [10-checkpointing.md](docs/10-checkpointing.md) | Sub-sub-task checkpoints, verify-before-act idempotency, graceful stops |
 | [11-deviation-assessment.md](docs/11-deviation-assessment.md) | How far this is from stock Jinn, and where the fork risk concentrates |
 | [12-deployment-and-ux.md](docs/12-deployment-and-ux.md) | Web app vs desktop app — why it's already decided, and what keeps the daemon alive |
@@ -61,5 +61,5 @@ Where a doc says "the fork" or "our fork" generically, that's Tengu.
   about an hour of config, and it moves the economics more than everything else combined.
 - **Interruption is the normal case**, not an error path. The governor halts several times a day, so
   sub-sub-task checkpoints (commit + ledger status, `verify`-before-act) are the execution model.
-- **Two profiles**: personal (one executor, departments as labels) and work (one agent per service,
+- **Two instances**: personal (one executor, departments as labels) and work (one agent per service,
   plus a council that plans across them). `JINN_INSTANCE` makes this free.

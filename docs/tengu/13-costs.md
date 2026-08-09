@@ -91,7 +91,7 @@ comparisons (including this one, by the time you read it).
 
 ### What I'd actually get
 
-| Profile | Spec | Price/mo | Reasoning |
+| Instance | Spec | Price/mo | Reasoning |
 |---|---|---|---|
 | **Personal** | 4 vCPU / 8 GB (Vultr, Linode, or DO Basic) | **$40–48** | D7's sequential-by-default posture — one repo, one active session, this is genuinely plenty |
 | **Work** | 4 vCPU / 16 GB (Vultr High Frequency) or 8 vCPU / 16 GB | **$96–126** | 5 service repos checked out simultaneously, occasional D8 fan-out (cap 3), Android Gradle CLI builds (the Gradle daemon is memory-hungry) |
@@ -137,7 +137,7 @@ these providers. Not required, but worth knowing before being surprised by the f
 ## Bottom line
 
 - **Desktop app:** ~155 on the 100-scale for a real one; don't build the naive version.
-- **Hosting, personal profile:** **$40–48/month.**
-- **Hosting, work profile:** **$96–126/month.**
+- **Hosting, personal instance:** **$40–48/month.**
+- **Hosting, work instance:** **$96–126/month.**
 - **Add iOS/real emulator later:** **+$100–150/month** (MacStadium), separately, only when it's real.
 - **"Runs forever after I close the tab":** already designed — step 13, a systemd unit, nothing new.

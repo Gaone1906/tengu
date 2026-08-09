@@ -149,7 +149,7 @@ security-officer blocks, add a filtered lens on the existing `/logs` (Activity) 
 page — tag security events distinctly (icon + `--system-red`), reuse the page's existing timeline
 renderer. This mirrors how the stand-up surfaces incidents inline rather than as a separate concern.
 
-### 6. Profile switcher (personal/work) — likely already solved, needs verifying not building
+### 6. Instance switcher (personal/work) — likely already solved, needs verifying not building
 
 The rail footer already has a `WorkspaceSwitcher`. **Open question, not yet resolved:** does it switch
 between views of one gateway instance's data, or genuinely support pointing at separate
@@ -169,7 +169,7 @@ Everything above reuses an existing pattern. The honest list of what doesn't alr
 3. The Stand-up route itself (new route, existing grouped-list pattern)
 4. The verify-status glyph on sub-sub-tasks (new glyph, existing visual language)
 5. A security lens filter on Activity (new filter, existing renderer)
-6. Possibly nothing for the profile switcher — pending verification
+6. Possibly nothing for the instance switcher — pending verification
 
 That's a small, honest surface — most of "how Tengu looks" is "how Jinn already looks," which is the
 right outcome for a fork whose whole thesis (D1, D11) is reusing as much as legitimately possible.

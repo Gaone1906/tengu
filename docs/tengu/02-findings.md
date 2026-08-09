@@ -121,7 +121,7 @@ until checked.
 `skills.ts`, `workflow-api.ts`, `workflow-approval-caller.ts`, `workflow-todo-binding.ts`,
 `workflow-todo-surface.ts`. Nothing for knowledge, notes, instances, delegation, or dispatch.
 
-## Instances — profiles are a first-class feature
+## Instances are a first-class feature
 
 `shared/home.ts`:
 
@@ -131,7 +131,7 @@ if (process.env.JINN_HOME) return path.resolve(process.env.JINN_HOME);
 ```
 
 `src/instances/` = `access.ts`, `create.ts`, `directory.ts`, `start.ts` (+ tests each). So separate
-profiles need **zero code** — `JINN_INSTANCE=personal` / `JINN_INSTANCE=work`.
+instances need **zero code** — `JINN_INSTANCE=personal` / `JINN_INSTANCE=work`.
 
 ## Workflows — the pipeline primitive
 
