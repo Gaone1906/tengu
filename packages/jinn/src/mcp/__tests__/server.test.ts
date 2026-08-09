@@ -137,6 +137,7 @@ describe("buildTools", () => {
       "read_file",
       "read_knowledge",
       "read_note",
+      "read_repo_chunk",
       "read_session",
       "record_reading",
       "request_work_item_approval",
@@ -145,6 +146,7 @@ describe("buildTools", () => {
       "retry_workflow_node",
       "search_knowledge",
       "search_messages",
+      "search_repo_knowledge",
       "search_sessions",
       "search_work_items",
       "send_connector_message",
@@ -255,7 +257,7 @@ describe("handleMcpRequest — tools/call", () => {
 
   it("compiles every advertised registry schema or supplies its shared runtime schema", () => {
     const tools = buildTools();
-    expect(tools).toHaveLength(69);
+    expect(tools).toHaveLength(71);
     for (const tool of tools) {
       expect(() => tool.runtimeSchema ?? z.fromJSONSchema({ ...tool.inputSchema, additionalProperties: false } as Parameters<typeof z.fromJSONSchema>[0]), tool.name).not.toThrow();
     }

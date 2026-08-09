@@ -249,6 +249,13 @@ export function listChunksForPath(db: Database.Database, filePath: string): Stor
   return (db.prepare("SELECT * FROM kb_chunks WHERE path = ? ORDER BY start_line").all(filePath) as Record<string, unknown>[]).map(rowToChunk)
 }
 
+/** Fetch one chunk by its `kb_chunks.id` — the read half of `read_repo_chunk`,
+ *  given the id a prior `search_repo_knowledge` hit returned. */
+export function getChunkById(db: Database.Database, id: number): StoredChunk | undefined {
+  const row = db.prepare("SELECT * FROM kb_chunks WHERE id = ?").get(id) as Record<string, unknown> | undefined
+  return row ? rowToChunk(row) : undefined
+}
+
 export function countChunks(db: Database.Database): number {
   return db.prepare("SELECT COUNT(*) FROM kb_chunks").pluck().get() as number
 }

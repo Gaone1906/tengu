@@ -9,6 +9,7 @@ import { buildWorkflowTools } from "./workflow-tools.js";
 import { buildSessionTools } from "./session-tools.js";
 import { buildSearchTools } from "./search-tools.js";
 import { buildKnowledgeTools } from "./knowledge-tools.js";
+import { buildRepoKnowledgeTools } from "./repo-knowledge-tools.js";
 import { buildNoteTools } from "./note-tools.js";
 import { buildExperimentTools } from "./experiment-tools.js";
 import { buildDelegationTools } from "./delegation-tools.js";
@@ -122,6 +123,7 @@ export function buildTools(opts?: { notesEnabled?: boolean; workflowAttempt?: bo
     ...buildSessionTools(),
     ...buildSearchTools(),
     ...buildKnowledgeTools(),
+    ...buildRepoKnowledgeTools(),
     ...(notesEnabled ? buildNoteTools() : []),
     ...buildExperimentTools(),
     ...buildCostTools(),

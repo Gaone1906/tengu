@@ -3,11 +3,11 @@ import crypto from "node:crypto";
 import { buildTools } from "../server.js";
 import { projectPiToolManifest } from "../../engines/pi-mcp.js";
 
-// Fixed provider budget. Rebased for Todos v2 slice 5 (attach_to_work_item,
-// list_work_item_attachments, list_departments) with the same ~zero headroom
-// discipline as before: new tool prose must stay concise rather than growing
-// into this ceiling.
-const MAX_MANIFEST_TOKENS = 5477;
+// Fixed provider budget. Rebased for the repo-knowledge pair
+// (search_repo_knowledge, read_repo_chunk — 18-council-specialists.md) with
+// the same ~zero headroom discipline as before: new tool prose must stay
+// concise rather than growing into this ceiling.
+const MAX_MANIFEST_TOKENS = 5603;
 // Exact gate: js-tiktoken 1.0.21 with its local o200k_base ranks. The provider
 // projection is the OpenAI Responses API function-tool request shape pinned on 2026-07-12.
 const ATTESTED = {
@@ -55,9 +55,12 @@ const ATTESTED = {
   // Rebased for the six-tool Experiments ledger. This is a new public company
   // block rather than prose growth on an existing tool; Pi remains five tokens
   // under the fixed ceiling.
-  rpc: { tokens: 4996, sha256: "102e4ff8a759966f01829dfc45f1774e0ac76b520e380317b2c55f572eef1acc" },
-  pi: { tokens: 5472, sha256: "4abbd834ffeec3de76c63a264dd51e512df7808d3a78dd207f030db5bde15dba" },
-  openai: { tokens: 5189, sha256: "1720a40e57b42776e78f9196684efefa17ed57f6e150ff92980b0339dd8f665a" },
+  // Rebased for the repo-knowledge pair (search_repo_knowledge,
+  // read_repo_chunk). Two new tools, not prose growth; Pi remains five tokens
+  // under the raised ceiling.
+  rpc: { tokens: 5107, sha256: "69ef284d4fe7e97da7793abf623533460538d6bef099b0a8d9884ea83ee53b6e" },
+  pi: { tokens: 5598, sha256: "d381266056e84afd099b224cb95a51e4184b470cdf80e69da9ccbf69f5da560c" },
+  openai: { tokens: 5306, sha256: "18c8a28065a0547de3b94ff1989ac1f95c9e409ddc56006dff7701270a876414" },
 } as const;
 
 type TokenizerLoader = () => Promise<[{ Tiktoken: typeof import("js-tiktoken/lite").Tiktoken }, { default: typeof import("js-tiktoken/ranks/o200k_base").default }]>;
@@ -128,6 +131,7 @@ const EXPECTED_TOOL_NAMES = [
   "read_file",
   "read_knowledge",
   "read_note",
+  "read_repo_chunk",
   "read_session",
   "request_work_item_approval",
   "retire_workflow",
@@ -135,6 +139,7 @@ const EXPECTED_TOOL_NAMES = [
   "retry_workflow_node",
   "search_knowledge",
   "search_messages",
+  "search_repo_knowledge",
   "search_sessions",
   "search_work_items",
   "send_to_session",
@@ -200,6 +205,7 @@ const EXPECTED_REQUIRED = {
   read_file: ["path"],
   read_knowledge: ["path"],
   read_note: ["path"],
+  read_repo_chunk: ["chunkId"],
   read_session: ["sessionId"],
   request_work_item_approval: ["id", "request"],
   retire_workflow: ["workflowId", "expectedRevision"],
@@ -207,6 +213,7 @@ const EXPECTED_REQUIRED = {
   retry_workflow_node: ["workflowId", "runId", "nodeId", "idempotencyKey"],
   search_knowledge: ["query"],
   search_messages: ["query"],
+  search_repo_knowledge: ["query"],
   search_sessions: [],
   search_work_items: [],
   send_to_session: ["sessionId", "message"],
@@ -294,7 +301,7 @@ describe("tool manifest budget", () => {
   it("keeps tool names, required arrays, and enum arrays stable", () => {
     const tools = buildTools();
     expect(tools.map((t) => t.name).sort()).toEqual([...EXPECTED_TOOL_NAMES].sort());
-    expect(tools).toHaveLength(69);
+    expect(tools).toHaveLength(71);
 
     const required = Object.fromEntries(tools.map((t) => [t.name, t.inputSchema.required ?? []]));
     expect(required).toEqual(EXPECTED_REQUIRED);

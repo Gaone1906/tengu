@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { buildContext } from "../context.js";
 import type { Employee, JinnConfig, OrgHierarchy } from "../../shared/types.js";
+import { writeManifest, KB_SCHEMA_VERSION } from "../../knowledge-base/manifest.js";
+import { KB_DIR } from "../../shared/paths.js";
 
 // These tests lock the CURRENT output of buildContext after the "context hygiene"
 // refactor: the static COO operating-manual base was dropped (engines auto-ingest
@@ -69,6 +71,85 @@ describe("buildContext — employee mode", () => {
     expect(out).toContain("**Rank**: manager");
     // The COO-only anchor wording must NOT appear for an employee.
     expect(out).not.toContain("COO of the user's AI organization");
+  });
+
+  it("does not mention a knowledge base for a generalist (no repo)", () => {
+    const out = buildContext({ ...baseOpts, employee: minimalEmployee });
+    expect(out).not.toContain("## Your knowledge base");
+    expect(out).not.toContain("search_repo_knowledge");
+  });
+});
+
+describe("buildContext — specialist knowledge base pointer (18-council-specialists.md)", () => {
+  const specialistName = "context-kb-specialist";
+  const specialist: Employee = {
+    ...minimalEmployee,
+    name: specialistName,
+    displayName: "Context KB Specialist",
+    repo: "~/code/example-repo",
+  };
+
+  afterEach(() => {
+    fs.rmSync(path.join(KB_DIR, specialistName), { recursive: true, force: true });
+  });
+
+  it("states the real indexed chunk count from the manifest, in the stable ESSENTIAL tier", () => {
+    writeManifest(specialistName, {
+      employeeName: specialistName,
+      repo: specialist.repo!,
+      lastIndexedAt: new Date().toISOString(),
+      lastIndexedGitSha: "abc123",
+      fileCount: 12,
+      chunkCount: 247,
+      embeddingModel: "Xenova/bge-small-en-v1.5",
+      schemaVersion: KB_SCHEMA_VERSION,
+    });
+
+    const out = buildContext({ ...baseOpts, employee: specialist });
+    expect(out).toContain("## Your knowledge base");
+    expect(out).toContain("Your knowledge base has 247 chunks indexed from `~/code/example-repo`");
+    expect(out).toContain("Call `search_repo_knowledge` before making changes");
+    // Never inline actual chunk content at session start — only the pointer.
+    expect(out).not.toContain("Xenova/bge-small-en-v1.5");
+  });
+
+  it("falls back to 0 chunks when the specialist has no manifest yet (not yet indexed)", () => {
+    const out = buildContext({ ...baseOpts, employee: specialist });
+    expect(out).toContain("Your knowledge base has 0 chunks indexed from `~/code/example-repo`");
+  });
+
+  it("keeps the pointer in the compact summary too, so budget trimming never drops it", () => {
+    writeManifest(specialistName, {
+      employeeName: specialistName,
+      repo: specialist.repo!,
+      lastIndexedAt: new Date().toISOString(),
+      lastIndexedGitSha: "abc123",
+      fileCount: 3,
+      chunkCount: 42,
+      embeddingModel: "Xenova/bge-small-en-v1.5",
+      schemaVersion: KB_SCHEMA_VERSION,
+    });
+
+    // An oversized persona forces the ESSENTIAL identity section to fall back
+    // to its compact summary (same trimming path exercised by the
+    // "maxChars trimming" describe block above) — the KB pointer must
+    // survive that fallback, never just the full-content rendering.
+    const oversizedSpecialist: Employee = {
+      ...specialist,
+      persona: "You own this repo.\n" + "Detailed operating procedure. ".repeat(1000),
+    };
+    const out = buildContext({
+      ...baseOpts,
+      employee: oversizedSpecialist,
+      config: {
+        gateway: { host: "127.0.0.1", port: 7777 },
+        engines: { default: "claude", claude: { model: "opus" } },
+        context: { maxChars: 1200 },
+      } as unknown as JinnConfig,
+    });
+    expect(out.length).toBeLessThanOrEqual(1200);
+    expect(out).toContain("42 chunks indexed at `~/code/example-repo`");
+    expect(out).toContain("search_repo_knowledge before changes");
   });
 });
 

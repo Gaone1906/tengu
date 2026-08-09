@@ -4,6 +4,7 @@ import type { Employee, JinnConfig, OrgHierarchy, OrgNode } from "../shared/type
 import { compactEmployeeRole } from "../shared/employee-role.js";
 import { JINN_HOME, ORG_DIR, CRON_JOBS, DOCS_DIR } from "../shared/paths.js";
 import { gatewayBaseUrl } from "../gateway/gateway-info.js";
+import { readManifest } from "../knowledge-base/manifest.js";
 
 /**
  * Token budget strategy:
@@ -388,6 +389,27 @@ export function buildContext(opts: BuildContextOptions): string {
 // Section builders
 // ═══════════════════════════════════════════════════════════════
 
+/**
+ * Chunk count for a specialist's repo KB (18-council-specialists.md): read
+ * once, at session-build time, from the filesystem-resident manifest — never
+ * per-turn, never the retrieved chunks themselves. Slow-moving metadata (it
+ * only changes when a learning/teaching pass reindexes), so it stays in the
+ * ESSENTIAL/cached tier alongside the rest of the identity section without
+ * defeating engine-side prompt caching the way per-turn retrieval would.
+ */
+function resolveKbChunkCount(employeeName: string): number {
+  return readManifest(employeeName)?.chunkCount ?? 0;
+}
+
+function buildRepoKnowledgeBlock(employee: Employee): string {
+  if (!employee.repo) return "";
+  const chunkCount = resolveKbChunkCount(employee.name);
+  return `
+## Your knowledge base
+Your knowledge base has ${chunkCount} chunks indexed from \`${employee.repo}\`. Call \`search_repo_knowledge\` before making changes — retrieved chunks arrive per-turn via the tool, never inlined here.
+`;
+}
+
 function buildEmployeeIdentity(
   employee: Employee,
   portalName: string,
@@ -431,7 +453,7 @@ ${languageInstruction}
 - **Rank**: ${employee.rank}
 - **Engine**: ${employee.engine}
 - **Model**: ${employee.model}
-${chainOfCommand}
+${chainOfCommand}${buildRepoKnowledgeBlock(employee)}
 ${systemContext}`;
 }
 
@@ -463,6 +485,9 @@ function buildEmployeeIdentitySummary(
     ...prohibitionLines,
     node?.parentName
       ? `Manager: ${manager?.displayName ?? node.parentName} (\`${node.parentName}\`)`
+      : undefined,
+    employee.repo
+      ? `KB: ${resolveKbChunkCount(employee.name)} chunks indexed at \`${employee.repo}\` — search_repo_knowledge before changes.`
       : undefined,
   ].filter(Boolean).join("\n");
 }

@@ -6256,6 +6256,54 @@ export async function handleApiRequest(
       });
     }
 
+    // GET /api/specialists/:name/kb/search — the sole RAG read path into a
+    // specialist's KB (18-council-specialists.md): index-only, capped hits,
+    // never inlines a whole file. `mcp/repo-knowledge-tools.ts` resolves
+    // `:name` from the calling session's own bound employee — never from a
+    // caller-supplied argument — before ever reaching this route.
+    params = matchRoute("/api/specialists/:name/kb/search", pathname);
+    if (method === "GET" && params) {
+      const { scanOrg } = await import("./org.js");
+      const emp = scanOrg(context.getConfig()).get(params.name);
+      if (!emp) return notFound(res);
+      if (!emp.repo) return badRequest(res, `"${params.name}" is not a specialist (no repo configured)`);
+      const q = readCleanSearchParam(url, "q");
+      if (!q) return badRequest(res, "q is required");
+      if (q.length > SEARCH_QUERY_ROUTE_CHAR_CAP) {
+        return badRequest(res, `q is too long (${q.length} chars, max ${SEARCH_QUERY_ROUTE_CHAR_CAP}) — shorten the query`);
+      }
+      const kRaw = parseInt(url.searchParams.get("k") || "", 10);
+      const k = Number.isFinite(kRaw) && kRaw > 0 ? kRaw : undefined;
+      const { retrieveForTask } = await import("../knowledge-base/retrieval.js");
+      try {
+        const chunks = k === undefined
+          ? await retrieveForTask({ name: emp.name }, q)
+          : await retrieveForTask({ name: emp.name }, q, k);
+        return json(res, { chunks });
+      } catch (err) {
+        logger.error(`KB search failed for "${emp.name}": ${err instanceof Error ? err.message : String(err)}`);
+        return json(res, { error: "repo knowledge search failed" }, 500);
+      }
+    }
+
+    // GET /api/specialists/:name/kb/chunks/:chunkId — read one full chunk by
+    // id (from a prior kb/search hit). Same self-resolved-`:name` contract as
+    // the search route above.
+    params = matchRoute("/api/specialists/:name/kb/chunks/:chunkId", pathname);
+    if (method === "GET" && params) {
+      const { scanOrg } = await import("./org.js");
+      const emp = scanOrg(context.getConfig()).get(params.name);
+      if (!emp) return notFound(res);
+      if (!emp.repo) return badRequest(res, `"${params.name}" is not a specialist (no repo configured)`);
+      const chunkId = parseInt(params.chunkId, 10);
+      if (!Number.isFinite(chunkId)) return badRequest(res, "chunkId must be an integer");
+      const { initKbDb, getChunkById } = await import("../knowledge-base/store.js");
+      const db = initKbDb(emp.name);
+      const chunk = getChunkById(db, chunkId);
+      if (!chunk) return notFound(res);
+      return json(res, { chunk });
+    }
+
     // GET /api/skills
     if (method === "GET" && pathname === "/api/skills") {
       if (!fs.existsSync(SKILLS_DIR)) return json(res, []);

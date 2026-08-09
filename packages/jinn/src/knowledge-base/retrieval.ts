@@ -25,6 +25,8 @@ export interface RetrieveOptions {
 }
 
 export interface RetrievedChunk {
+  /** `kb_chunks.id` — pass this to `read_repo_chunk` for the full, untruncated text. */
+  id: number
   path: string
   startLine: number
   endLine: number
@@ -49,6 +51,7 @@ function boundToCharBudget(hits: readonly ChunkSearchHit[], maxTotalChars: numbe
     const fits = hit.text.length <= remaining
     const text = fits ? hit.text : hit.text.slice(0, remaining)
     result.push({
+      id: hit.id,
       path: hit.path,
       startLine: hit.startLine,
       endLine: hit.endLine,
